@@ -658,7 +658,13 @@ impl BluetoothPort for BluetoothSession {
                 errors.push(format!("Remount requires rediscovery: {error}"));
                 break;
             }
-            let current = discover()?;
+            let current = match discover() {
+                Ok(value) => value,
+                Err(error) => {
+                    errors.push(error);
+                    break;
+                }
+            };
             if current.candidates.iter().any(|c| {
                 c.ancestor == self.session.target.ancestor
                     && c.disks

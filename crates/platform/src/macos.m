@@ -110,7 +110,7 @@ void *gu_watch_open(void) {
     watch->queue=dispatch_queue_create("lol.mjc.gulikit-usb-watch",DISPATCH_QUEUE_SERIAL);
     IONotificationPortSetDispatchQueue(watch->port,watch->queue);
     if (IOServiceAddMatchingNotification(watch->port,kIOFirstMatchNotification,IOServiceMatching("IOUSBHostDevice"),watch_event,watch,&watch->added) || IOServiceAddMatchingNotification(watch->port,kIOTerminatedNotification,IOServiceMatching("IOUSBHostDevice"),watch_event,watch,&watch->removed)) {
-        IONotificationPortDestroy(watch->port);if(watch->added)IOObjectRelease(watch->added);if(watch->removed)IOObjectRelease(watch->removed);free(watch);return NULL;
+        IONotificationPortDestroy(watch->port);dispatch_sync(watch->queue,^{});if(watch->added)IOObjectRelease(watch->added);if(watch->removed)IOObjectRelease(watch->removed);watch->queue=nil;free(watch);return NULL;
     }
     dispatch_sync(watch->queue, ^{watch_event(watch,watch->added);watch_event(watch,watch->removed);});
     return watch;

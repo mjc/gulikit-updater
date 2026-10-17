@@ -15,7 +15,8 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
     use gulikit_core::{
         package::Component,
         update::{
-            BluetoothPort, Outcome, Verification, update_bluetooth, update_main, verify_restart,
+            BluetoothPort, Outcome, TransferRecord, Verification, update_bluetooth, update_main,
+            verify_restart,
         },
         version::bluetooth_info,
     };
@@ -78,16 +79,45 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             writeln!(journal).map_err(|e| e.to_string())?;
             journal.sync_all().map_err(|e| e.to_string())?;
             let mut result = match component {
-                Component::Main => {
-                    let mut port = Recorded::new(session.main()?, &mut journal);
-                    update_main(&mut port, &package, || cancelled.load(Ordering::SeqCst))
+                Component::Main => match session.main() {
+                    Ok(port) => {
+                        update_main(&mut Recorded::new(port, &mut journal), &package, || {
+                            cancelled.load(Ordering::SeqCst)
+                        })
+                    }
+                    Err(error) => TransferRecord {
+                        error: Some(error),
+                        ..TransferRecord::default()
+                    },
+                },
+                Component::Bluetooth => match session.bluetooth() {
+                    Ok(port) => {
+                        update_bluetooth(&mut Recorded::new(port, &mut journal), &package, || {
+                            cancelled.load(Ordering::SeqCst)
+                        })
+                    }
+                    Err(error) => TransferRecord {
+                        error: Some(error),
+                        ..TransferRecord::default()
+                    },
+                },
+            };
+            let action = match result.outcome {
+                Outcome::TransferCompletedAwaitingVerification
+                | Outcome::TransferSubmittedPendingCompletion => {
+                    "Power off and on normally, re-enter update mode, then use verify with this record and confirm the same physical controller. Transfer completion does not verify installation."
                 }
-                Component::Bluetooth => {
-                    let mut port = Recorded::new(session.bluetooth()?, &mut journal);
-                    update_bluetooth(&mut port, &package, || cancelled.load(Ordering::SeqCst))
+                Outcome::OutcomeUnknown => {
+                    "Keep the cable connected. No retry or resume will be attempted. Use the documented recovery procedure if needed, then obtain a fresh independent version observation."
+                }
+                Outcome::AlreadyCurrent => {
+                    "This component is already current. No firmware bytes were sent."
+                }
+                _ => {
+                    "No firmware transfer was completed. Address the recorded refusal before starting a new session."
                 }
             };
-            let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"transfer":result,"restart":"Power off and on normally, re-enter update mode, then use verify with this record and confirm the same physical controller. Transfer completion does not verify installation."});
+            let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"transfer":result,"operator_action":action});
             if let Err(e) = (|| -> Result<(), String> {
                 serde_json::to_writer(&mut journal, &value).map_err(|e| e.to_string())?;
                 writeln!(journal).map_err(|e| e.to_string())?;
