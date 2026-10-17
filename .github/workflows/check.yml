@@ -21,6 +21,8 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
+      - if: runner.os == 'macOS'
+        run: brew install libusb pkg-config
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --all-features --locked

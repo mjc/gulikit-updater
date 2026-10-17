@@ -5,7 +5,7 @@
     toolchainFile = ./rust-toolchain.toml;
   };
 
-  packages = with pkgs; [ cargo-nextest python3 uv ];
+  packages = with pkgs; [ cargo-nextest python3 uv libusb1 pkg-config ];
 
   tasks."check:all".exec = ''
     set -euo pipefail

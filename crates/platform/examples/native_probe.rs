@@ -3,6 +3,10 @@ fn main() -> Result<(), String> {
     use gulikit_core::update::BluetoothPort;
     use gulikit_platform::macos::{Session, discover};
     println!(
+        "Linked libusb: {}",
+        gulikit_platform::usb::backend_version()
+    );
+    println!(
         "{}",
         serde_json::to_string_pretty(&discover()?).map_err(|e| e.to_string())?
     );
