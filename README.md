@@ -40,7 +40,8 @@ stdout; runtime errors go to stderr with an empty stdout. Exit codes are 0 for
 successful inspection, an already-current component, or verified installation;
 2 for command-line usage; 3 for rejected firmware; 4 for package/output I/O;
 5 for device/preflight refusal; 7 for a transfer awaiting completion or restart
-verification; and 9 for an uncertain outcome after firmware submission.
+verification; 8 for cleanup or host audit persistence that requires attention;
+and 9 for an uncertain outcome after firmware submission.
 
 Put only one controller in update mode. `--confirm-ns39` attests that you checked
 the physical NS39 label and Max controls. USB IDs and the shared F1 signature

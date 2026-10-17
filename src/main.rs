@@ -225,6 +225,16 @@ fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
     native::execute(command, package).map_err(|e| ("device_refused", 5, e))
 }
 fn outcome_code(value: &serde_json::Value) -> u8 {
+    if value.pointer("/transfer/outcome").and_then(|v| v.as_str()) == Some("outcome_unknown") {
+        return 9;
+    }
+    if value
+        .pointer("/transfer/cleanup_errors")
+        .and_then(|v| v.as_array())
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return 8;
+    }
     match value.pointer("/transfer/outcome").and_then(|v| v.as_str()) {
         Some("already_current" | "installed_verified") | None => 0,
         Some(
@@ -251,6 +261,13 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cleanup_failure_cannot_have_a_success_exit_status() {
+        let value = serde_json::json!({"transfer":{"outcome":"already_current","cleanup_errors":["remount failed"]}});
+        assert_eq!(outcome_code(&value), 8);
+        let unknown = serde_json::json!({"transfer":{"outcome":"outcome_unknown","cleanup_errors":["remount failed"]}});
+        assert_eq!(outcome_code(&unknown), 9);
+    }
     #[test]
     fn json_envelope_replaces_existing_schema_marker() {
         let mut out = Vec::new();
