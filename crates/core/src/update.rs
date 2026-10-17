@@ -55,12 +55,10 @@ pub struct Verification {
     pub model_confirmed: bool,
     /// Canonical component-specific text from a successful fresh version parser.
     pub version: String,
+    /// Target version from the validated package metadata in the original attempt.
+    pub expected_version: String,
 }
 pub fn verify_restart(previous: Outcome, observation: &Verification) -> Outcome {
-    let expected = match observation.component {
-        Component::Main => "5.9",
-        Component::Bluetooth => "5.07",
-    };
     if matches!(
         previous,
         Outcome::TransferCompletedAwaitingVerification
@@ -68,7 +66,8 @@ pub fn verify_restart(previous: Outcome, observation: &Verification) -> Outcome 
     ) && observation.generation != observation.previous_generation
         && observation.same_unit_confirmed
         && observation.model_confirmed
-        && observation.version == expected
+        && !observation.expected_version.is_empty()
+        && observation.version == observation.expected_version
     {
         Outcome::InstalledVerified
     } else {

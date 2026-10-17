@@ -146,11 +146,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 .collect::<Result<_, _>>()
                 .map_err(|e| e.to_string())?;
             let prior=records.last().filter(|v|v["event"]=="attempt_result").ok_or("Attempt has no complete result; use probe for an independent version observation")?;
-            let component = prior["package"]["component"]
-                .as_str()
-                .ok_or("Missing component")?
-                .parse::<Component>()
-                .map_err(|e| e.to_string())?;
+            let (component, expected_version) = attempt_target(prior)?;
             let previous: Outcome = serde_json::from_value(prior["transfer"]["outcome"].clone())
                 .map_err(|e| e.to_string())?;
             let generation = prior["target"]["generation"]
@@ -161,7 +157,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let mut journal = session.create_record(&record)?;
             write_event(
                 &mut journal,
-                &json!({"event":"verification_started","schema_version":1,"source_attempt":attempt,"prior_result":prior,"target":target,"same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity"}),
+                &json!({"event":"verification_started","schema_version":1,"source_attempt":record_path(&attempt),"prior_result":prior,"target":target,"same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity"}),
             )?;
             let (readback, cleanup, qualified_lun) = match component {
                 Component::Main => match session.main() {
@@ -201,6 +197,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 same_unit_confirmed: confirm_same_controller,
                 model_confirmed: confirm_ns39,
                 version,
+                expected_version,
             });
             let outcome = observation.as_ref().map_or(previous, |observation| {
                 verify_restart(previous, observation)
@@ -210,7 +207,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 &mut journal,
                 json!({
                     "event":"verification_result", "schema_version":1,
-                    "source_attempt":attempt, "verification":observation,
+                    "source_attempt":record_path(&attempt), "verification":observation,
                     "raw_version_bytes":readback.ok(), "qualified_bot_lun":qualified_lun, "target":target,
                     "same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity",
                     "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
@@ -218,5 +215,106 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             ))
         }
         _ => Err("Not a native command".into()),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn attempt_target(prior: &Value) -> Result<(gulikit_core::package::Component, String), String> {
+    let component = prior["package"]["component"]
+        .as_str()
+        .ok_or("Missing component")?
+        .parse::<gulikit_core::package::Component>()
+        .map_err(|e| e.to_string())?;
+    let version = prior["package"]["version"]
+        .as_str()
+        .ok_or("Missing package version")?;
+    let package = &prior["package"];
+    let recognized = gulikit_core::package::catalog().iter().any(|release| {
+        let metadata = serde_json::to_value(release).expect("catalog metadata serializes");
+        [
+            "model",
+            "component",
+            "version",
+            "payload_size",
+            "payload_sha256",
+            "archive_sha256",
+            "member",
+            "source_url",
+        ]
+        .iter()
+        .all(|field| package[*field] == metadata[*field])
+    });
+    if !recognized {
+        return Err(
+            "Original attempt package metadata is not a recognized reviewed release".into(),
+        );
+    }
+    Ok((component, version.into()))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn record_path(path: &std::path::Path) -> Value {
+    let mut value = serde_json::json!({"display": path.to_string_lossy()});
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        value["unix_bytes"] = serde_json::json!(path.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        value["windows_wide"] =
+            serde_json::json!(path.as_os_str().encode_wide().collect::<Vec<_>>());
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn verification_refuses_unrecognized_or_inconsistent_original_package_metadata() {
+        let release = &gulikit_core::package::catalog()[0];
+        let mut package = serde_json::to_value(release).unwrap();
+        // Attempt records use PackageInfo rather than the whole catalog entry.
+        package
+            .as_object_mut()
+            .unwrap()
+            .insert("payload_size".into(), serde_json::json!(51500));
+        package.as_object_mut().unwrap().insert(
+            "payload_sha256".into(),
+            serde_json::json!("d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4"),
+        );
+        let prior = serde_json::json!({"package":package});
+        assert_eq!(
+            attempt_target(&prior).unwrap(),
+            (gulikit_core::package::Component::Main, "5.9".into())
+        );
+        for (field, value) in [
+            ("version", serde_json::json!("6.0")),
+            ("payload_sha256", serde_json::json!("wrong")),
+            ("archive_sha256", serde_json::json!("wrong")),
+            ("payload_size", serde_json::json!(0)),
+            ("model", serde_json::json!("kk3-pro")),
+            ("component", serde_json::json!("bluetooth")),
+        ] {
+            let mut invalid = prior.clone();
+            invalid["package"][field] = value;
+            assert!(
+                attempt_target(&invalid).is_err(),
+                "accepted changed {field}"
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn verification_path_preserves_non_utf8_bytes_without_panicking() {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = b"/tmp/attempt-\xff.jsonl";
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(bytes));
+        let value = record_path(path);
+        let roundtrip: Vec<u8> = serde_json::from_value(value["unix_bytes"].clone()).unwrap();
+        assert_eq!(roundtrip, bytes);
+        assert!(value["display"].as_str().unwrap().contains("attempt-"));
     }
 }
