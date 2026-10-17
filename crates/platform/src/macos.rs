@@ -305,6 +305,13 @@ impl Session {
             return Err("Session selected a different component".into());
         }
         self.check()?;
+        if !self.target.storage_identities.iter().any(|identity| {
+            identity.vendor.as_deref() == Some("Gamepad")
+                && identity.product.as_deref() == Some("Updater")
+                && identity.revision.as_deref() == Some("1.00")
+        }) {
+            return Err("Bluetooth requires the observed Gamepad/Updater/1.00 update profile. Exit the current mode normally, then enter Gear/Set+A Bluetooth mode and rediscover.".into());
+        }
         let mut port = BluetoothSession {
             session: self,
             usb: None,
@@ -313,6 +320,7 @@ impl Session {
             last_opcode: 0,
             continuation_used: false,
             sense_used: false,
+            write_gate: BluetoothWriteGate::default(),
         };
         let result = (|| {
             for disk in port.session.target.disks.clone() {
@@ -575,6 +583,35 @@ impl BulkIo for NativeUsb {
     }
 }
 
+#[derive(Default)]
+struct BluetoothWriteGate {
+    fresh_f1: bool,
+    prepared: bool,
+}
+impl BluetoothWriteGate {
+    fn observe_f1(&mut self, raw: &[u8]) -> Result<(), String> {
+        self.fresh_f1 = false;
+        self.prepared = false;
+        gulikit_core::version::bluetooth_info(raw)
+            .map_err(|error| format!("{error}; raw={raw:02x?}"))?;
+        self.fresh_f1 = true;
+        Ok(())
+    }
+    fn begin_f1(&mut self) {
+        *self = Self::default();
+    }
+    fn prepare(&mut self, lun: Option<u8>, failed: bool) -> Result<(), String> {
+        self.prepared = false;
+        if !self.fresh_f1 || lun != Some(0) || failed {
+            return Err(
+                "Bluetooth writing requires a fresh valid F1 in this qualified LUN0 session".into(),
+            );
+        }
+        self.prepared = true;
+        Ok(())
+    }
+}
+
 pub struct BluetoothSession {
     session: Session,
     usb: Option<bot::Session<NativeUsb>>,
@@ -583,6 +620,7 @@ pub struct BluetoothSession {
     last_opcode: u8,
     continuation_used: bool,
     sense_used: bool,
+    write_gate: BluetoothWriteGate,
 }
 impl BluetoothSession {
     fn native(&mut self) -> Result<&mut NativeUsb, String> {
@@ -759,7 +797,16 @@ impl BluetoothPort for BluetoothSession {
         self.usb.as_ref().and_then(bot::Session::qualified_lun)
     }
     fn prepare_write(&mut self) -> Result<(), String> {
-        Err("Native Bluetooth writes remain gated until address, zero-tail F1 and ownership qualification succeed".into())
+        self.write_gate.prepared = false;
+        self.check_session()?;
+        let channel = self.usb.as_ref().ok_or("No exclusive USB claim")?;
+        self.write_gate
+            .prepare(channel.qualified_lun(), channel.failed())?;
+        if let Err(error) = self.check_session() {
+            self.write_gate.prepared = false;
+            return Err(error);
+        }
+        Ok(())
     }
     fn check_session(&mut self) -> Result<(), String> {
         if self.finished {
@@ -768,16 +815,33 @@ impl BluetoothPort for BluetoothSession {
         self.session.check_transport()
     }
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
-        if !matches!(opcode, 0xf0..=0xf2) {
-            return Err("Unreviewed vendor opcode".into());
+        if opcode == 0xf1 {
+            self.write_gate.begin_f1();
         }
-        // F1 must qualify this native adapter before the hardware write gate can be enabled.
-        if opcode != 0xf1 {
-            return Err("Native Bluetooth writes remain gated until zero-tail F1 and ownership qualification succeed".into());
+        self.check_session()?;
+        let channel = self.usb.as_ref().ok_or("No exclusive USB claim")?;
+        if channel.failed() {
+            return Err("BOT session already failed".into());
+        }
+        match opcode {
+            0xf1 if !channel.firmware_may_have_been_submitted() && data.is_empty() => {}
+            0xf0 if self.write_gate.prepared
+                && channel.qualified_lun() == Some(0)
+                && data.len() == 512 => {}
+            0xf2 if self.write_gate.prepared
+                && channel.qualified_lun() == Some(0)
+                && channel.firmware_may_have_been_submitted()
+                && data.is_empty() => {}
+            _ => {
+                return Err(
+                    "Vendor command is not authorized in the current Bluetooth transaction state"
+                        .into(),
+                );
+            }
         }
         let mut cdb = [0; 10];
         cdb[0] = opcode;
-        self.bot(
+        let raw = self.bot(
             &cdb,
             if opcode == 0xf0 {
                 Direction::Out
@@ -786,7 +850,12 @@ impl BluetoothPort for BluetoothSession {
             },
             data,
             if opcode == 0xf0 { 512 } else { 20 },
-        )
+        )?;
+        self.check_session()?;
+        if opcode == 0xf1 {
+            self.write_gate.observe_f1(&raw)?;
+        }
+        Ok(raw)
     }
     fn finish(&mut self) -> Result<(), String> {
         if self.finished {
@@ -861,6 +930,28 @@ mod tests {
     use super::{
         NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
     };
+    #[test]
+    fn bluetooth_write_gate_requires_fresh_valid_f1_and_qualified_live_bot() {
+        let mut gate = super::BluetoothWriteGate::default();
+        assert!(gate.prepare(Some(0), false).is_err());
+        let mut raw = gulikit_core::version::BT_SIGNATURE.to_vec();
+        raw.extend_from_slice(&[0x43, 1, 0, 0]);
+        gate.observe_f1(&raw).unwrap();
+        assert!(gate.prepare(Some(1), false).is_err());
+        assert!(gate.prepare(None, false).is_err());
+        assert!(gate.prepare(Some(0), true).is_err());
+        gate.prepare(Some(0), false).unwrap();
+        assert!(gate.prepared);
+        gate.begin_f1();
+        assert!(!gate.prepared);
+        assert!(gate.prepare(Some(0), false).is_err());
+        gate.observe_f1(&raw).unwrap();
+        gate.prepare(Some(0), false).unwrap();
+        raw[0] = 0;
+        assert!(gate.observe_f1(&raw).is_err());
+        assert!(!gate.prepared);
+        assert!(gate.prepare(Some(0), false).is_err());
+    }
     #[test]
     fn max_lun_accepts_only_a_zero_byte_stall_as_the_single_lun_fallback() {
         const STALL: i32 = 0xe000404f_u32 as i32;
