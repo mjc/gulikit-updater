@@ -113,6 +113,45 @@ impl Default for TransferRecord {
     }
 }
 
+/// A refusal before I/O is distinct from a failure after submission may have begun.
+/// Adapters may return `before` only when no part of this operation was submitted.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct SubmissionError {
+    pub message: String,
+    pub may_have_been_submitted: bool,
+    pub audit_failure: bool,
+}
+impl SubmissionError {
+    pub fn before(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            may_have_been_submitted: false,
+            audit_failure: false,
+        }
+    }
+    pub fn audit_before(message: impl Into<String>) -> Self {
+        Self {
+            audit_failure: true,
+            ..Self::before(message)
+        }
+    }
+}
+impl From<String> for SubmissionError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            may_have_been_submitted: true,
+            audit_failure: false,
+        }
+    }
+}
+impl From<&str> for SubmissionError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
 /// An exclusive, quiesced transport bound to one attachment and a live topology watcher.
 /// Each command must validate OS success, exact data length and passed transport status.
 /// Implementations must never retry a submitted vendor command or automatically reset
@@ -128,7 +167,7 @@ pub trait BluetoothPort {
     /// Refuse unsupported/unqualified writes before any submission is recorded.
     fn prepare_write(&mut self) -> Result<(), String>;
     fn check_session(&mut self) -> Result<(), String>;
-    fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String>;
+    fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError>;
     /// Release claims on every exit; report restoration or preservation pending.
     /// No-reset surrender after F0 may deliberately leave storage drivers detached.
     fn finish(&mut self) -> Result<(), String>;
@@ -177,7 +216,6 @@ fn bluetooth_release(
         version_policy: policy,
         ..TransferRecord::default()
     };
-    let mut submitted = false;
     let result = (|| -> Result<(), String> {
         if cancelled() {
             record.outcome = Outcome::CancelledBeforeWrite;
@@ -205,7 +243,7 @@ fn bluetooth_release(
         port.prepare_write()?;
         for (index, block) in payload.as_chunks::<512>().0.iter().enumerate() {
             if cancelled() {
-                if !submitted {
+                if record.bytes_submitted == 0 {
                     record.outcome = Outcome::CancelledBeforeWrite;
                     return Ok(());
                 }
@@ -215,8 +253,6 @@ fn bluetooth_release(
                 );
             }
             port.check_session()?;
-            submitted = true;
-            record.bytes_submitted += block.len();
             command(port, &mut record, 0xf0, block)?;
             record.bytes_confirmed += block.len();
             if index == 0 || index + 1 == block_count {
@@ -236,7 +272,7 @@ fn bluetooth_release(
     })();
     if let Err(error) = result {
         record.error = Some(error);
-        record.outcome = if submitted {
+        record.outcome = if record.bytes_submitted > 0 {
             Outcome::OutcomeUnknown
         } else {
             Outcome::Refused
@@ -257,21 +293,32 @@ fn command(
     let requested = if opcode == 0xf0 { 512 } else { 20 };
     let result = port.command(opcode, data).and_then(|response| {
         if response.len() != if opcode == 0xf0 { 0 } else { 20 } {
-            return Err(format!(
-                "Short/invalid vendor response: {} bytes",
-                response.len()
-            ));
+            return Err(format!("Short/invalid vendor response: {} bytes", response.len()).into());
         }
         Ok(response)
     });
+    if opcode == 0xf0
+        && result
+            .as_ref()
+            .map_or_else(|error| error.may_have_been_submitted, |_| true)
+    {
+        record.bytes_submitted += data.len();
+    }
+    if let Err(error) = &result
+        && error.audit_failure
+    {
+        record
+            .cleanup_errors
+            .push(format!("Host audit failure: {}", error.message));
+    }
     record.commands.push(CommandRecord {
         index: record.commands.len(),
         opcode,
         requested,
         confirmed: if result.is_ok() { requested } else { 0 },
-        error: result.as_ref().err().cloned(),
+        error: result.as_ref().err().map(|error| error.message.clone()),
     });
-    result
+    result.map_err(|error| error.message)
 }
 
 /// A mounted, writable, verified root held open throughout the operation.
@@ -297,7 +344,7 @@ pub trait MainPort {
     fn read_version(&mut self) -> Result<Vec<u8>, String>;
     fn check_session(&mut self) -> Result<(), String>;
     fn create_destination(&mut self) -> Result<(), DestinationCreationError>;
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, String>;
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, SubmissionError>;
     fn flush(&mut self) -> Result<(), String>;
     fn close(&mut self) -> Result<(), String>;
     fn volume_flush(&mut self) -> Result<(), String>;
@@ -380,10 +427,29 @@ fn main_transfer(
             }
             port.check_session()?;
             let bytes = &payload[offset..(offset + 4096).min(payload.len())];
-            record.bytes_submitted += bytes.len();
-            let count = port.write(bytes)?;
-            if count == 0 || count > bytes.len() {
-                return Err("Invalid or zero-progress filesystem write".into());
+            let count = match port.write(bytes) {
+                Ok(count) if count <= bytes.len() => {
+                    record.bytes_submitted += count;
+                    count
+                }
+                Ok(_) => {
+                    record.bytes_submitted += bytes.len();
+                    return Err("Invalid filesystem write count".into());
+                }
+                Err(error) => {
+                    if error.may_have_been_submitted {
+                        record.bytes_submitted += bytes.len();
+                    }
+                    if error.audit_failure {
+                        record
+                            .cleanup_errors
+                            .push(format!("Host audit failure: {}", error.message));
+                    }
+                    return Err(error.message);
+                }
+            };
+            if count == 0 {
+                return Err("Zero-progress filesystem write".into());
             }
             offset += count;
             record.bytes_confirmed += count;
@@ -450,7 +516,12 @@ mod tests {
             }
             self.event("create").map_err(Into::into)
         }
-        fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        fn write(&mut self, bytes: &[u8]) -> Result<usize, SubmissionError> {
+            if self.fail == Some("write_audit") {
+                return Err(SubmissionError::audit_before(
+                    "host audit failed before Main write",
+                ));
+            }
             self.event("write")?;
             let n = bytes.len().min(79);
             self.written.extend_from_slice(&bytes[..n]);
@@ -502,6 +573,7 @@ mod tests {
             Outcome::TransferCompletedAwaitingVerification
         );
         assert_eq!(port.written, payload);
+        assert_eq!(record.bytes_submitted, payload.len());
         let tail = &port.events[port.events.len() - 5..];
         assert_eq!(tail, ["flush", "close", "volume_flush", "detach", "finish"]);
     }
@@ -606,6 +678,7 @@ mod tests {
         version: u16,
         cleanup: bool,
         refuse_write: bool,
+        audit_before_firmware: bool,
     }
     impl BluetoothPort for Fake {
         fn prepare_write(&mut self) -> Result<(), String> {
@@ -622,7 +695,10 @@ mod tests {
                 Ok(())
             }
         }
-        fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
+        fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError> {
+            if opcode == 0xf0 && self.audit_before_firmware {
+                return Err(SubmissionError::audit_before("host audit failed before F0"));
+            }
             self.calls.push(opcode);
             if self.fail == Some(self.calls.len()) {
                 return Err("timeout after submission".into());
@@ -646,6 +722,45 @@ mod tests {
             self.cleanup = true;
             Ok(())
         }
+    }
+    #[test]
+    fn first_f0_audit_refusal_is_known_zero_submission_and_requires_host_attention() {
+        let mut port = Fake {
+            version: 323,
+            audit_before_firmware: true,
+            ..Fake::default()
+        };
+        let record = bluetooth_release(
+            &mut port,
+            &vec![0; 361472],
+            324,
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(record.outcome, Outcome::Refused);
+        assert_eq!(record.bytes_submitted, 0);
+        assert_eq!(record.bytes_confirmed, 0);
+        assert!(!record.cleanup_errors.is_empty());
+        assert_eq!(port.calls, [0xf1]);
+        assert!(port.bytes.is_empty());
+        assert!(port.cleanup);
+    }
+    #[test]
+    fn first_main_write_audit_refusal_retains_the_created_file_with_zero_submission() {
+        let mut port = main_port();
+        port.fail = Some("write_audit");
+        let record = main_transfer(
+            &mut port,
+            &vec![0; 51500],
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(record.outcome, Outcome::DestinationCreatedWithoutPayload);
+        assert!(record.main_destination_created);
+        assert_eq!(record.bytes_submitted, 0);
+        assert!(!record.cleanup_errors.is_empty());
+        assert_eq!(port.events, ["create", "finish"]);
+        assert!(port.written.is_empty());
     }
     #[test]
     fn selected_324_release_uses_its_target_and_all_706_blocks() {

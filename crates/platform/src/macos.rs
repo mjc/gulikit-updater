@@ -471,8 +471,9 @@ impl MainPort for MainSession {
         self.check_session()?;
         self.volume.create().map_err(Into::into)
     }
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
-        self.check_session()?;
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, gulikit_core::update::SubmissionError> {
+        self.check_session()
+            .map_err(gulikit_core::update::SubmissionError::before)?;
         self.volume.write(bytes)
     }
     fn flush(&mut self) -> Result<(), String> {
@@ -709,7 +710,7 @@ impl BluetoothSession {
     }
     pub fn read_info(&mut self) -> Result<Vec<u8>, String> {
         // command invalidates the previous F1 proof before its first fallible check.
-        self.command(0xf1, &[])
+        self.command(0xf1, &[]).map_err(|error| error.message)
     }
     pub fn inquiry(&mut self) -> Result<Vec<u8>, String> {
         self.check_session()?;
@@ -819,32 +820,8 @@ impl BluetoothSession {
         ))
     }
 }
-impl BluetoothPort for BluetoothSession {
-    fn lun_evidence(&self) -> Option<MaxLun> {
-        self.usb.as_ref().and_then(bot::Session::lun_evidence)
-    }
-    fn qualified_lun(&self) -> Option<u8> {
-        self.usb.as_ref().and_then(bot::Session::qualified_lun)
-    }
-    fn prepare_write(&mut self) -> Result<(), String> {
-        self.write_gate.prepared = false;
-        self.check_session()?;
-        let channel = self.usb.as_ref().ok_or("No exclusive USB claim")?;
-        self.write_gate
-            .prepare(channel.qualified_lun(), channel.failed())?;
-        if let Err(error) = self.check_session() {
-            self.write_gate.prepared = false;
-            return Err(error);
-        }
-        Ok(())
-    }
-    fn check_session(&mut self) -> Result<(), String> {
-        if self.finished {
-            return Err("USB session has ended".into());
-        }
-        self.session.check_transport()
-    }
-    fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
+impl BluetoothSession {
+    fn vendor_command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
         if opcode == 0xf1 {
             self.write_gate.begin_f1();
         }
@@ -886,6 +863,48 @@ impl BluetoothPort for BluetoothSession {
             self.write_gate.observe_f1(&raw)?;
         }
         Ok(raw)
+    }
+}
+impl BluetoothPort for BluetoothSession {
+    fn lun_evidence(&self) -> Option<MaxLun> {
+        self.usb.as_ref().and_then(bot::Session::lun_evidence)
+    }
+    fn qualified_lun(&self) -> Option<u8> {
+        self.usb.as_ref().and_then(bot::Session::qualified_lun)
+    }
+    fn prepare_write(&mut self) -> Result<(), String> {
+        self.write_gate.prepared = false;
+        self.check_session()?;
+        let channel = self.usb.as_ref().ok_or("No exclusive USB claim")?;
+        self.write_gate
+            .prepare(channel.qualified_lun(), channel.failed())?;
+        if let Err(error) = self.check_session() {
+            self.write_gate.prepared = false;
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn check_session(&mut self) -> Result<(), String> {
+        if self.finished {
+            return Err("USB session has ended".into());
+        }
+        self.session.check_transport()
+    }
+    fn command(
+        &mut self,
+        opcode: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>, gulikit_core::update::SubmissionError> {
+        let before = self.usb.as_ref().map(bot::Session::tag);
+        let result = self.vendor_command(opcode, data);
+        let attempted = self.usb.as_ref().map(bot::Session::tag) != before;
+        result.map_err(|message| {
+            if attempted {
+                message.into()
+            } else {
+                gulikit_core::update::SubmissionError::before(message)
+            }
+        })
     }
     fn finish(&mut self) -> Result<(), String> {
         if self.finished {

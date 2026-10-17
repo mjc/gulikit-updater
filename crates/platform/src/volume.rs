@@ -97,13 +97,14 @@ impl Volume {
         ));
         Ok(())
     }
-    pub fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
-        self.check_root()?;
+    pub fn write(&mut self, bytes: &[u8]) -> Result<usize, gulikit_core::update::SubmissionError> {
+        self.check_root()
+            .map_err(gulikit_core::update::SubmissionError::before)?;
         self.destination
             .as_mut()
-            .ok_or("No open firmware file")?
+            .ok_or_else(|| gulikit_core::update::SubmissionError::before("No open firmware file"))?
             .write(bytes)
-            .map_err(|e| e.to_string())
+            .map_err(|error| error.to_string().into())
     }
     pub fn flush(&mut self) -> Result<(), String> {
         self.destination

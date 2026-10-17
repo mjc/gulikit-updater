@@ -1,6 +1,6 @@
 //! Durable host-side operation records around the same ports used by the updater.
 
-use gulikit_core::update::{BluetoothPort, DestinationCreationError, MainPort};
+use gulikit_core::update::{BluetoothPort, DestinationCreationError, MainPort, SubmissionError};
 use serde_json::json;
 use std::{fs::File, io::Write};
 
@@ -56,6 +56,29 @@ impl<'a, P> Recorded<'a, P> {
         writeln!(self.journal).map_err(|e| e.to_string())?;
         self.journal.sync_all().map_err(|e| e.to_string())
     }
+    fn submission_result<T>(
+        &mut self,
+        name: &str,
+        result: Result<T, SubmissionError>,
+        actual: impl FnOnce(&T) -> serde_json::Value,
+    ) -> Result<T, SubmissionError> {
+        let logged = self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err().map(|error| &error.message),"may_have_been_submitted":result.as_ref().map_or_else(|error|error.may_have_been_submitted, |_|true)}));
+        self.index += 1;
+        match (result, logged) {
+            (Err(mut error), Err(log)) => {
+                error.message = format!("{}; audit failure: {log}", error.message);
+                error.audit_failure = true;
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(log)) => Err(SubmissionError {
+                message: format!("Operation completed but audit failed: {log}"),
+                may_have_been_submitted: true,
+                audit_failure: true,
+            }),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
     fn result<T>(
         &mut self,
         name: &str,
@@ -85,10 +108,10 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
     fn check_session(&mut self) -> Result<(), String> {
         self.inner.check_session()
     }
-    fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
-        self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"lun_evidence":self.inner.lun_evidence(),"requested":if opcode==0xf0{data.len()}else{20}}))?;
+    fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError> {
+        self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"lun_evidence":self.inner.lun_evidence(),"requested":if opcode==0xf0{data.len()}else{20}})).map_err(SubmissionError::audit_before)?;
         let result = self.inner.command(opcode, data);
-        self.result("command_result",result,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
+        self.submission_result("command_result",result,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
     }
     fn finish(&mut self) -> Result<(), String> {
         let result = self.inner.finish();
@@ -117,12 +140,13 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
         )
         .map_err(|error| DestinationCreationError { error, created })
     }
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, SubmissionError> {
         self.event(
             json!({"event":"main_write_submitted","index":self.index,"requested":bytes.len()}),
-        )?;
+        )
+        .map_err(SubmissionError::audit_before)?;
         let result = self.inner.write(bytes);
-        self.result("main_write_result", result, |count| json!(count))
+        self.submission_result("main_write_result", result, |count| json!(count))
     }
     fn flush(&mut self) -> Result<(), String> {
         let result = self.inner.flush();
@@ -153,6 +177,7 @@ mod tests {
     struct Fake {
         path: std::path::PathBuf,
         finished: bool,
+        called: bool,
     }
     impl BluetoothPort for Fake {
         fn prepare_write(&mut self) -> Result<(), String> {
@@ -161,7 +186,8 @@ mod tests {
         fn check_session(&mut self) -> Result<(), String> {
             Ok(())
         }
-        fn command(&mut self, opcode: u8, _: &[u8]) -> Result<Vec<u8>, String> {
+        fn command(&mut self, opcode: u8, _: &[u8]) -> Result<Vec<u8>, SubmissionError> {
+            self.called = true;
             let log = std::fs::read_to_string(&self.path).unwrap();
             let event: serde_json::Value =
                 serde_json::from_str(log.lines().last().unwrap()).unwrap();
@@ -175,6 +201,42 @@ mod tests {
         }
     }
     #[test]
+    fn failed_submission_audit_never_calls_transport_and_retains_known_zero_submission() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut readonly = File::open(file.path()).unwrap();
+        let mut port = Recorded::new(
+            Fake {
+                path: file.path().into(),
+                finished: false,
+                called: false,
+            },
+            &mut readonly,
+        );
+        let error = port.command(0xf0, &[0; 512]).unwrap_err();
+        assert!(!error.may_have_been_submitted);
+        assert!(error.audit_failure);
+        assert!(!port.inner.called);
+        assert!(port.finish().is_err());
+        assert!(port.inner.finished);
+    }
+    #[test]
+    fn result_audit_failure_preserves_the_underlying_submission_disposition() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut readonly = File::open(file.path()).unwrap();
+        let mut port = Recorded::new((), &mut readonly);
+        for (result, expected) in [
+            (Err(SubmissionError::before("refused")), false),
+            (Err(SubmissionError::from("uncertain")), true),
+            (Ok(7usize), true),
+        ] {
+            let error = port
+                .submission_result("result", result, |count| json!(count))
+                .unwrap_err();
+            assert_eq!(error.may_have_been_submitted, expected);
+            assert!(error.audit_failure);
+        }
+    }
+    #[test]
     fn command_submission_is_persisted_before_transport_and_error_is_retained() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let path = file.path().to_owned();
@@ -183,12 +245,14 @@ mod tests {
             Fake {
                 path: path.clone(),
                 finished: false,
+                called: false,
             },
             &mut journal,
         );
         assert!(
             port.command(0xf1, &[])
                 .unwrap_err()
+                .message
                 .contains("transport failure")
         );
         port.finish().unwrap();
