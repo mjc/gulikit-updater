@@ -21,7 +21,25 @@ use std::{
 };
 
 unsafe extern "C" {
-    fn gu_snapshot() -> *mut c_char;
+    fn gu_snapshot(bound_id: u64) -> *mut c_char;
+    #[cfg(test)]
+    fn gu_collect_profile_fixture(root: u64, json: *const c_char) -> *mut c_char;
+    #[cfg(test)]
+    fn gu_cached_storage_profile(
+        vendor: *const c_char,
+        product: *const c_char,
+        revision: *const c_char,
+    ) -> i32;
+    #[cfg(test)]
+    fn gu_profile_candidate(
+        vendor: u16,
+        product: u16,
+        bot: i32,
+        name: *const c_char,
+        cached: i32,
+        id: u64,
+        bound: u64,
+    ) -> i32;
     fn gu_free(value: *mut c_void);
     fn gu_watch_open() -> *mut c_void;
     fn gu_watch_epoch(value: *mut c_void) -> u64;
@@ -62,6 +80,13 @@ pub struct Disk {
     pub writable: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct StorageIdentity {
+    pub entry: u64,
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    pub revision: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NativeCandidate {
     pub ancestor: u64,
     pub generation: u64,
@@ -71,6 +96,7 @@ pub struct NativeCandidate {
     pub bluetooth_transport_candidate: bool,
     pub observed_profile: bool,
     pub conflicting_model: bool,
+    pub storage_identities: Vec<StorageIdentity>,
     pub disks: Vec<Disk>,
     pub mount: Option<PathBuf>,
 }
@@ -105,12 +131,34 @@ impl Snapshot {
             .cloned()
             .ok_or_else(|| "Selected attachment vanished".into())
     }
+    fn validate_transport(
+        &self,
+        target: &NativeCandidate,
+        component: Component,
+    ) -> Result<(), String> {
+        let selected = Discovery {
+            candidates: self.candidates.iter().map(NativeCandidate::core).collect(),
+            incomplete: self.incomplete.clone(),
+        }
+        .select(true, component)
+        .map_err(|e| e.to_string())?;
+        if selected.ancestor != target.ancestor || selected.generation != target.generation {
+            return Err("Transport attachment changed".into());
+        }
+        Ok(())
+    }
 }
 pub fn discover() -> Result<Snapshot, String> {
+    discover_bound(0)
+}
+// Only an already selected, held USB entry and unchanged topology may preserve
+// recognition after our own capture removes its cached storage identity node.
+fn discover_bound(bound_id: u64) -> Result<Snapshot, String> {
     // SAFETY: gu_snapshot returns an owned, NUL-terminated allocation or null;
     // gu_free is its matching allocator. No borrowed bridge storage escapes.
     unsafe {
-        let ptr = NonNull::new(gu_snapshot()).ok_or("Native enumeration allocation failed")?;
+        let ptr =
+            NonNull::new(gu_snapshot(bound_id)).ok_or("Native enumeration allocation failed")?;
         let bytes = CStr::from_ptr(ptr.as_ptr()).to_bytes();
         let result = serde_json::from_slice(bytes)
             .map_err(|e| format!("{e}; native snapshot={}", String::from_utf8_lossy(bytes)));
@@ -348,22 +396,10 @@ impl Session {
         if !self.watch.unchanged() {
             return Err("USB topology changed during transport ownership".into());
         }
-        let snapshot = discover()?;
-        let selected = Discovery {
-            candidates: snapshot
-                .candidates
-                .iter()
-                .map(NativeCandidate::core)
-                .collect(),
-            incomplete: snapshot.incomplete,
-        }
-        .select(true, self.component)
-        .map_err(|e| e.to_string())?;
-        if selected.ancestor != self.target.ancestor
-            || selected.generation != self.target.generation
-            || !self.watch.unchanged()
-        {
-            return Err("Transport attachment changed".into());
+        let snapshot = discover_bound(self.target.ancestor)?;
+        snapshot.validate_transport(&self.target, self.component)?;
+        if !self.watch.unchanged() {
+            return Err("USB topology changed during transport discovery".into());
         }
         Ok(())
     }
@@ -810,7 +846,138 @@ pub fn read_main(confirmed: bool) -> Result<(NativeCandidate, Vec<u8>, MainVersi
 
 #[cfg(test)]
 mod tests {
-    use super::transfer_result;
+    use super::{
+        NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
+    };
+    #[test]
+    fn cached_storage_and_bound_capture_recognition_do_not_include_ordinary_bot_disks() {
+        use std::ffi::CString;
+        let text = |value: &str| CString::new(value).unwrap();
+        let vendor = text("Gamepad");
+        let product = text("Updater");
+        let revision = text("1.00");
+        let ordinary = text("Generic");
+        // SAFETY: these stable CString buffers are NUL-terminated for synchronous pure predicates.
+        let cached = unsafe {
+            gu_cached_storage_profile(vendor.as_ptr(), product.as_ptr(), revision.as_ptr())
+        };
+        assert_eq!(cached, 1);
+        assert_eq!(
+            unsafe { gu_profile_candidate(0x1234, 0x5678, 1, ordinary.as_ptr(), cached, 20, 0) },
+            1
+        );
+        assert_eq!(
+            unsafe { gu_profile_candidate(0x1234, 0x5678, 1, ordinary.as_ptr(), 0, 20, 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { gu_profile_candidate(0x34d3, 0x1100, 0, ordinary.as_ptr(), 0, 20, 0) },
+            1
+        );
+        assert_eq!(
+            unsafe { gu_profile_candidate(0x1234, 0x5678, 1, ordinary.as_ptr(), 0, 20, 20) },
+            1
+        );
+        assert_eq!(
+            unsafe { gu_profile_candidate(0x1234, 0x5678, 1, ordinary.as_ptr(), 0, 21, 20) },
+            0
+        );
+        for wrong in ["G", "Gamepad ", "gamepad", " Gamepad"] {
+            let wrong = text(wrong);
+            assert_eq!(
+                unsafe {
+                    gu_cached_storage_profile(wrong.as_ptr(), product.as_ptr(), revision.as_ptr())
+                },
+                0
+            );
+        }
+    }
+    #[test]
+    fn hub_and_sibling_devices_never_inherit_the_controllers_cached_storage_identity() {
+        let nodes = serde_json::json!([
+            {"ancestor":1,"entry":10,"interface":true,"lun":false,"properties":{"bInterfaceClass":9}},
+            {"ancestor":2,"entry":20,"interface":true,"lun":false,"properties":{"bInterfaceClass":8,"bInterfaceSubClass":6,"bInterfaceProtocol":80}},
+            {"ancestor":2,"entry":21,"interface":false,"lun":true,"properties":{"Vendor Identification":"Gamepad","Product Identification":"Updater","Product Revision Level":"1.00"}},
+            {"ancestor":3,"entry":30,"interface":true,"lun":false,"properties":{"bInterfaceClass":8,"bInterfaceSubClass":6,"bInterfaceProtocol":80}},
+            {"ancestor":3,"entry":31,"interface":false,"lun":true,"properties":{"Vendor Identification":"Generic","Product Identification":"USB Disk","Product Revision Level":"1.00"}}
+        ]);
+        let input = std::ffi::CString::new(nodes.to_string()).unwrap();
+        let collect = |root| {
+            // SAFETY: fixture adapter takes one valid CString, returns allocated NUL text.
+            unsafe {
+                let raw = super::gu_collect_profile_fixture(root, input.as_ptr());
+                assert!(!raw.is_null());
+                let value: serde_json::Value =
+                    serde_json::from_slice(std::ffi::CStr::from_ptr(raw).to_bytes()).unwrap();
+                super::gu_free(raw.cast());
+                value
+            }
+        };
+        let hub = collect(1);
+        assert_eq!(hub["bot"], false);
+        assert_eq!(hub["cached"], false);
+        assert!(hub["storage_identities"].as_array().unwrap().is_empty());
+        let controller = collect(2);
+        assert_eq!(controller["bot"], true);
+        assert_eq!(controller["cached"], true);
+        assert_eq!(
+            controller["storage_identities"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(controller["storage_identities"][0]["entry"], 21);
+        let sibling = collect(3);
+        assert_eq!(sibling["bot"], true);
+        assert_eq!(sibling["cached"], false);
+        assert_eq!(sibling["storage_identities"][0]["entry"], 31);
+    }
+    #[test]
+    fn capture_view_loss_preserves_only_the_previously_bound_physical_attachment() {
+        let target: NativeCandidate=serde_json::from_value(serde_json::json!({"ancestor":20,"generation":20,"main_volume_candidate":true,"bluetooth_transport_candidate":true,"observed_profile":true,"conflicting_model":false,"disks":[],"mount":null,"storage_identities":[{"entry":30,"vendor":"Gamepad","product":"Updater","revision":"1.00"}]})).unwrap();
+        let mut captured = target.clone();
+        captured.main_volume_candidate = false;
+        captured.observed_profile = false;
+        captured.storage_identities.clear();
+        let mut snapshot = Snapshot {
+            candidates: vec![captured],
+            incomplete: vec![],
+        };
+        snapshot
+            .validate_transport(&target, gulikit_core::package::Component::Bluetooth)
+            .unwrap();
+        snapshot.candidates[0].generation = 21;
+        assert!(
+            snapshot
+                .validate_transport(&target, gulikit_core::package::Component::Bluetooth)
+                .is_err()
+        );
+        snapshot.candidates[0].generation = 20;
+        snapshot.candidates[0].ancestor = 21;
+        assert!(
+            snapshot
+                .validate_transport(&target, gulikit_core::package::Component::Bluetooth)
+                .is_err()
+        );
+        snapshot.candidates[0].ancestor = 20;
+        let mut other = target.clone();
+        other.ancestor = 22;
+        other.bluetooth_transport_candidate = false;
+        snapshot.candidates.push(other);
+        assert!(
+            snapshot
+                .validate_transport(&target, gulikit_core::package::Component::Bluetooth)
+                .unwrap_err()
+                .starts_with("More than one device")
+        );
+        snapshot.candidates.pop();
+        snapshot
+            .incomplete
+            .push("uncorrelated update volume".into());
+        assert!(
+            snapshot
+                .validate_transport(&target, gulikit_core::package::Component::Bluetooth)
+                .is_err()
+        );
+    }
     #[test]
     fn native_error_and_actual_length_are_independent() {
         let data = [0xa1; 20];

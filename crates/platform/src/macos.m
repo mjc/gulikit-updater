@@ -35,10 +35,50 @@ static uint64_t usb_ancestor(io_registry_entry_t entry) {
 static BOOL bot_profile(NSDictionary *p) {
     return [p[@"bInterfaceClass"] intValue]==8 && [p[@"bInterfaceSubClass"] intValue]==6 && [p[@"bInterfaceProtocol"] intValue]==0x50;
 }
-static NSMutableDictionary *candidate(uint64_t id) {
-    return [@{@"ancestor":@(id),@"generation":@(id),@"main_volume_candidate":@NO,@"bluetooth_transport_candidate":@NO,@"observed_profile":@NO,@"conflicting_model":@NO,@"disks":[NSMutableArray new]} mutableCopy];
+int gu_cached_storage_profile(const char *vendor,const char *product,const char *revision) {
+    return vendor && product && revision && !strcmp(vendor,"Gamepad") && !strcmp(product,"Updater") && !strcmp(revision,"1.00");
 }
-char *gu_snapshot(void) {
+int gu_profile_candidate(uint16_t vendor,uint16_t product,int bot,const char *name,int cached,uint64_t id,uint64_t bound) {
+    @autoreleasepool {
+        NSString *label=name ? [NSString stringWithUTF8String:name] : nil;
+        return (bound && id==bound) || cached || (vendor==0x34d3 && product==0x1100) || (bot && (vendor==0x34d3 || [label.lowercaseString containsString:@"gul"]));
+    }
+}
+static NSMutableDictionary *profile_state(void) {
+    return [@{@"bot":@NO,@"cached":@NO,@"storage_identities":[NSMutableArray new]} mutableCopy];
+}
+static BOOL owned_descendant(uint64_t root,uint64_t nearest) { return root && root==nearest; }
+static void observe_child(uint64_t root,uint64_t nearest,uint64_t entry,BOOL interface,BOOL lun,NSDictionary *p,NSMutableDictionary *state,NSMutableArray *errors) {
+    if (!owned_descendant(root,nearest)) return;
+    if (interface) {
+        if (!p) [errors addObject:@"Interface properties unavailable"];
+        if (bot_profile(p)) state[@"bot"]=@YES;
+    }
+    if (lun) {
+        if (!p) [errors addObject:@"Storage identity properties unavailable"];
+        NSString *vendor=[p[@"Vendor Identification"] isKindOfClass:NSString.class] ? p[@"Vendor Identification"] : nil;
+        NSString *product=[p[@"Product Identification"] isKindOfClass:NSString.class] ? p[@"Product Identification"] : nil;
+        NSString *revision=[p[@"Product Revision Level"] isKindOfClass:NSString.class] ? p[@"Product Revision Level"] : nil;
+        if (gu_cached_storage_profile(vendor.UTF8String,product.UTF8String,revision.UTF8String)) state[@"cached"]=@YES;
+        [state[@"storage_identities"] addObject:@{@"entry":@(entry),@"vendor":vendor ?: NSNull.null,@"product":product ?: NSNull.null,@"revision":revision ?: NSNull.null}];
+    }
+}
+// Fixture adapter for the same aggregation used by live registry enumeration.
+// It accepts already resolved ancestry and never queries IORegistry or USB.
+char *gu_collect_profile_fixture(uint64_t root,const char *json) {
+    @autoreleasepool {
+        NSArray *nodes=[NSJSONSerialization JSONObjectWithData:[[NSString stringWithUTF8String:json] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        NSMutableDictionary *state=profile_state();NSMutableArray *errors=[NSMutableArray new];
+        for (NSDictionary *node in nodes) observe_child(root,[node[@"ancestor"] unsignedLongLongValue],[node[@"entry"] unsignedLongLongValue],[node[@"interface"] boolValue],[node[@"lun"] boolValue],node[@"properties"],state,errors);
+        state[@"errors"]=errors;
+        NSData *data=[NSJSONSerialization dataWithJSONObject:state options:0 error:nil];
+        return data ? strndup(data.bytes,data.length) : NULL;
+    }
+}
+static NSMutableDictionary *candidate(uint64_t id) {
+    return [@{@"ancestor":@(id),@"generation":@(id),@"main_volume_candidate":@NO,@"bluetooth_transport_candidate":@NO,@"observed_profile":@NO,@"conflicting_model":@NO,@"storage_identities":[NSMutableArray new],@"disks":[NSMutableArray new]} mutableCopy];
+}
+char *gu_snapshot(uint64_t bound_id) {
     @autoreleasepool {
         NSMutableDictionary<NSNumber *,NSMutableDictionary *> *devices=[NSMutableDictionary new];
         NSMutableArray *errors=[NSMutableArray new];
@@ -48,24 +88,22 @@ char *gu_snapshot(void) {
         while (iterator && (service=IOIteratorNext(iterator))) {
             NSDictionary *p=properties(service);
             if (!p) [errors addObject:@"USB properties unavailable"];
-            io_iterator_t children=0; BOOL bot=NO;
+            io_iterator_t children=0; NSMutableDictionary *state=profile_state();
             if (IORegistryEntryCreateIterator(service,kIOServicePlane,kIORegistryIterateRecursively,&children)) [errors addObject:@"USB child enumeration failed"];
             io_service_t child;
             while (children && (child=IOIteratorNext(children))) {
-                if (IOObjectConformsTo(child,"IOUSBHostInterface")) {
-                    NSDictionary *ip=properties(child);
-                    if (!ip) [errors addObject:@"Interface properties unavailable"];
-                    if (bot_profile(ip)) bot=YES;
-                }
+                BOOL interface=IOObjectConformsTo(child,"IOUSBHostInterface");BOOL lun=IOObjectConformsTo(child,"IOSCSILogicalUnitNub");
+                if (interface || lun) observe_child(entry_id(service),usb_ancestor(child),entry_id(child),interface,lun,properties(child),state,errors);
                 IOObjectRelease(child);
             }
             if (children) IOObjectRelease(children);
+            BOOL bot=[state[@"bot"] boolValue];BOOL cached=[state[@"cached"] boolValue];NSArray *storage=state[@"storage_identities"];
             BOOL observed=[p[@"idVendor"] intValue]==0x34d3 && [p[@"idProduct"] intValue]==0x1100;
-            BOOL recognized=observed || (bot && ([p[@"idVendor"] intValue]==0x34d3 || [[p[@"USB Vendor Name"] lowercaseString] containsString:@"gul"]));
+            BOOL recognized=gu_profile_candidate([p[@"idVendor"] intValue],[p[@"idProduct"] intValue],bot,[p[@"USB Vendor Name"] UTF8String],cached,entry_id(service),bound_id);
             if (recognized) {
                 uint64_t id=entry_id(service);
                 if (!id) [errors addObject:@"USB attachment ID unavailable"];
-                else { NSMutableDictionary *c=candidate(id);c[@"observed_profile"]=observed ? @YES : @NO;c[@"bluetooth_transport_candidate"]=bot ? @YES : @NO;devices[@(id)]=c; }
+                else { NSMutableDictionary *c=candidate(id);c[@"observed_profile"]=(observed || cached) ? @YES : @NO;c[@"storage_identities"]=storage;c[@"bluetooth_transport_candidate"]=bot ? @YES : @NO;devices[@(id)]=c; }
             }
             IOObjectRelease(service);
         }
@@ -162,6 +200,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         if (kr) {error_text(message,capacity,@"Interface enumeration failed");[transport.device destroy];return NULL;}
         io_service_t child;unsigned matches=0;
         while ((child=IOIteratorNext(children))) {
+            if (!owned_descendant(id,usb_ancestor(child))) {IOObjectRelease(child);continue;}
             if (IOObjectConformsTo(child,"IOUSBHostInterface") && bot_profile(properties(child))) {
                 matches++;
                 if(matches==1) transport.interface=[[IOUSBHostInterface alloc] initWithIOService:child options:0 queue:nil error:&error interestHandler:nil];
