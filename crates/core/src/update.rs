@@ -181,10 +181,230 @@ fn command(
     result
 }
 
+/// A mounted, writable, verified root held open throughout the operation.
+/// Creation is exclusive and does not follow symlinks; cleanup never deletes firmware.
+pub trait MainPort {
+    fn read_version(&mut self) -> Result<Vec<u8>, String>;
+    fn check_session(&mut self) -> Result<(), String>;
+    fn create_destination(&mut self) -> Result<(), String>;
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, String>;
+    fn flush(&mut self) -> Result<(), String>;
+    fn close(&mut self) -> Result<(), String>;
+    fn volume_flush(&mut self) -> Result<(), String>;
+    /// Bounded host wait for automatic controller detach, never an eject/reset.
+    fn wait_for_completion(&mut self) -> Result<bool, String>;
+    fn finish(&mut self) -> Result<(), String>;
+}
+
+pub fn update_main(
+    port: &mut impl MainPort,
+    package: &VerifiedPackage,
+    cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    if package.info().component != Component::Main {
+        let mut record = TransferRecord {
+            error: Some("Main update requires a verified Main package".into()),
+            ..TransferRecord::default()
+        };
+        if let Err(error) = port.finish() {
+            record.cleanup_errors.push(error);
+        }
+        return record;
+    }
+    main_transfer(port, package.payload(), cancelled)
+}
+
+fn main_transfer(
+    port: &mut impl MainPort,
+    payload: &[u8],
+    mut cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    let mut record = TransferRecord::default();
+    let result = (|| -> Result<(), String> {
+        if cancelled() {
+            record.outcome = Outcome::CancelledBeforeWrite;
+            return Ok(());
+        }
+        port.check_session()?;
+        let raw = port.read_version()?;
+        let version = crate::version::MainVersion::parse(&raw).map_err(|e| e.to_string())?;
+        record.prewrite_version = Some(version.to_string());
+        match version.decision() {
+            VersionDecision::AlreadyCurrent => {
+                record.outcome = Outcome::AlreadyCurrent;
+                return Ok(());
+            }
+            VersionDecision::NewerThanSupported => {
+                record.outcome = Outcome::NewerThanSupported;
+                return Ok(());
+            }
+            VersionDecision::Eligible => {}
+        }
+        if payload.len() != 51500 {
+            return Err("Incorrect Main payload size".into());
+        }
+        port.check_session()?;
+        if cancelled() {
+            record.outcome = Outcome::CancelledBeforeWrite;
+            return Ok(());
+        }
+        port.create_destination()?;
+        let mut offset = 0;
+        while offset < payload.len() {
+            if cancelled() {
+                if offset == 0 {
+                    record.outcome = Outcome::CancelledBeforeWrite;
+                    return Ok(());
+                }
+                return Err("Cancelled after firmware submission".into());
+            }
+            port.check_session()?;
+            let bytes = &payload[offset..(offset + 4096).min(payload.len())];
+            record.bytes_submitted += bytes.len();
+            let count = port.write(bytes)?;
+            if count == 0 || count > bytes.len() {
+                return Err("Invalid or zero-progress filesystem write".into());
+            }
+            offset += count;
+            record.bytes_confirmed += count;
+        }
+        port.flush()?;
+        port.close()?;
+        port.volume_flush()?;
+        record.outcome = if port.wait_for_completion()? {
+            Outcome::TransferCompletedAwaitingVerification
+        } else {
+            Outcome::TransferSubmittedPendingCompletion
+        };
+        Ok(())
+    })();
+    if let Err(error) = result {
+        record.error = Some(error);
+        record.outcome = if record.bytes_submitted > 0 {
+            Outcome::OutcomeUnknown
+        } else {
+            Outcome::Refused
+        };
+    }
+    if let Err(error) = port.finish() {
+        record.cleanup_errors.push(error);
+    }
+    record
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::version::BT_SIGNATURE;
+
+    struct MainFake {
+        events: Vec<&'static str>,
+        written: Vec<u8>,
+        version: &'static [u8],
+        fail: Option<&'static str>,
+    }
+    impl MainPort for MainFake {
+        fn read_version(&mut self) -> Result<Vec<u8>, String> {
+            Ok(self.version.to_vec())
+        }
+        fn check_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn create_destination(&mut self) -> Result<(), String> {
+            self.event("create")
+        }
+        fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
+            self.event("write")?;
+            let n = bytes.len().min(79);
+            self.written.extend_from_slice(&bytes[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> Result<(), String> {
+            self.event("flush")
+        }
+        fn close(&mut self) -> Result<(), String> {
+            self.event("close")
+        }
+        fn volume_flush(&mut self) -> Result<(), String> {
+            self.event("volume_flush")
+        }
+        fn wait_for_completion(&mut self) -> Result<bool, String> {
+            self.event("detach")?;
+            Ok(true)
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            self.event("finish")
+        }
+    }
+    impl MainFake {
+        fn event(&mut self, name: &'static str) -> Result<(), String> {
+            self.events.push(name);
+            if self.fail == Some(name) {
+                Err(name.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    fn main_port() -> MainFake {
+        MainFake {
+            events: vec![],
+            written: vec![],
+            version: b"www.gulikit.com\nversion 5.8",
+            fail: None,
+        }
+    }
+    #[test]
+    fn main_handles_short_writes_flushes_open_file_and_waits_for_detach() {
+        let mut port = main_port();
+        let payload = vec![0x83; 51500];
+        let record = main_transfer(&mut port, &payload, || false);
+        assert_eq!(
+            record.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(port.written, payload);
+        let tail = &port.events[port.events.len() - 5..];
+        assert_eq!(tail, ["flush", "close", "volume_flush", "detach", "finish"]);
+    }
+    #[test]
+    fn main_equal_newer_unknown_and_existing_destination_write_nothing() {
+        for text in [
+            b"www.gulikit.com\nversion 5.9".as_slice(),
+            b"www.gulikit.com\nversion 5.10",
+            b"garbage",
+        ] {
+            let mut port = main_port();
+            port.version = text;
+            let result = main_transfer(&mut port, &vec![0; 51500], || false);
+            assert!(matches!(
+                result.outcome,
+                Outcome::AlreadyCurrent | Outcome::NewerThanSupported | Outcome::Refused
+            ));
+            assert!(port.written.is_empty());
+            assert_eq!(port.events, ["finish"]);
+        }
+        let mut port = main_port();
+        port.fail = Some("create");
+        assert_eq!(
+            main_transfer(&mut port, &vec![0; 51500], || false).outcome,
+            Outcome::Refused
+        );
+        assert!(port.written.is_empty());
+    }
+    #[test]
+    fn main_failure_never_turns_later_detach_into_success() {
+        for failure in ["write", "flush", "close", "volume_flush"] {
+            let mut port = main_port();
+            port.fail = Some(failure);
+            assert_eq!(
+                main_transfer(&mut port, &vec![0; 51500], || false).outcome,
+                Outcome::OutcomeUnknown
+            );
+            assert!(!port.events.contains(&"detach"));
+            assert_eq!(port.events.last(), Some(&"finish"));
+        }
+    }
 
     #[derive(Default)]
     struct Fake {
