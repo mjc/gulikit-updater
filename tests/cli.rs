@@ -132,3 +132,33 @@ fn supports_human_catalog_and_rejects_an_unknown_component() {
         .assert()
         .code(2);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn verification_refuses_symlinks_and_fifos_before_device_access() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = directory.path().join("original.jsonl");
+    std::fs::write(&original, b"{}\n").unwrap();
+    let symlink = directory.path().join("link.jsonl");
+    std::os::unix::fs::symlink(&original, &symlink).unwrap();
+    let fifo = directory.path().join("fifo.jsonl");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for path in [symlink, fifo] {
+        let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+            .timeout(std::time::Duration::from_secs(2))
+            .arg("verify")
+            .arg(path)
+            .args(["--confirm-ns39", "--confirm-same-controller", "--json"])
+            .assert()
+            .code(5);
+        let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
+        assert!(error.to_string().contains("regular file"), "{error}");
+    }
+    assert_eq!(std::fs::read(original).unwrap(), b"{}\n");
+}

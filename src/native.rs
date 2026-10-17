@@ -24,8 +24,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
     use gulikit_platform::macos::{Session, discover, read_main};
     use serde_json::json;
     use std::{
-        fs::File,
-        io::{Read, Write},
+        io::Write,
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -137,17 +136,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             confirm_same_controller,
             ..
         } => {
-            let file = File::open(&attempt).map_err(|e| e.to_string())?;
-            if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-                return Err("Attempt record must be a regular file".into());
-            }
-            let mut bytes = Vec::new();
-            file.take(1_048_577)
-                .read_to_end(&mut bytes)
-                .map_err(|e| e.to_string())?;
-            if bytes.len() > 1_048_576 {
-                return Err("Attempt record exceeds its size bound".into());
-            }
+            let bytes = gulikit_platform::journal::read_attempt(&attempt)?;
             let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
             let records: Vec<Value> = text
                 .lines()

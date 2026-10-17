@@ -4,6 +4,40 @@ use gulikit_core::update::{BluetoothPort, MainPort};
 use serde_json::json;
 use std::{fs::File, io::Write};
 
+/// Open the attempt itself without following a symlink or waiting for a FIFO writer.
+#[cfg(unix)]
+pub fn read_attempt(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    use nix::{
+        fcntl::{OFlag, open},
+        sys::stat::Mode,
+    };
+    use std::io::Read;
+    let file = File::from(
+        open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| format!("Attempt record must be a readable regular file: {error}"))?,
+    );
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("Attempt record must be a regular file".into());
+    }
+    const LIMIT: u64 = 1_048_576;
+    if metadata.len() > LIMIT {
+        return Err("Attempt record exceeds its size bound".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("Attempt record exceeds its size bound".into());
+    }
+    Ok(bytes)
+}
+
 pub struct Recorded<'a, P> {
     inner: P,
     journal: &'a mut File,
