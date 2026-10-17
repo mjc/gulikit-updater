@@ -14,20 +14,23 @@ use std::{
 pub struct ProcessLock {
     file: File,
     path: PathBuf,
+    unlock_on_drop: bool,
 }
 impl Drop for ProcessLock {
     fn drop(&mut self) {
         // A concurrently spawned helper may briefly inherit this open file
         // description before exec closes it. Ownership ends with this guard,
         // without waiting for every inherited descriptor to close.
-        let _ = self.file.unlock();
+        if self.unlock_on_drop {
+            let _ = self.file.unlock();
+        }
     }
 }
 impl ProcessLock {
     pub fn acquire() -> Result<Self, String> {
         Self::at(Path::new("/tmp/gulikit-updater.lock"))
     }
-    fn at(path: &Path) -> Result<Self, String> {
+    pub(crate) fn at(path: &Path) -> Result<Self, String> {
         let flags = OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC;
         let descriptor = match open(
             path,
@@ -51,8 +54,39 @@ impl ProcessLock {
         let lock = Self {
             file,
             path: path.to_owned(),
+            unlock_on_drop: true,
         };
         lock.check()?;
+        Ok(lock)
+    }
+    /// Descriptor passed to a Main I/O worker. The guardian retains ownership.
+    pub fn worker_descriptor(&self) -> Result<File, String> {
+        self.check()?;
+        self.file.try_clone().map_err(|error| error.to_string())
+    }
+    pub fn adopt_worker_stderr() -> Result<Self, String> {
+        Self::adopt_worker_descriptor_at(PathBuf::from("/tmp/gulikit-updater.lock"))
+    }
+    pub(crate) fn adopt_worker_descriptor_at(path: PathBuf) -> Result<Self, String> {
+        use std::os::fd::AsFd;
+        let descriptor = std::io::stderr()
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|error| error.to_string())?;
+        Self::inherited(File::from(descriptor), path)
+    }
+    pub fn is_worker_lease(&self) -> bool {
+        !self.unlock_on_drop
+    }
+    fn inherited(file: File, path: PathBuf) -> Result<Self, String> {
+        let lock = Self {
+            file,
+            path,
+            unlock_on_drop: false,
+        };
+        lock.check()?;
+        // Reentrant only for the inherited open file description. Another owner refuses.
+        lock.file.try_lock().map_err(|error| error.to_string())?;
         Ok(lock)
     }
     pub fn check(&self) -> Result<(), String> {
@@ -97,6 +131,18 @@ mod tests {
         drop(inherited);
         next.check().unwrap();
         assert!(ProcessLock::at(&path).is_err());
+    }
+    #[test]
+    fn worker_drop_closes_its_descriptor_without_unlocking_the_guardians_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("updater.lock");
+        let guardian = ProcessLock::at(&path).unwrap();
+        let worker =
+            ProcessLock::inherited(guardian.file.try_clone().unwrap(), path.clone()).unwrap();
+        drop(worker);
+        assert!(ProcessLock::at(&path).is_err());
+        drop(guardian);
+        ProcessLock::at(&path).unwrap();
     }
     #[test]
     fn refuses_symlinks_and_nonempty_files_without_writing_them() {
