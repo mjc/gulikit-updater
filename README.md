@@ -1,14 +1,23 @@
 # GuliKit updater
 
-The updater supports the reviewed KK3 Max NS39 Main 5.9 and Bluetooth 5.07
-packages. The shared Rust core implements both component transactions and
-restart verification. The macOS Bluetooth adapter permits a transaction only after
-fresh F1 identity/version readback on an exclusively held, qualified LUN0 session.
-The NS39 has passed real read-only Bluetooth qualification and reports 3.23;
-actual transfer and post-restart 5.07 verification are still pending. Main version
-inspection works and reports 5.9, correctly returning `already_current` with zero
-firmware writes. Eligible Main updates use supervised filesystem I/O; actual
-Main transfer acceptance is still pending.
+The updater supports reviewed KK3 Max NS39 Main 5.9 and Bluetooth 3.24 / 5.07
+packages. The original ZIP selects the release; the CLI does not silently replace
+that selection with the newest version. The shared Rust core owns component
+transactions and restart verification. Native macOS adapters provide Bluetooth
+transport and supervised Main filesystem updates. Actual-device acceptance is
+tracked separately from portable tests and offline instruction emulation.
+
+| Component | Selected release | Firmware bytes | Bluetooth blocks |
+| --- | --- | ---: | ---: |
+| Main | 5.9 | 51,500 | — |
+| Bluetooth | 3.24 | 361,472 | 706 |
+| Bluetooth | 5.07 | 345,088 | 674 |
+
+The observed NS39 has passed read-only Bluetooth identity/version qualification.
+Firmware transfer completion requires every block and both status checks;
+installation requires a fresh independent read after restarting. Hardware
+acceptance evidence and remaining work live in the linked CLI plan and product
+specification.
 
 ## Development
 
@@ -18,10 +27,12 @@ Use the pinned native devenv from this directory:
 devenv shell
 cargo run -- packages
 cargo run -- package inspect /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main
+cargo run -- package inspect /path/to/NS38_NS39_BT_V3.24.zip --model kk3-max --component bluetooth --json
 cargo run -- package inspect /path/to/GuliKit_NS38_NS39_NS59_BT_V5.07.zip --model kk3-max --component bluetooth --json
 cargo run -- devices --json
 cargo run -- probe --component main --confirm-ns39 --json
 cargo run -- update /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main --confirm-ns39 --record ./main-attempt.jsonl --json
+cargo run -- update /path/to/NS38_NS39_BT_V3.24.zip --model kk3-max --component bluetooth --confirm-ns39 --record ./bt-attempt.jsonl --json
 cargo run -- verify ./main-attempt.jsonl --record ./main-verification.jsonl --confirm-ns39 --confirm-same-controller --json
 devenv tasks run check:all
 ```
@@ -76,7 +87,10 @@ precedes payload submission, the result records `destination_created_without_pay
 and `main_destination_created`, with zero firmware bytes submitted and exit 8.
 The file remains for inspection; another attempt cannot silently overwrite it.
 An incomplete record preserves an interrupted attempt; it does not prove a
-transfer completed. Equal and unknown installed versions write nothing. A newer installed version
+transfer completed. Bluetooth block count and installed-version comparison come from the selected
+reviewed package. Audit refusal before I/O records zero submission; an error after
+submission may have begun retains uncertainty. Equal and unknown installed versions
+write nothing. A newer installed version
 refuses by default; `update --allow-downgrade` explicitly permits installing the
 selected older reviewed release. The record retains that version policy. A downgrade requires a separately reviewed
 older release in the catalog; the current catalog contains no Bluetooth rollback
@@ -106,16 +120,16 @@ cargo nextest run --workspace --all-features
 cargo test --workspace --doc --all-features
 ```
 
-Original vendor archives stay outside Git. To run the three explicit archive
-acceptance tests, put the two original ZIPs in the ignored
+Original vendor archives stay outside Git. To run the four explicit archive
+acceptance tests, put the three original ZIPs in the ignored
 `artifacts/vendor/kk3/packages/` cache or set `GULIKIT_VENDOR_DIR`:
 
 ```sh
 cargo test -p gulikit-core --test vendor_packages -- --ignored
 ```
 
-These tests check exact payload selection/extraction and altered-archive
-rejection. They never connect to USB. CI runs the portable behavioral suite;
+These tests check exact payload selection/extraction for Main 5.9 and Bluetooth
+3.24 / 5.07, plus altered-archive rejection. They never connect to USB. CI runs the portable behavioral suite;
 the archive tests require separately supplied vendor downloads. Two ignored child
 entrypoints are subprocess fixtures invoked by the ordinary supervision tests.
 Those tests exercise actual child exit, parent disconnect, process-group isolation,
