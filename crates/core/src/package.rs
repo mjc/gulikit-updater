@@ -7,7 +7,7 @@ use std::io::{Cursor, Read};
 use std::{fmt, str::FromStr};
 
 /// Upper bound checked before reading a package from an untrusted file.
-pub const MAX_ARCHIVE_SIZE: usize = 1_148_144;
+pub const MAX_ARCHIVE_SIZE: usize = 1_163_538;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,17 +113,12 @@ pub struct PackageInfo {
 pub struct VerifiedPackage {
     info: PackageInfo,
     payload: Vec<u8>,
+    bluetooth_version: Option<u16>,
 }
 
 impl VerifiedPackage {
     pub fn inspect(bytes: &[u8], model: Model, component: Component) -> Result<Self, PackageError> {
-        let release = release(model, component);
-        verify_bytes(
-            bytes,
-            release.archive_size,
-            release.archive_sha256,
-            "archive",
-        )?;
+        let release = release_from_archive(bytes, model, component)?;
         let member = read_member(bytes, release.member, release.member_size)?;
         verify_bytes(
             &member,
@@ -133,7 +128,7 @@ impl VerifiedPackage {
         )?;
         let payload = match component {
             Component::Main => member,
-            Component::Bluetooth => extract_bluetooth_payload(&member)?,
+            Component::Bluetooth => extract_bluetooth_payload(&member, release)?,
         };
         verify_bytes(
             &payload,
@@ -153,6 +148,7 @@ impl VerifiedPackage {
                 member: release.member,
             },
             payload,
+            bluetooth_version: release.bluetooth_version,
         })
     }
 
@@ -160,6 +156,9 @@ impl VerifiedPackage {
         &self.info
     }
 
+    pub(crate) fn bluetooth_version(&self) -> Option<u16> {
+        self.bluetooth_version
+    }
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
@@ -181,11 +180,13 @@ pub struct Release {
     member_sha256: &'static str,
     payload_size: usize,
     payload_sha256: &'static str,
+    #[serde(skip)]
+    bluetooth_version: Option<u16>,
 }
 
 const MAIN_HASH: &str = "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4";
 
-static RELEASES: [Release; 2] = [
+static RELEASES: [Release; 3] = [
     Release {
         model: Model::Kk3Max,
         component: Component::Main,
@@ -199,6 +200,7 @@ static RELEASES: [Release; 2] = [
         member_sha256: MAIN_HASH,
         payload_size: 51_500,
         payload_sha256: MAIN_HASH,
+        bluetooth_version: None,
     },
     Release {
         model: Model::Kk3Max,
@@ -213,6 +215,22 @@ static RELEASES: [Release; 2] = [
         member_sha256: "3dc8fd352597de4b619efcf139933fbbccc5c1c335aa580455bf5f64f4b9c97a",
         payload_size: 345_088,
         payload_sha256: "2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826",
+        bluetooth_version: Some(507),
+    },
+    Release {
+        model: Model::Kk3Max,
+        component: Component::Bluetooth,
+        version: "3.24",
+        archive: "NS38_NS39_BT_V3.24.zip",
+        archive_size: 1_163_538,
+        archive_sha256: "1bcccf02448b9c92b5b69d82b168b951c883ea6d71ec6463127523d0b275ab30",
+        source_url: "https://gulikit.com/filedownload/133023",
+        member: "GuliKit_NS38_NS39_BT_V3.24.exe",
+        member_size: 2_245_632,
+        member_sha256: "38e24c9e49952fbba14764f688a020fb22a49786321382bc5a2ea76822addc2c",
+        payload_size: 361_472,
+        payload_sha256: "e540b990cd07df2deb91ac90d20428ddf7788a15f55d84aaaf88cdd99ea71606",
+        bluetooth_version: Some(324),
     },
 ];
 
@@ -220,11 +238,30 @@ pub fn catalog() -> &'static [Release] {
     &RELEASES
 }
 
-fn release(model: Model, component: Component) -> &'static Release {
-    match (model, component) {
-        (Model::Kk3Max, Component::Main) => &RELEASES[0],
-        (Model::Kk3Max, Component::Bluetooth) => &RELEASES[1],
+fn release_from_archive(
+    bytes: &[u8],
+    model: Model,
+    component: Component,
+) -> Result<&'static Release, PackageError> {
+    let candidates: Vec<_> = RELEASES
+        .iter()
+        .filter(|release| release.model == model && release.component == component)
+        .collect();
+    if !candidates
+        .iter()
+        .any(|release| bytes.len() == release.archive_size)
+    {
+        return Err(PackageError::Size {
+            kind: "archive",
+            expected: candidates[0].archive_size,
+            actual: bytes.len(),
+        });
     }
+    let digest = hex::encode(Sha256::digest(bytes));
+    candidates
+        .into_iter()
+        .find(|release| bytes.len() == release.archive_size && digest == release.archive_sha256)
+        .ok_or(PackageError::Digest { kind: "archive" })
 }
 
 fn verify_bytes(
@@ -291,24 +328,27 @@ fn pe_bytes<'a>(
     exe.get(start..end).ok_or(PackageError::EmbeddedRange)
 }
 
-fn extract_bluetooth_payload(exe: &[u8]) -> Result<Vec<u8>, PackageError> {
+fn extract_bluetooth_payload(exe: &[u8], release: &Release) -> Result<Vec<u8>, PackageError> {
     let image = PeFile32::parse(exe)?;
     let identity = pe_bytes(&image, exe, 0x1732d0, 16)?;
     let version = pe_bytes(&image, exe, 0x1732e0, 2)?;
     let length = pe_bytes(&image, exe, 0x1732e4, 4)?;
-    // These constants describe the hash-pinned 5.07 executable only. The F1
-    // signature is also used by older devices; it does not identify NS39.
-    if identity
-        != [
-            0xa1, 0xca, 0x51, 0xda, 0x72, 0x4c, 0xb6, 0x10, 0x36, 0x58, 0xc0, 0x5d, 0x7d, 0x4e,
-            0x15, 0x96,
-        ]
-        || version != 507_u16.to_le_bytes()
-        || length != 345_088_u32.to_le_bytes()
+    // The reviewed 3.24 and 5.07 programs share this layout and identical
+    // transport code. Version and payload size belong to the selected archive.
+    let target = release
+        .bluetooth_version
+        .ok_or(PackageError::EmbeddedMetadata)?;
+    let size: u32 = release
+        .payload_size
+        .try_into()
+        .map_err(|_| PackageError::EmbeddedRange)?;
+    if identity != crate::version::BT_SIGNATURE
+        || version != target.to_le_bytes()
+        || length != size.to_le_bytes()
     {
         return Err(PackageError::EmbeddedMetadata);
     }
-    Ok(pe_bytes(&image, exe, 0x1732f0, 345_088)?.to_vec())
+    Ok(pe_bytes(&image, exe, 0x1732f0, release.payload_size)?.to_vec())
 }
 
 #[cfg(test)]
@@ -317,6 +357,21 @@ mod tests {
     use std::io::Write;
     use zip::{ZipWriter, write::SimpleFileOptions};
 
+    #[test]
+    fn catalog_bounds_and_target_versions_match_the_reviewed_release_metadata() {
+        let mut archives = std::collections::BTreeSet::new();
+        for release in catalog() {
+            assert!(release.archive_size <= MAX_ARCHIVE_SIZE);
+            assert!(archives.insert(release.archive_sha256));
+            if let Some(version) = release.bluetooth_version {
+                assert_eq!(
+                    format!("{}.{:02}", version / 100, version % 100),
+                    release.version
+                );
+                assert!(release.payload_size > 0 && release.payload_size.is_multiple_of(512));
+            }
+        }
+    }
     #[test]
     fn rejects_an_unreviewed_archive_before_zip_parsing() {
         let bytes = vec![0; 107_606];
@@ -379,7 +434,7 @@ mod tests {
     #[test]
     fn malformed_executables_are_rejected_by_the_pe_parser() {
         assert!(matches!(
-            extract_bluetooth_payload(b"not a PE executable"),
+            extract_bluetooth_payload(b"not a PE executable", &RELEASES[1]),
             Err(PackageError::Executable(_))
         ));
     }

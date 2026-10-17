@@ -140,7 +140,10 @@ pub fn update_bluetooth(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    if package.info().component != Component::Bluetooth {
+    let Some(target) = package
+        .bluetooth_version()
+        .filter(|_| package.info().component == Component::Bluetooth)
+    else {
         let mut record = TransferRecord {
             version_policy: policy,
             error: Some("Bluetooth update requires a verified Bluetooth package".into()),
@@ -150,13 +153,23 @@ pub fn update_bluetooth(
             record.cleanup_errors.push(error);
         }
         return record;
-    }
-    bluetooth(port, package.payload(), policy, cancelled)
+    };
+    bluetooth_release(port, package.payload(), target, policy, cancelled)
 }
 
+#[cfg(test)]
 fn bluetooth(
     port: &mut impl BluetoothPort,
     payload: &[u8],
+    policy: VersionPolicy,
+    cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    bluetooth_release(port, payload, 507, policy, cancelled)
+}
+fn bluetooth_release(
+    port: &mut impl BluetoothPort,
+    payload: &[u8],
+    target: u16,
     policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
@@ -174,7 +187,7 @@ fn bluetooth(
         let response = command(port, &mut record, 0xf1, &[])?;
         let version = bluetooth_info(&response).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
-        match version.decision_with_policy(policy) {
+        match version.decision_for(target, policy) {
             VersionDecision::AlreadyCurrent => {
                 record.outcome = Outcome::AlreadyCurrent;
                 return Ok(());
@@ -185,9 +198,10 @@ fn bluetooth(
             }
             VersionDecision::Eligible => {}
         }
-        if payload.len() != 345088 {
-            return Err("Incorrect Bluetooth payload size".into());
+        if payload.is_empty() || !payload.len().is_multiple_of(512) {
+            return Err("Bluetooth payload must contain complete 512-byte blocks".into());
         }
+        let block_count = payload.len() / 512;
         port.prepare_write()?;
         for (index, block) in payload.as_chunks::<512>().0.iter().enumerate() {
             if cancelled() {
@@ -205,7 +219,7 @@ fn bluetooth(
             record.bytes_submitted += block.len();
             command(port, &mut record, 0xf0, block)?;
             record.bytes_confirmed += block.len();
-            if index == 0 || index == 673 {
+            if index == 0 || index + 1 == block_count {
                 if cancelled() {
                     return Err("Cancelled after firmware submission".into());
                 }
@@ -632,6 +646,101 @@ mod tests {
             self.cleanup = true;
             Ok(())
         }
+    }
+    #[test]
+    fn selected_324_release_uses_its_target_and_all_706_blocks() {
+        let payload: Vec<u8> = (0..361472).map(|index| (index % 251) as u8).collect();
+        let mut port = Fake {
+            version: 323,
+            ..Fake::default()
+        };
+        let record =
+            bluetooth_release(&mut port, &payload, 324, VersionPolicy::UpgradeOnly, || {
+                false
+            });
+        assert_eq!(
+            record.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(record.bytes_confirmed, 361472);
+        assert_eq!(port.bytes, payload);
+        let mut expected = vec![0xf1, 0xf0, 0xf2];
+        expected.extend(std::iter::repeat_n(0xf0, 705));
+        expected.push(0xf2);
+        assert_eq!(port.calls, expected);
+        for (version, policy, outcome) in [
+            (324, VersionPolicy::UpgradeOnly, Outcome::AlreadyCurrent),
+            (324, VersionPolicy::AllowDowngrade, Outcome::AlreadyCurrent),
+            (325, VersionPolicy::UpgradeOnly, Outcome::NewerThanSupported),
+        ] {
+            let mut port = Fake {
+                version,
+                ..Fake::default()
+            };
+            let record = bluetooth_release(&mut port, &payload, 324, policy, || false);
+            assert_eq!(record.outcome, outcome);
+            assert!(port.bytes.is_empty());
+            assert_eq!(port.calls, [0xf1]);
+        }
+    }
+    #[test]
+    fn every_324_command_failure_stops_without_replay_or_losing_submission_uncertainty() {
+        for failure in 1..=709 {
+            let mut port = Fake {
+                version: 323,
+                fail: Some(failure),
+                ..Fake::default()
+            };
+            let record = bluetooth_release(
+                &mut port,
+                &vec![0; 361472],
+                324,
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
+            assert_eq!(
+                record.outcome,
+                if failure == 1 {
+                    Outcome::Refused
+                } else {
+                    Outcome::OutcomeUnknown
+                }
+            );
+            assert_eq!(port.calls.len(), failure);
+            assert!(port.cleanup);
+        }
+        for length in [0, 511, 513, 361471, 361473] {
+            let mut port = Fake {
+                version: 323,
+                ..Fake::default()
+            };
+            let record = bluetooth_release(
+                &mut port,
+                &vec![0; length],
+                324,
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
+            assert_eq!(record.outcome, Outcome::Refused);
+            assert!(port.bytes.is_empty());
+            assert_eq!(port.calls, [0xf1]);
+        }
+        let mut port = Fake {
+            version: 325,
+            ..Fake::default()
+        };
+        let record = bluetooth_release(
+            &mut port,
+            &vec![0; 361472],
+            324,
+            VersionPolicy::AllowDowngrade,
+            || false,
+        );
+        assert_eq!(
+            record.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(record.bytes_confirmed, 361472);
     }
     #[test]
     fn exact_bluetooth_transcript_and_payload_no_installed_success() {

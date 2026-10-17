@@ -53,3 +53,20 @@ fn rejects_modified_archive_before_using_its_payload() {
     bytes[100] ^= 1;
     assert!(VerifiedPackage::inspect(&bytes, Model::Kk3Max, Component::Main).is_err());
 }
+
+#[test]
+#[ignore = "requires original vendor archive in ignored cache"]
+fn selects_the_reviewed_324_release_and_its_706_block_payload() {
+    let bytes = archive("NS38_NS39_BT_V3.24.zip");
+    let package = VerifiedPackage::inspect(&bytes, Model::Kk3Max, Component::Bluetooth).unwrap();
+    assert_eq!(package.info().version, "3.24");
+    assert_eq!(package.payload().len(), 361472);
+    assert_eq!(
+        package.info().payload_sha256,
+        "e540b990cd07df2deb91ac90d20428ddf7788a15f55d84aaaf88cdd99ea71606"
+    );
+    assert!(VerifiedPackage::inspect(&bytes, Model::Kk3Max, Component::Main).is_err());
+    let mut modified = bytes;
+    modified[100] ^= 1;
+    assert!(VerifiedPackage::inspect(&modified, Model::Kk3Max, Component::Bluetooth).is_err());
+}

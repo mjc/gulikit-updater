@@ -108,7 +108,10 @@ impl BluetoothVersion {
         self.decision_with_policy(VersionPolicy::UpgradeOnly)
     }
     pub fn decision_with_policy(self, policy: VersionPolicy) -> VersionDecision {
-        decision(self.0, 507, policy)
+        self.decision_for(507, policy)
+    }
+    pub(crate) fn decision_for(self, target: u16, policy: VersionPolicy) -> VersionDecision {
+        decision(self.0, target, policy)
     }
 }
 impl fmt::Display for BluetoothVersion {
