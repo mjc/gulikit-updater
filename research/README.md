@@ -46,8 +46,20 @@ Building does not access a device. Running `--read-info` or `--inquiry` captures
 the controller temporarily and requires root; keep actual device operations
 within an explicitly requested hardware session. The original probe's NS39/BT
 labels describe the research context, not a proven model detector. The observed
-34d3:1100 storage interface and Main update volume belong to the same physical
-device, and Main/BT access must not be assumed mutually exclusive.
+`34d3:1100` storage interface belongs to **Main update mode**, entered using
+APS + A (double-square/APG), and is not the Bluetooth updater. This preserved
+historical probe targets that Main profile; its earlier BT labels are incorrect.
+Do not use it to qualify Bluetooth transfers. Main-mode F1 command rejection is
+wrong-mode evidence; the older timeout also retains its original transport log.
+
+Bluetooth uses the separate **Gear / Set + A** mode. Exit the previous update
+mode via Mode off, then normal Mode-on restart. With the controller off, connect
+USB, hold Gear first and then press A. Fresh discovery has observed Bluetooth
+`8087:1024` with cached SCSI `Gamepad / Updater / 1.00` and no Main volume.
+A shared BOT interface does not make both update modes available together.
+These observed profiles are not unique model or unit identity. The maintained
+`crates/platform/examples/native_probe.rs` uses production discovery; a complete
+fresh F1 reply and matching status are required before any Bluetooth update.
 
 ## Reproduce the expanded Bluetooth Windows context
 

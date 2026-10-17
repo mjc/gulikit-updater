@@ -45,11 +45,19 @@ successful inspection, an already-current component, or verified installation;
 verification; 8 for cleanup or host audit persistence that requires attention;
 and 9 for an uncertain outcome after firmware submission.
 
+KK3 Max NS39 has separate update modes. Main firmware uses **APS + A** (the
+double-square button, called APG in some vendor instructions); Bluetooth firmware
+uses **Gear / Set + A**. Start with the controller off and connect a USB data
+cable. For Bluetooth, hold Gear first, keep it held, then press A. To switch
+components, leave the current mode with Mode off and a normal Mode-on restart,
+then power off and enter the other component's update mode. Rediscover after
+each transition. The updater does not switch modes automatically.
+
 Put only one controller in update mode. `--confirm-ns39` attests that you checked
 the physical NS39 label and Max controls. USB IDs and the shared F1 signature
 are observed profile evidence, not automatic proof of the model. The native
 adapter checks runtime support for modern IOUSBHost and DeviceSurrender.
-`probe --component bluetooth` normally unmounts the controller volume before
+`probe --component bluetooth` unmounts any correlated mounted volumes before
 requesting modern Capture. Read-only cleanup explicitly destroys the capture,
 which resets USB and restarts driver matching; restored storage is checked
 separately. A busy volume refuses without forcing an unmount. After any possible
@@ -113,15 +121,18 @@ firmware compatibility or transfer policy. The CLI parses arguments and renders 
 same core can serve Slint, and native adapters can provide each OS's discovery,
 SCSI command and update-volume operations without duplicating firmware policy.
 
-Main and Bluetooth access may be available together on one NS39. Native discovery
-reports a `bluetooth_transport_candidate` when it correlates a suitable command
-interface; that alone does not prove the Windows updater would select this storage
+Main mode has been observed as USB `34d3:1100` with a GuliKit update volume.
+Bluetooth mode has been observed as USB `8087:1024`, with cached SCSI identity
+`Gamepad / Updater / 1.00` and no Main update volume. These profiles identify
+observed modes, rather than a unique NS39 unit. Main's mass-storage interface
+must not be offered as a Bluetooth command path. Native discovery reports a
+`bluetooth_transport_candidate` when it correlates a suitable command interface; that alone does not prove the Windows updater would select this storage
 identity or that F1 succeeds. A fresh complete F1 response remains required. Selection
 counts recognized physical update candidates before component filtering and
 refuses more than one device in update mode. Each component can be selected
 independently; an absent Main view cannot block Bluetooth preflight and an absent
-Bluetooth view cannot block Main inspection. Views present together are bound to
-the same USB ancestor and generation. A shared Bluetooth
+Bluetooth view cannot block Main inspection. Every access path is bound to its
+current USB ancestor and generation. A shared Bluetooth
 protocol signature is not an NS39 model identifier. Native discovery must
 correlate each component path to its physical attachment and recheck uniqueness
 before any write. A mounted descendant is only a Main-volume candidate: fresh

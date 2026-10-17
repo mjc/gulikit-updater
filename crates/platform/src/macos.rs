@@ -31,6 +31,8 @@ unsafe extern "C" {
         revision: *const c_char,
     ) -> i32;
     #[cfg(test)]
+    fn gu_bluetooth_candidate(vendor: u16, product: u16, bot: i32) -> i32;
+    #[cfg(test)]
     fn gu_profile_candidate(
         vendor: u16,
         product: u16,
@@ -890,6 +892,15 @@ mod tests {
     use super::{
         NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
     };
+    #[test]
+    fn main_usb_storage_is_not_a_bluetooth_update_path() {
+        // SAFETY: synchronous pure bridge predicate, no IOKit or USB operations.
+        unsafe {
+            assert_eq!(super::gu_bluetooth_candidate(0x34d3, 0x1100, 1), 0);
+            assert_eq!(super::gu_bluetooth_candidate(0x8087, 0x1024, 1), 1);
+            assert_eq!(super::gu_bluetooth_candidate(0x8087, 0x1024, 0), 0);
+        }
+    }
     #[test]
     fn cached_storage_and_bound_capture_recognition_do_not_include_ordinary_bot_disks() {
         use std::ffi::CString;

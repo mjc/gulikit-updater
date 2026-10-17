@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_main_and_bluetooth_on_the_same_physical_ns39() {
+    fn generic_grouping_preserves_components_reported_by_an_adapter() {
         let controllers = group_observations([
             observation(
                 "usb:one",
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_one_controller_with_both_component_accesses() {
+    fn generic_selector_preserves_correlated_component_evidence() {
         let target = select_ns39_update_target(dual_access("one"), Component::Main).unwrap();
         assert_eq!(target.controller().components.len(), 2);
     }

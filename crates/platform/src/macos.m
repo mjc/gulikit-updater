@@ -44,6 +44,11 @@ int gu_profile_candidate(uint16_t vendor,uint16_t product,int bot,const char *na
         return (bound && id==bound) || cached || (vendor==0x34d3 && product==0x1100) || (bot && (vendor==0x34d3 || [label.lowercaseString containsString:@"gul"]));
     }
 }
+int gu_bluetooth_candidate(uint16_t vendor,uint16_t product,int bot) {
+    // NS39 Main and Bluetooth are separate update modes. Main exposes BOT
+    // storage too, but that does not provide the Bluetooth vendor command path.
+    return bot && !(vendor==0x34d3 && product==0x1100);
+}
 static NSMutableDictionary *profile_state(void) {
     return [@{@"bot":@NO,@"cached":@NO,@"storage_identities":[NSMutableArray new]} mutableCopy];
 }
@@ -103,7 +108,7 @@ char *gu_snapshot(uint64_t bound_id) {
             if (recognized) {
                 uint64_t id=entry_id(service);
                 if (!id) [errors addObject:@"USB attachment ID unavailable"];
-                else { NSMutableDictionary *c=candidate(id);c[@"observed_profile"]=(observed || cached) ? @YES : @NO;c[@"storage_identities"]=storage;c[@"bluetooth_transport_candidate"]=bot ? @YES : @NO;devices[@(id)]=c; }
+                else { NSMutableDictionary *c=candidate(id);c[@"observed_profile"]=(observed || cached) ? @YES : @NO;c[@"storage_identities"]=storage;c[@"bluetooth_transport_candidate"]=gu_bluetooth_candidate([p[@"idVendor"] intValue],[p[@"idProduct"] intValue],bot) ? @YES : @NO;devices[@(id)]=c; }
             }
             IOObjectRelease(service);
         }

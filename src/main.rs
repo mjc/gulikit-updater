@@ -25,7 +25,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Read an installed version; confirm the physical NS39 label and Max controls.
+    /// Read a version in the selected mode: Main APS+A, Bluetooth Gear/Set+A.
     Probe {
         #[arg(long)]
         component: Component,
@@ -34,7 +34,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Update one component using a reviewed original ZIP and record the attempt.
+    /// Update one component in its separate mode (Main APS+A; Bluetooth Gear/Set+A).
     Update {
         path: PathBuf,
         /// Permit the reviewed selected release to replace a newer installed version.
