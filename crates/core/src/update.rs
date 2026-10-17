@@ -984,6 +984,37 @@ mod tests {
         }
     }
     #[test]
+    fn selected_323_release_downgrade_keeps_the_full_transfer_and_version_guards() {
+        let payload = vec![0xa5; 361_472];
+        for (version, policy, expected) in [
+            (324, VersionPolicy::UpgradeOnly, Outcome::NewerThanSupported),
+            (
+                324,
+                VersionPolicy::AllowDowngrade,
+                Outcome::TransferCompletedAwaitingVerification,
+            ),
+            (323, VersionPolicy::AllowDowngrade, Outcome::AlreadyCurrent),
+        ] {
+            let mut port = Fake {
+                version,
+                ..Fake::default()
+            };
+            let record = bluetooth_release(&mut port, &payload, 323, policy, || false);
+            assert_eq!(record.outcome, expected);
+            if expected == Outcome::TransferCompletedAwaitingVerification {
+                assert_eq!(record.bytes_confirmed, 361_472);
+                assert_eq!(port.bytes, payload);
+                let mut commands = vec![0xf1, 0xf0, 0xf2];
+                commands.extend(std::iter::repeat_n(0xf0, 705));
+                commands.push(0xf2);
+                assert_eq!(port.calls, commands);
+            } else {
+                assert!(port.bytes.is_empty());
+                assert_eq!(port.calls, [0xf1]);
+            }
+        }
+    }
+    #[test]
     fn every_324_command_failure_stops_without_replay_or_losing_submission_uncertainty() {
         for failure in 1..=709 {
             let mut port = Fake {

@@ -1,6 +1,6 @@
 # GuliKit updater
 
-The updater supports reviewed KK3 Max NS39 Main 5.9 and Bluetooth 3.24 / 5.07
+The updater supports reviewed KK3 Max NS39 Main 5.9 and Bluetooth 3.23 / 3.24 / 5.07
 packages. The original ZIP selects the release; the CLI does not silently replace
 that selection with the newest version. The shared Rust core owns component
 transactions and restart verification. Native macOS adapters provide Bluetooth
@@ -10,6 +10,7 @@ tracked separately from portable tests and offline instruction emulation.
 | Component | Selected release | Firmware bytes | Bluetooth blocks |
 | --- | --- | ---: | ---: |
 | Main | 5.9 | 51,500 | — |
+| Bluetooth | 3.23 | 361,472 | 706 |
 | Bluetooth | 3.24 | 361,472 | 706 |
 | Bluetooth | 5.07 | 345,088 | 674 |
 
@@ -113,10 +114,10 @@ reviewed package. Audit refusal before I/O records zero submission; an error aft
 submission may have begun retains uncertainty. Equal and unknown installed versions
 write nothing. A newer installed version
 refuses by default; `update --allow-downgrade` explicitly permits installing the
-selected older reviewed release. The record retains that version policy. A downgrade requires a separately reviewed
-older release in the catalog; the current catalog contains no Bluetooth rollback
-package for the observed 3.23 installation, and device acceptance of rollback is
-unproven. This option changes version direction only: package hashes, physical model confirmation,
+selected older reviewed release. The record retains that version policy. The
+original manufacturer-supplied Bluetooth 3.23 archive is available in the catalog;
+its availability does not establish device acceptance of downgrade or safe
+recovery from a partial update. This option changes version direction only: package hashes, physical model confirmation,
 fresh component readback, session ownership and native qualification still apply.
 There is no general force or equal-version reinstall option. Main copying and raw Bluetooth
 traffic are serialized. A topology change invalidates the active session.
@@ -141,8 +142,8 @@ cargo nextest run --workspace --all-features
 cargo test --workspace --doc --all-features
 ```
 
-Original vendor archives stay outside Git. To run the four explicit archive
-acceptance tests, put the three original ZIPs in the ignored
+Original vendor archives stay outside Git. To run the five explicit archive
+acceptance tests, put the four original ZIPs in the ignored
 `artifacts/vendor/kk3/packages/` cache or set `GULIKIT_VENDOR_DIR`:
 
 ```sh
@@ -150,7 +151,7 @@ cargo test -p gulikit-core --test vendor_packages -- --ignored
 ```
 
 These tests check exact payload selection/extraction for Main 5.9 and Bluetooth
-3.24 / 5.07, plus altered-archive rejection. They never connect to USB. CI runs the portable behavioral suite;
+3.23 / 3.24 / 5.07, plus altered-archive rejection. They never connect to USB. CI runs the portable behavioral suite;
 the archive tests require separately supplied vendor downloads. Two ignored child
 entrypoints are subprocess fixtures invoked by the ordinary supervision tests.
 Those tests exercise actual child exit, parent disconnect, process-group isolation,

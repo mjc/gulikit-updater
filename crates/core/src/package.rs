@@ -186,7 +186,7 @@ pub struct Release {
 
 const MAIN_HASH: &str = "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4";
 
-static RELEASES: [Release; 3] = [
+static RELEASES: [Release; 4] = [
     Release {
         model: Model::Kk3Max,
         component: Component::Main,
@@ -231,6 +231,21 @@ static RELEASES: [Release; 3] = [
         payload_size: 361_472,
         payload_sha256: "e540b990cd07df2deb91ac90d20428ddf7788a15f55d84aaaf88cdd99ea71606",
         bluetooth_version: Some(324),
+    },
+    Release {
+        model: Model::Kk3Max,
+        component: Component::Bluetooth,
+        version: "3.23",
+        archive: "NS39_BT_V3.23.zip",
+        archive_size: 1_163_454,
+        archive_sha256: "39d678170e8d86488d65eb815873c708ff31b096d69d93714a0177086d5db938",
+        source_url: "https://gulikit.com/filedownload/123020",
+        member: "NS39_BT_V3.23.exe",
+        member_size: 2_245_632,
+        member_sha256: "825cca9b36fa9078d8198f31ab4bf0ecebb4a6a8bd100303801ba1d1363c4dd6",
+        payload_size: 361_472,
+        payload_sha256: "783d206c08253c1e2291a8b0bc99b04f95fc4054c2215447a30933f623cf9dfe",
+        bluetooth_version: Some(323),
     },
 ];
 
@@ -333,7 +348,7 @@ fn extract_bluetooth_payload(exe: &[u8], release: &Release) -> Result<Vec<u8>, P
     let identity = pe_bytes(&image, exe, 0x1732d0, 16)?;
     let version = pe_bytes(&image, exe, 0x1732e0, 2)?;
     let length = pe_bytes(&image, exe, 0x1732e4, 4)?;
-    // The reviewed 3.24 and 5.07 programs share this layout and identical
+    // The reviewed 3.23, 3.24 and 5.07 programs share this layout and identical
     // transport code. Version and payload size belong to the selected archive.
     let target = release
         .bluetooth_version

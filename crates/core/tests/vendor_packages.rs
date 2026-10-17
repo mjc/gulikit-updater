@@ -70,3 +70,25 @@ fn selects_the_reviewed_324_release_and_its_706_block_payload() {
     modified[100] ^= 1;
     assert!(VerifiedPackage::inspect(&modified, Model::Kk3Max, Component::Bluetooth).is_err());
 }
+
+#[test]
+#[ignore = "requires original vendor archive in ignored cache"]
+fn selects_the_official_323_archive_as_a_distinct_706_block_release() {
+    let bytes = archive("NS39_BT_V3.23.zip");
+    let package = VerifiedPackage::inspect(&bytes, Model::Kk3Max, Component::Bluetooth).unwrap();
+    assert_eq!(package.info().version, "3.23");
+    assert_eq!(package.info().member, "NS39_BT_V3.23.exe");
+    assert_eq!(
+        package.info().source_url,
+        "https://gulikit.com/filedownload/123020"
+    );
+    assert_eq!(package.payload().len(), 361_472);
+    assert_eq!(
+        package.info().payload_sha256,
+        "783d206c08253c1e2291a8b0bc99b04f95fc4054c2215447a30933f623cf9dfe"
+    );
+    assert!(VerifiedPackage::inspect(&bytes, Model::Kk3Max, Component::Main).is_err());
+    let mut modified = bytes;
+    modified[100] ^= 1;
+    assert!(VerifiedPackage::inspect(&modified, Model::Kk3Max, Component::Bluetooth).is_err());
+}
