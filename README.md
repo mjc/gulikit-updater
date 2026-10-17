@@ -2,10 +2,12 @@
 
 The updater supports the reviewed KK3 Max NS39 Main 5.9 and Bluetooth 5.07
 packages. The shared Rust core implements both component transactions and
-restart verification. Native macOS discovery and Main version inspection work;
-native firmware writes remain gated while transport and filesystem hardware
-qualification is in progress. The current controller reports Main 5.9, which
-correctly returns `already_current` with zero firmware writes.
+restart verification. The macOS Bluetooth adapter permits a transaction only after
+fresh F1 identity/version readback on an exclusively held, qualified LUN0 session.
+The NS39 has passed real read-only Bluetooth qualification and reports 3.23;
+actual transfer and post-restart 5.07 verification are still pending. Main version
+inspection works and reports 5.9, correctly returning `already_current` with zero
+firmware writes. Main writes remain gated pending bounded filesystem supervision.
 
 ## Development
 
@@ -131,7 +133,9 @@ Bluetooth mode has been observed as USB `8087:1024`, with cached SCSI identity
 observed modes, rather than a unique NS39 unit. Main's mass-storage interface
 must not be offered as a Bluetooth command path. Native discovery reports a
 `bluetooth_transport_candidate` when it correlates a suitable command interface; that alone does not prove the Windows updater would select this storage
-identity or that F1 succeeds. A fresh complete F1 response remains required. Selection
+identity or that F1 succeeds. A fresh complete F1 response and matching status remain required. The real BT
+profile has passed that read-only check with dynamically selected OUT01/IN81;
+Main's observed OUT03/IN82 endpoints must not be reused. Selection
 counts recognized physical update candidates before component filtering and
 refuses more than one device in update mode. Each component can be selected
 independently; an absent Main view cannot block Bluetooth preflight and an absent
@@ -140,8 +144,11 @@ current USB ancestor and generation. A shared Bluetooth
 protocol signature is not an NS39 model identifier. Native discovery must
 correlate each component path to its physical attachment and recheck uniqueness
 before any write. A mounted descendant is only a Main-volume candidate: fresh
-GULI.TXT parsing is required, and writability is a separate write condition. Both native write adapters refuse before firmware submission until
-their hardware qualification gates are satisfied. Portable tests and mocked
+GULI.TXT parsing is required, and writability is a separate write condition. The Bluetooth adapter clears prior F1 qualification before every refresh attempt,
+including failures during session preflight. Firmware commands require current
+readback, qualified addressing and unchanged exclusive ownership. A failed BOT
+session remains failed. Main writes still refuse until filesystem supervision is
+qualified. Portable tests and mocked
 official-instruction traces do not establish actual-device flash acceptance.
 
 The [CLI execution plan](https://lific.mjc.lol/GULI/plans/141) and
