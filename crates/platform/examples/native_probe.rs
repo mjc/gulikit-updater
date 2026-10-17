@@ -22,18 +22,33 @@ fn main() -> Result<(), String> {
             let info = session.read_info();
             println!("F1: {info:02x?}");
             if info.is_err() {
-                println!(
-                    "Endpoint IN GET_STATUS: {:?}",
-                    session.endpoint_status(true)
-                );
-                println!(
-                    "Endpoint OUT GET_STATUS: {:?}",
-                    session.endpoint_status(false)
-                );
-                println!(
-                    "Original transaction continuation: {:?}",
-                    session.diagnostic_continuation()
-                );
+                if session.diagnostic_sense_eligible() {
+                    println!(
+                        "Original failed F1 CSW: {:02x?}",
+                        session.failed_f1_status()
+                    );
+                    let sense = session.diagnostic_request_sense();
+                    println!("REQUEST SENSE: {sense:02x?}");
+                    if let Ok(raw) = sense {
+                        println!(
+                            "Decoded sense: {:?}",
+                            gulikit_core::scsi::decode_sense(&raw)
+                        );
+                    }
+                } else {
+                    println!(
+                        "Endpoint IN GET_STATUS: {:?}",
+                        session.endpoint_status(true)
+                    );
+                    println!(
+                        "Endpoint OUT GET_STATUS: {:?}",
+                        session.endpoint_status(false)
+                    );
+                    println!(
+                        "Original transaction continuation: {:?}",
+                        session.diagnostic_continuation()
+                    );
+                }
             }
         }
         let cleanup = session.finish();

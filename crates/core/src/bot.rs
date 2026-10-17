@@ -30,6 +30,8 @@ pub struct Session<T> {
     failed: bool,
     firmware_submitted: bool,
     qualified_lun: Option<u8>,
+    failed_f1_status: Option<[u8; 13]>,
+    sense_used: bool,
 }
 impl<T: BulkIo> Session<T> {
     pub fn new(io: T) -> Self {
@@ -39,6 +41,8 @@ impl<T: BulkIo> Session<T> {
             failed: false,
             firmware_submitted: false,
             qualified_lun: None,
+            failed_f1_status: None,
+            sense_used: false,
         }
     }
     /// This implementation supports only an attachment advertising exactly LUN0.
@@ -78,6 +82,27 @@ impl<T: BulkIo> Session<T> {
     pub fn failed(&self) -> bool {
         self.failed
     }
+    pub fn failed_f1_status(&self) -> Option<[u8; 13]> {
+        self.failed_f1_status
+    }
+    pub fn request_sense_eligible(&self) -> bool {
+        self.failed
+            && !self.firmware_submitted
+            && self.qualified_lun == Some(0)
+            && !self.sense_used
+            && self
+                .failed_f1_status
+                .is_some_and(|raw| u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) == self.tag)
+    }
+    /// One standard error read after the exact completed failed F1 status.
+    /// This never clears failure or permits normal commands/firmware afterward.
+    pub fn diagnostic_request_sense(&mut self) -> Result<Vec<u8>, String> {
+        if !self.request_sense_eligible() {
+            return Err("No diagnostic sense allowance".into());
+        }
+        self.sense_used = true;
+        self.exchange(&[3, 0, 0, 0, 18, 0], Direction::In, &[], 18, false)
+    }
     pub fn tag(&self) -> u32 {
         self.tag
     }
@@ -115,6 +140,16 @@ impl<T: BulkIo> Session<T> {
             return Err("OUT buffer length differs from the command".into());
         }
         self.qualify_addressing()?;
+        self.exchange(cdb, direction, data, length, true)
+    }
+    fn exchange(
+        &mut self,
+        cdb: &[u8],
+        direction: Direction,
+        data: &[u8],
+        length: usize,
+        exact: bool,
+    ) -> Result<Vec<u8>, String> {
         let expected = u32::try_from(length).map_err(|_| "BOT length exceeds u32")?;
         let tag = self.tag.checked_add(1).ok_or("BOT tag exhausted")?;
         let mut cbw = command_block(tag, direction, expected, cdb).map_err(|e| e.to_string())?;
@@ -138,8 +173,24 @@ impl<T: BulkIo> Session<T> {
             }
             bytes.truncate(actual);
             if direction == Direction::In {
-                let stage = data_stage(&bytes, tag, expected)
-                    .map_err(|e| format!("{e}; raw={bytes:02x?}"))?;
+                // Retain a normally completed early status, never timeout/error bytes.
+                // This is the exact observed F1 quirk, not arbitrary failed BOT recovery.
+                if cdb == [0xf1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+                    && expected == 20
+                    && actual == 13
+                    && bytes.starts_with(b"USBS")
+                    && bytes[4..8] == tag.to_le_bytes()
+                    && bytes[8..12] == [0; 4]
+                    && bytes[12] == 1
+                {
+                    self.failed_f1_status = bytes.as_slice().try_into().ok();
+                }
+                let stage = data_stage(&bytes, tag, expected).map_err(|e| {
+                    format!(
+                        "{e}; early_command_failed={}; raw={bytes:02x?}",
+                        self.failed_f1_status.is_some() && cdb[0] == 0xf1
+                    )
+                })?;
                 if stage == DataStage::EarlyStatus {
                     return Err(format!("Early CSW instead of vendor data: {bytes:02x?}"));
                 }
@@ -157,7 +208,7 @@ impl<T: BulkIo> Session<T> {
                     )
                 },
             )?;
-            if actual != length {
+            if exact && actual != length {
                 return Err(format!("Short vendor data {actual}/{length}: {bytes:02x?}"));
             }
             Ok(if direction == Direction::In {

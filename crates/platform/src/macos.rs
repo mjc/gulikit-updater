@@ -342,6 +342,7 @@ impl Session {
             finished: false,
             last_opcode: 0,
             continuation_used: false,
+            sense_used: false,
         };
         let result = (|| {
             for disk in port.session.target.disks.clone() {
@@ -613,6 +614,7 @@ pub struct BluetoothSession {
     finished: bool,
     last_opcode: u8,
     continuation_used: bool,
+    sense_used: bool,
 }
 impl BluetoothSession {
     fn native(&mut self) -> Result<&mut NativeUsb, String> {
@@ -635,6 +637,7 @@ impl BluetoothSession {
     }
     /// Standard read-only EP0 diagnostics; no recovery or firmware opcode.
     pub fn endpoint_status(&mut self, input: bool) -> Result<(u8, u16), String> {
+        self.check_session()?;
         let usb = self.native()?.pointer()?;
         let mut address = 0;
         let mut status = 0;
@@ -687,6 +690,43 @@ impl BluetoothSession {
             .as_mut()
             .ok_or("No exclusive USB claim")?
             .command(cdb, direction, data, length)
+    }
+    pub fn failed_f1_status(&self) -> Option<[u8; 13]> {
+        self.usb.as_ref().and_then(bot::Session::failed_f1_status)
+    }
+    pub fn diagnostic_sense_eligible(&mut self) -> bool {
+        if self.sense_used || self.last_opcode != 0xf1 {
+            return false;
+        }
+        let Some(channel) = self.usb.as_mut() else {
+            return false;
+        };
+        channel.io_mut().diagnostic && channel.request_sense_eligible()
+    }
+    /// One standard error read, without clearing the failed session or write gate.
+    pub fn diagnostic_request_sense(&mut self) -> Result<Vec<u8>, String> {
+        if !self.diagnostic_sense_eligible() {
+            return Err("No eligible diagnostic REQUEST SENSE".into());
+        }
+        self.sense_used = true;
+        self.check_session()?;
+        for input in [true, false] {
+            let (address, status) = self.endpoint_status(input)?;
+            if status != 0 {
+                return Err(format!(
+                    "Endpoint 0x{address:02x} status=0x{status:04x}; no REQUEST SENSE issued"
+                ));
+            }
+        }
+        self.check_session()?;
+        self.last_opcode = 3;
+        let raw = self
+            .usb
+            .as_mut()
+            .ok_or("No exclusive USB claim")?
+            .diagnostic_request_sense()?;
+        self.check_session()?;
+        Ok(raw)
     }
     /// At most one diagnostic continuation of the original timed-out F1 IN
     /// phase. Never clears the failure latch or authorizes a firmware command.

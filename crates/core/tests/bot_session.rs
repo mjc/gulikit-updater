@@ -13,6 +13,8 @@ struct Fake {
     max_lun: Result<u8, String>,
     calls: Vec<Direction>,
     fail_at: Option<usize>,
+    short_cbw: bool,
+    error_after_read: bool,
     writes: Vec<Vec<u8>>,
 }
 impl BulkIo for Fake {
@@ -37,11 +39,22 @@ impl BulkIo for Fake {
         }
         if direction == Direction::Out {
             self.writes.push(bytes.to_vec());
-            Ok(bytes.len())
+            Ok(if self.short_cbw && bytes.len() == 31 {
+                30
+            } else {
+                bytes.len()
+            })
         } else {
             let response = self.reads.pop_front().unwrap();
             bytes[..response.len()].copy_from_slice(&response);
-            Ok(response.len())
+            if self.error_after_read {
+                Err(format!(
+                    "OS error actual={} raw={response:02x?}",
+                    response.len()
+                ))
+            } else {
+                Ok(response.len())
+            }
         }
     }
 }
@@ -55,6 +68,8 @@ fn io() -> Fake {
         max_lun: Ok(0),
         calls: vec![],
         fail_at: None,
+        short_cbw: false,
+        error_after_read: false,
         writes: vec![],
     }
 }
@@ -174,5 +189,178 @@ fn one_command_deadline_is_shared_by_all_stages_without_retry() {
             .is_err()
     );
     assert_eq!(session.io_mut().calls.len(), 2);
+    assert!(session.firmware_may_have_been_submitted());
+}
+
+fn status(tag: u32, residue: u32, result: u8) -> Vec<u8> {
+    let mut bytes = b"USBS".to_vec();
+    bytes.extend(tag.to_le_bytes());
+    bytes.extend(residue.to_le_bytes());
+    bytes.push(result);
+    bytes
+}
+fn f1() -> [u8; 10] {
+    let mut cdb = [0; 10];
+    cdb[0] = 0xf1;
+    cdb
+}
+
+#[test]
+fn one_sense_after_exact_failed_f1_preserves_the_failure_and_write_block() {
+    let mut fake = io();
+    let mut sense = vec![0; 18];
+    sense[0] = 0x70;
+    sense[2] = 5;
+    sense[7] = 10;
+    sense[12] = 0x20;
+    fake.reads = VecDeque::from([status(1, 0, 1), sense.clone(), status(2, 0, 0)]);
+    let mut session = Session::new(fake);
+    assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+    assert!(session.failed());
+    assert_eq!(session.diagnostic_request_sense().unwrap(), sense);
+    assert!(session.failed());
+    assert!(!session.firmware_may_have_been_submitted());
+    let traffic = session.io_mut().calls.len();
+    assert!(session.diagnostic_request_sense().is_err());
+    assert!(
+        session
+            .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+            .is_err()
+    );
+    assert_eq!(session.io_mut().calls.len(), traffic);
+    let cbw = &session.io_mut().writes[1];
+    assert_eq!(&cbw[..15], b"USBC\x02\0\0\0\x12\0\0\0\x80\0\x06");
+    assert_eq!(
+        &cbw[15..],
+        &[3, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+}
+
+#[test]
+fn sense_diagnostic_requires_the_exact_completed_failed_f1_frame() {
+    for bad in [
+        status(2, 0, 1),
+        status(1, 0, 2),
+        status(1, 20, 1),
+        status(1, 21, 1),
+        status(1, 0, 0),
+        status(1, 20, 0),
+    ] {
+        let mut fake = io();
+        fake.reads = VecDeque::from([bad]);
+        let mut session = Session::new(fake);
+        assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+        let count = session.io_mut().calls.len();
+        assert!(!session.request_sense_eligible());
+        assert!(session.diagnostic_request_sense().is_err());
+        assert_eq!(session.io_mut().calls.len(), count);
+    }
+    for (cdb, length) in [
+        (vec![0xf1; 10], 20),
+        (f1().to_vec(), 18),
+        (vec![0xf1, 0, 0, 0, 0, 0], 20),
+    ] {
+        let mut fake = io();
+        fake.reads = VecDeque::from([status(1, 0, 1)]);
+        let mut session = Session::new(fake);
+        assert!(session.command(&cdb, Direction::In, &[], length).is_err());
+        let count = session.io_mut().calls.len();
+        assert!(session.diagnostic_request_sense().is_err());
+        assert_eq!(session.io_mut().calls.len(), count);
+    }
+    let mut fake = io();
+    let mut invalid = status(1, 0, 1);
+    invalid[0] = 0;
+    fake.reads = VecDeque::from([invalid, status(1, 7, 0)]);
+    let mut session = Session::new(fake);
+    assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+    let count = session.io_mut().calls.len();
+    assert!(session.diagnostic_request_sense().is_err());
+    assert_eq!(session.io_mut().calls.len(), count);
+}
+
+#[test]
+fn timeout_partial_cbw_and_failed_os_read_never_authorize_sense() {
+    for stage in 1..=2 {
+        let mut fake = io();
+        fake.fail_at = Some(stage);
+        fake.reads = VecDeque::from([status(1, 0, 1)]);
+        let mut session = Session::new(fake);
+        assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+        assert!(session.diagnostic_request_sense().is_err());
+        assert_eq!(session.io_mut().calls.len(), stage);
+    }
+    for short_cbw in [true, false] {
+        let mut fake = io();
+        fake.short_cbw = short_cbw;
+        fake.error_after_read = !short_cbw;
+        fake.reads = VecDeque::from([status(1, 0, 1)]);
+        let mut session = Session::new(fake);
+        assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+        let count = session.io_mut().calls.len();
+        assert!(session.diagnostic_request_sense().is_err());
+        assert_eq!(session.io_mut().calls.len(), count);
+    }
+    let mut session = Session::new(io());
+    assert!(session.diagnostic_request_sense().is_err());
+    assert!(session.io_mut().calls.is_empty());
+}
+
+#[test]
+fn sense_allowance_is_consumed_before_any_failed_submission_or_status() {
+    for stage in 3..=5 {
+        let mut fake = io();
+        fake.fail_at = Some(stage);
+        fake.reads = VecDeque::from([status(1, 0, 1), vec![0; 18], status(2, 0, 0)]);
+        let mut session = Session::new(fake);
+        assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+        assert!(session.diagnostic_request_sense().is_err());
+        assert!(session.diagnostic_request_sense().is_err());
+        assert_eq!(session.io_mut().calls.len(), stage);
+        assert!(session.failed());
+    }
+    for bad in [
+        status(3, 0, 0),
+        status(2, 1, 0),
+        status(2, 0, 1),
+        status(2, 0, 0)[..12].to_vec(),
+    ] {
+        let mut fake = io();
+        fake.reads = VecDeque::from([status(1, 0, 1), vec![0; 18], bad]);
+        let mut session = Session::new(fake);
+        assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+        assert!(session.diagnostic_request_sense().is_err());
+        let count = session.io_mut().calls.len();
+        assert!(session.diagnostic_request_sense().is_err());
+        assert_eq!(session.io_mut().calls.len(), count);
+    }
+}
+
+#[test]
+fn short_complete_sense_is_validated_by_its_own_status_and_does_not_resume_firmware() {
+    let mut fake = io();
+    let sense = vec![0x72, 5, 0x24, 0, 0, 0, 0, 0];
+    fake.reads = VecDeque::from([status(1, 0, 1), sense.clone(), status(2, 10, 0)]);
+    let mut session = Session::new(fake);
+    assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+    assert_eq!(
+        session.failed_f1_status().unwrap().as_slice(),
+        status(1, 0, 1)
+    );
+    let raw = session.diagnostic_request_sense().unwrap();
+    assert_eq!(raw, sense);
+    assert_eq!(gulikit_core::scsi::decode_sense(&raw).unwrap().asc, 0x24);
+    assert!(session.failed());
+    assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+    let mut fake = io();
+    fake.reads = VecDeque::from([status(1, 0, 0), status(2, 0, 1)]);
+    let mut session = Session::new(fake);
+    session
+        .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+        .unwrap();
+    assert!(session.command(&f1(), Direction::In, &[], 20).is_err());
+    let count = session.io_mut().calls.len();
+    assert!(session.diagnostic_request_sense().is_err());
+    assert_eq!(session.io_mut().calls.len(), count);
     assert!(session.firmware_may_have_been_submitted());
 }
