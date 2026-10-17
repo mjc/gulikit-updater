@@ -107,7 +107,10 @@ firmware compatibility or transfer policy. The CLI parses arguments and renders 
 same core can serve Slint, and native adapters can provide each OS's discovery,
 SCSI command and update-volume operations without duplicating firmware policy.
 
-Main and Bluetooth access may be available together on one NS39. Selection
+Main and Bluetooth access may be available together on one NS39. Native discovery
+reports a `bluetooth_transport_candidate` when it correlates a suitable command
+interface; that alone does not prove the Windows updater would select this storage
+identity or that F1 succeeds. A fresh complete F1 response remains required. Selection
 counts physical controllers, requires both component accesses on the same
 target and refuses more than one device in update mode. A shared Bluetooth
 protocol signature is not an NS39 model identifier. Native discovery must

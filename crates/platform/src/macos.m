@@ -36,7 +36,7 @@ static BOOL bot_profile(NSDictionary *p) {
     return [p[@"bInterfaceClass"] intValue]==8 && [p[@"bInterfaceSubClass"] intValue]==6 && [p[@"bInterfaceProtocol"] intValue]==0x50;
 }
 static NSMutableDictionary *candidate(uint64_t id) {
-    return [@{@"ancestor":@(id),@"generation":@(id),@"main_access":@NO,@"bluetooth_access":@NO,@"observed_profile":@NO,@"conflicting_model":@NO,@"disks":[NSMutableArray new]} mutableCopy];
+    return [@{@"ancestor":@(id),@"generation":@(id),@"main_access":@NO,@"bluetooth_transport_candidate":@NO,@"observed_profile":@NO,@"conflicting_model":@NO,@"disks":[NSMutableArray new]} mutableCopy];
 }
 char *gu_snapshot(void) {
     @autoreleasepool {
@@ -65,7 +65,7 @@ char *gu_snapshot(void) {
             if (recognized) {
                 uint64_t id=entry_id(service);
                 if (!id) [errors addObject:@"USB attachment ID unavailable"];
-                else { NSMutableDictionary *c=candidate(id);c[@"observed_profile"]=(observed && bot) ? @YES : @NO;c[@"bluetooth_access"]=bot ? @YES : @NO;devices[@(id)]=c; }
+                else { NSMutableDictionary *c=candidate(id);c[@"observed_profile"]=(observed && bot) ? @YES : @NO;c[@"bluetooth_transport_candidate"]=bot ? @YES : @NO;devices[@(id)]=c; }
             }
             IOObjectRelease(service);
         }

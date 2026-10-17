@@ -65,7 +65,8 @@ pub struct NativeCandidate {
     pub ancestor: u64,
     pub generation: u64,
     pub main_access: bool,
-    pub bluetooth_access: bool,
+    /// A correlated command path; successful F1 is separate protocol evidence.
+    pub bluetooth_transport_candidate: bool,
     pub observed_profile: bool,
     pub conflicting_model: bool,
     pub disks: Vec<Disk>,
@@ -77,7 +78,7 @@ impl NativeCandidate {
             ancestor: self.ancestor,
             generation: self.generation,
             main_access: self.main_access,
-            bluetooth_access: self.bluetooth_access,
+            bluetooth_access: self.bluetooth_transport_candidate,
             observed_profile: self.observed_profile,
             conflicting_model: self.conflicting_model,
         }

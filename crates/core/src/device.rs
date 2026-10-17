@@ -10,6 +10,7 @@ pub struct Candidate {
     pub ancestor: u64,
     pub generation: u64,
     pub main_access: bool,
+    /// A candidate command path, not proof that F1 or firmware writes succeed.
     pub bluetooth_access: bool,
     pub observed_profile: bool,
     pub conflicting_model: bool,
