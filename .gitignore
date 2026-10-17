@@ -1,1 +1,5 @@
 /target
+/artifacts/vendor/
+/artifacts/research/
+/.devenv/
+/research/__pycache__/

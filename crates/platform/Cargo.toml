@@ -1,0 +1,9 @@
+[package]
+name = "gulikit-platform"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+
+[dependencies]
+gulikit-core = { path = "../core" }
+thiserror.workspace = true

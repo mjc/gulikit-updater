@@ -1,0 +1,104 @@
+{
+  "success": {
+    "exit_va": "0x4029b1",
+    "payload_length": 345088,
+    "write_count": 674,
+    "streamed_length": 345088,
+    "stream_matches_payload": true,
+    "payload_sha256": "2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826",
+    "first_calls": [
+      {
+        "opcode": "0xf1",
+        "direction": 1,
+        "cdb_len": 10,
+        "data_len": 20
+      },
+      {
+        "opcode": "0xf0",
+        "direction": 0,
+        "cdb_len": 10,
+        "data_len": 512
+      },
+      {
+        "opcode": "0xf2",
+        "direction": 1,
+        "cdb_len": 10,
+        "data_len": 20
+      }
+    ],
+    "last_call": {
+      "opcode": "0xf2",
+      "direction": 1,
+      "cdb_len": 10,
+      "data_len": 20
+    }
+  },
+  "first_status_error": {
+    "exit_va": "0x402965",
+    "payload_length": 345088,
+    "write_count": 1,
+    "streamed_length": 512,
+    "stream_matches_payload": false,
+    "payload_sha256": "2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826",
+    "first_calls": [
+      {
+        "opcode": "0xf1",
+        "direction": 1,
+        "cdb_len": 10,
+        "data_len": 20
+      },
+      {
+        "opcode": "0xf0",
+        "direction": 0,
+        "cdb_len": 10,
+        "data_len": 512
+      },
+      {
+        "opcode": "0xf2",
+        "direction": 1,
+        "cdb_len": 10,
+        "data_len": 20
+      }
+    ],
+    "last_call": {
+      "opcode": "0xf2",
+      "direction": 1,
+      "cdb_len": 10,
+      "data_len": 20
+    }
+  },
+  "final_status_error": {
+    "exit_va": "0x4028fc",
+    "payload_length": 345088,
+    "write_count": 674,
+    "streamed_length": 345088,
+    "stream_matches_payload": true,
+    "payload_sha256": "2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826",
+    "first_calls": [
+      {
+        "opcode": "0xf1",
+        "direction": 1,
+        "cdb_len": 10,
+        "data_len": 20
+      },
+      {
+        "opcode": "0xf0",
+        "direction": 0,
+        "cdb_len": 10,
+        "data_len": 512
+      },
+      {
+        "opcode": "0xf2",
+        "direction": 1,
+        "cdb_len": 10,
+        "data_len": 20
+      }
+    ],
+    "last_call": {
+      "opcode": "0xf2",
+      "direction": 1,
+      "cdb_len": 10,
+      "data_len": 20
+    }
+  }
+}
