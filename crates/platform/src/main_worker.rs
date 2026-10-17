@@ -23,6 +23,7 @@ const TICK: Duration = Duration::from_millis(10);
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Message {
     Request(serde_json::Value),
+    PackageReady,
     Ready,
     Go,
     Cancel,
@@ -130,7 +131,7 @@ impl Channel {
 /// The lease outlives the child, including during panic/EOF/error unwinding.
 struct LeasedChild {
     child: Child,
-    _lease: ProcessLock,
+    _lease: Option<ProcessLock>,
 }
 impl Drop for LeasedChild {
     fn drop(&mut self) {
@@ -147,14 +148,13 @@ impl Drop for LeasedChild {
 }
 
 pub fn guardian(parent: Channel, worker_command: Command, budget: Duration) -> Result<(), String> {
-    let lease = ProcessLock::acquire()?;
-    guardian_with_lease(parent, worker_command, budget, lease)
+    guardian_with_lease(parent, worker_command, budget, None)
 }
 fn guardian_with_lease(
     parent: Channel,
     worker_command: Command,
     budget: Duration,
-    lease: ProcessLock,
+    lease: Option<ProcessLock>,
 ) -> Result<(), String> {
     guardian_with_clock(parent, worker_command, budget, lease, Instant::now)
 }
@@ -162,7 +162,7 @@ fn guardian_with_clock(
     mut parent: Channel,
     mut worker_command: Command,
     budget: Duration,
-    lease: ProcessLock,
+    lease: Option<ProcessLock>,
     now: impl Fn() -> Instant,
 ) -> Result<(), String> {
     let request = match parent.wait(Duration::from_secs(10))? {
@@ -170,10 +170,14 @@ fn guardian_with_clock(
         _ => return Err("Main guardian expected a request".into()),
     };
     let (local, remote) = UnixStream::pair().map_err(|error| error.to_string())?;
+    let (lease_sender, lease_receiver) = UnixStream::pair().map_err(|error| error.to_string())?;
+    lease_sender
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .map_err(|error| error.to_string())?;
     let child = worker_command
         .stdin(Stdio::from(OwnedFd::from(remote)))
         .stdout(Stdio::null())
-        .stderr(Stdio::from(lease.worker_descriptor()?))
+        .stderr(Stdio::from(OwnedFd::from(lease_receiver)))
         .spawn()
         .map_err(|error| error.to_string())?;
     // Command retains configured Stdio handles for reuse. Close its peer copy
@@ -186,6 +190,7 @@ fn guardian_with_clock(
     let mut worker = Channel::new(local)?;
     worker.send(&Message::Request(request))?;
     let deadline = now() + budget;
+    let mut lease_sent = false;
     let mut ready = false;
     let mut started = false;
     let mut result = None;
@@ -215,7 +220,19 @@ fn guardian_with_clock(
         }
         if result.is_none() {
             match worker.poll() {
-                Ok(Some(Message::Ready)) if !ready && !started => {
+                Ok(Some(Message::PackageReady)) if !lease_sent && !ready && !started => {
+                    if owned._lease.is_none() {
+                        owned._lease = Some(ProcessLock::acquire()?);
+                    }
+                    let descriptor = owned
+                        ._lease
+                        .as_ref()
+                        .expect("guardian owns lease")
+                        .worker_descriptor()?;
+                    send_lease(&lease_sender, &descriptor)?;
+                    lease_sent = true;
+                }
+                Ok(Some(Message::Ready)) if lease_sent && !ready && !started => {
                     ready = true;
                     parent.send(&Message::Ready)?;
                 }
@@ -339,6 +356,28 @@ pub fn run(
     }
 }
 
+fn send_lease(socket: &UnixStream, file: &std::fs::File) -> Result<(), String> {
+    use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
+    use std::{io::IoSlice, mem::MaybeUninit};
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut ancillary = SendAncillaryBuffer::new(&mut space);
+    let descriptors = [file.as_fd()];
+    if !ancillary.push(SendAncillaryMessage::ScmRights(&descriptors)) {
+        return Err("Main lease message exceeds its bound".into());
+    }
+    let count = sendmsg(
+        socket,
+        &[IoSlice::new(b"L")],
+        &mut ancillary,
+        SendFlags::empty(),
+    )
+    .map_err(|error| error.to_string())?;
+    if count != 1 {
+        return Err("Incomplete Main lease descriptor handoff".into());
+    }
+    Ok(())
+}
+
 fn reporting_failure(started: bool, reason: String) -> Message {
     if started {
         Message::Unknown {
@@ -364,6 +403,7 @@ mod tests {
         let Message::Request(request) = channel.wait(Duration::from_secs(2)).unwrap() else {
             panic!("request");
         };
+        channel.send(&Message::PackageReady).unwrap();
         let lock = ProcessLock::adopt_worker_descriptor_at(std::path::PathBuf::from(
             request["lock"].as_str().unwrap(),
         ))
@@ -399,7 +439,7 @@ mod tests {
             Channel::from_stdin().unwrap(),
             fixture_command(),
             Duration::from_secs(2),
-            lease,
+            Some(lease),
         )
         .unwrap();
     }
@@ -486,7 +526,7 @@ mod tests {
                     Channel::new(remote).unwrap(),
                     fixture_command(),
                     Duration::from_secs(1),
-                    lease,
+                    Some(lease),
                     move || {
                         if observed_marker.is_file() {
                             start + Duration::from_secs(2)
@@ -534,7 +574,7 @@ mod tests {
                 Channel::new(remote).unwrap(),
                 fixture_command(),
                 Duration::from_secs(2),
-                lease,
+                Some(lease),
             )
         });
         let mut parent = Channel::new(local).unwrap();

@@ -68,12 +68,54 @@ impl ProcessLock {
         Self::adopt_worker_descriptor_at(PathBuf::from("/tmp/gulikit-updater.lock"))
     }
     pub(crate) fn adopt_worker_descriptor_at(path: PathBuf) -> Result<Self, String> {
-        use std::os::fd::AsFd;
-        let descriptor = std::io::stderr()
-            .as_fd()
-            .try_clone_to_owned()
+        use rustix::net::{
+            RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, recvmsg,
+        };
+        use std::{
+            io::IoSliceMut,
+            mem::MaybeUninit,
+            os::{fd::AsFd, unix::net::UnixStream},
+            time::Duration,
+        };
+        let socket = UnixStream::from(
+            std::io::stderr()
+                .as_fd()
+                .try_clone_to_owned()
+                .map_err(|error| error.to_string())?,
+        );
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|error| error.to_string())?;
-        Self::inherited(File::from(descriptor), path)
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(2))];
+        let mut ancillary = RecvAncillaryBuffer::new(&mut space);
+        let mut byte = [0];
+        let received = recvmsg(
+            &socket,
+            &mut [IoSliceMut::new(&mut byte)],
+            &mut ancillary,
+            RecvFlags::empty(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut descriptors = Vec::new();
+        for message in ancillary.drain() {
+            match message {
+                RecvAncillaryMessage::ScmRights(rights) => descriptors.extend(rights),
+                _ => return Err("Unexpected Main lease ancillary message".into()),
+            }
+        }
+        if received.bytes != 1
+            || byte != *b"L"
+            || received.flags.contains(ReturnFlags::CTRUNC)
+            || descriptors.len() != 1
+        {
+            return Err(
+                "Main worker requires exactly one complete guardian lease descriptor".into(),
+            );
+        }
+        // rustix owns received descriptors, including all rejection/cleanup paths.
+        let received = File::from(descriptors.pop().expect("one descriptor checked"));
+        let file = received.try_clone().map_err(|error| error.to_string())?; // CLOEXEC duplicate
+        Self::inherited(file, path)
     }
     pub fn is_worker_lease(&self) -> bool {
         !self.unlock_on_drop

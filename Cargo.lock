@@ -317,6 +317,7 @@ dependencies = [
  "cc",
  "gulikit-core",
  "nix",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

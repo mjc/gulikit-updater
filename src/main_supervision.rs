@@ -106,6 +106,7 @@ fn worker(channel: &mut Channel) -> Result<(), AppError> {
             };
             AppError::new(kind, code, error.to_string())
         })?;
+    channel.send(&Message::PackageReady)?;
     let lease = ProcessLock::adopt_worker_stderr()?;
     channel.send(&Message::Ready)?;
     if !matches!(channel.wait(Duration::from_secs(10))?, Message::Go) {
