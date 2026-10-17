@@ -1,5 +1,8 @@
 //! Host I/O adapters. Firmware compatibility decisions belong to the core.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 #[cfg(unix)]
 pub mod volume;

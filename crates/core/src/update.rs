@@ -19,6 +19,37 @@ pub enum Outcome {
     InstalledVerified,
 }
 
+/// A fresh machine readback and separately recorded assisted association.
+#[derive(Debug, Serialize)]
+pub struct Verification {
+    pub component: Component,
+    pub previous_generation: u64,
+    pub generation: u64,
+    pub same_unit_confirmed: bool,
+    pub model_confirmed: bool,
+    /// Canonical component-specific text from a successful fresh version parser.
+    pub version: String,
+}
+pub fn verify_restart(previous: Outcome, observation: &Verification) -> Outcome {
+    let expected = match observation.component {
+        Component::Main => "5.9",
+        Component::Bluetooth => "5.07",
+    };
+    if matches!(
+        previous,
+        Outcome::TransferCompletedAwaitingVerification
+            | Outcome::TransferSubmittedPendingCompletion
+    ) && observation.generation != observation.previous_generation
+        && observation.same_unit_confirmed
+        && observation.model_confirmed
+        && observation.version == expected
+    {
+        Outcome::InstalledVerified
+    } else {
+        previous
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct CommandRecord {
     pub index: usize,
