@@ -192,13 +192,13 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         return (__bridge_retained void *)transport;
     }
 }
-int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,size_t *actual,int *timed_out,char *message,size_t capacity) {
+int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,double timeout,size_t *actual,int *timed_out,char *message,size_t capacity) {
     @autoreleasepool {
         GuTransport *transport=(__bridge GuTransport *)context;
         NSMutableData *data=[NSMutableData dataWithLength:length];
         if(!input)memcpy(data.mutableBytes,bytes,length);
         NSError *error=nil;NSUInteger count=0;
-        BOOL result=[(input ? transport.input : transport.output) sendIORequestWithData:data bytesTransferred:&count completionTimeout:5 error:&error];
+        BOOL result=[(input ? transport.input : transport.output) sendIORequestWithData:data bytesTransferred:&count completionTimeout:timeout error:&error];
         *actual=count;
         *timed_out=!result && (error.code==(NSInteger)(int32_t)kIOReturnTimeout || error.code==(NSInteger)(int32_t)kIOUSBTransactionTimeout);
         if(input)memcpy(bytes,data.bytes,MIN(count,length));

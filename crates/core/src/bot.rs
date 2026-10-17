@@ -1,5 +1,7 @@
 //! USB mass-storage command-status validation.
 
+use std::time::{Duration, Instant};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     In,
@@ -9,7 +11,15 @@ pub enum Direction {
 /// One serialized bulk stage. An error must retain OS status, actual count and raw bytes.
 pub trait BulkIo {
     fn max_lun(&mut self) -> Result<u8, String>;
-    fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String>;
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn transfer(
+        &mut self,
+        direction: Direction,
+        bytes: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, String>;
 }
 
 /// A BOT command session is never resumed after a failed stage. Keep ownership of
@@ -71,6 +81,26 @@ impl<T: BulkIo> Session<T> {
     pub fn tag(&self) -> u32 {
         self.tag
     }
+    fn transfer_before(
+        &mut self,
+        direction: Direction,
+        bytes: &mut [u8],
+        deadline: Instant,
+    ) -> Result<usize, String> {
+        let remaining = deadline
+            .checked_duration_since(self.io.now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or("BOT command deadline expired before next stage")?;
+        let actual = self.io.transfer(direction, bytes, remaining)?;
+        if self.io.now() >= deadline {
+            return Err(format!(
+                "BOT command deadline expired; actual={actual} requested={} raw={:02x?}",
+                bytes.len(),
+                &bytes[..actual.min(bytes.len())]
+            ));
+        }
+        Ok(actual)
+    }
     pub fn command(
         &mut self,
         cdb: &[u8],
@@ -92,8 +122,9 @@ impl<T: BulkIo> Session<T> {
         if cdb[0] == 0xf0 {
             self.firmware_submitted = true;
         }
+        let deadline = self.io.now() + Duration::from_secs(5);
         let result = (|| -> Result<Vec<u8>, String> {
-            if self.io.transfer(Direction::Out, &mut cbw)? != 31 {
+            if self.transfer_before(Direction::Out, &mut cbw, deadline)? != 31 {
                 return Err("Short CBW; command is uncertain".into());
             }
             let mut bytes = if direction == Direction::In {
@@ -101,7 +132,7 @@ impl<T: BulkIo> Session<T> {
             } else {
                 data.to_vec()
             };
-            let actual = self.io.transfer(direction, &mut bytes)?;
+            let actual = self.transfer_before(direction, &mut bytes, deadline)?;
             if actual > length {
                 return Err("Invalid bulk data length".into());
             }
@@ -114,7 +145,7 @@ impl<T: BulkIo> Session<T> {
                 }
             }
             let mut status = [0; 13];
-            let status_actual = self.io.transfer(Direction::In, &mut status)?;
+            let status_actual = self.transfer_before(Direction::In, &mut status, deadline)?;
             if status_actual > status.len() {
                 return Err("Invalid CSW transfer length".into());
             }

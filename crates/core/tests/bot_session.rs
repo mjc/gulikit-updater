@@ -1,8 +1,14 @@
 use gulikit_core::bot::{BulkIo, Direction, Session};
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 struct Fake {
     reads: VecDeque<Vec<u8>>,
+    clock: Instant,
+    costs: VecDeque<Duration>,
+    allowances: Vec<Duration>,
     address_queries: usize,
     max_lun: Result<u8, String>,
     calls: Vec<Direction>,
@@ -14,7 +20,17 @@ impl BulkIo for Fake {
         self.address_queries += 1;
         self.max_lun.clone()
     }
-    fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String> {
+    fn now(&self) -> Instant {
+        self.clock
+    }
+    fn transfer(
+        &mut self,
+        direction: Direction,
+        bytes: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, String> {
+        self.allowances.push(timeout);
+        self.clock += self.costs.pop_front().unwrap_or(Duration::ZERO);
         self.calls.push(direction);
         if self.fail_at == Some(self.calls.len()) {
             return Err("timeout actual=0 raw=[]".into());
@@ -32,6 +48,9 @@ impl BulkIo for Fake {
 fn io() -> Fake {
     Fake {
         reads: VecDeque::from([vec![0xa1; 20], b"USBS\x01\0\0\0\0\0\0\0\0".to_vec()]),
+        clock: Instant::now(),
+        costs: VecDeque::new(),
+        allowances: vec![],
         address_queries: 0,
         max_lun: Ok(0),
         calls: vec![],
@@ -122,4 +141,38 @@ fn qualifies_each_attachment_before_any_bot_command_and_refuses_ambiguous_addres
             .unwrap();
         assert_eq!(session.io_mut().address_queries, 1);
     }
+}
+
+#[test]
+fn one_command_deadline_is_shared_by_all_stages_without_retry() {
+    let mut fake = io();
+    fake.costs = VecDeque::from([Duration::from_secs(2); 3]);
+    let mut session = Session::new(fake);
+    assert!(
+        session
+            .command(&[0xf1; 10], Direction::In, &[], 20)
+            .is_err()
+    );
+    assert_eq!(
+        session.io_mut().allowances,
+        [5, 3, 1].map(Duration::from_secs)
+    );
+    assert!(session.failed());
+    assert!(
+        session
+            .command(&[0xf1; 10], Direction::In, &[], 20)
+            .is_err()
+    );
+    assert_eq!(session.io_mut().calls.len(), 3);
+
+    let mut fake = io();
+    fake.costs = VecDeque::from([Duration::from_secs(3); 2]);
+    let mut session = Session::new(fake);
+    assert!(
+        session
+            .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+            .is_err()
+    );
+    assert_eq!(session.io_mut().calls.len(), 2);
+    assert!(session.firmware_may_have_been_submitted());
 }

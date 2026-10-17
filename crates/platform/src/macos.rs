@@ -32,6 +32,7 @@ unsafe extern "C" {
         input: i32,
         bytes: *mut u8,
         length: usize,
+        timeout: f64,
         actual: *mut usize,
         timed_out: *mut i32,
         error: *mut c_char,
@@ -513,7 +514,12 @@ impl BulkIo for NativeUsb {
         Ok(value)
     }
 
-    fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String> {
+    fn transfer(
+        &mut self,
+        direction: Direction,
+        bytes: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize, String> {
         let usb = self.pointer()?;
         let input = direction == Direction::In;
         let mut actual = 0;
@@ -531,6 +537,7 @@ impl BulkIo for NativeUsb {
                 i32::from(input),
                 bytes.as_mut_ptr(),
                 bytes.len(),
+                timeout.as_secs_f64(),
                 &mut actual,
                 &mut timed_out,
                 error.as_mut_ptr(),
@@ -664,7 +671,10 @@ impl BluetoothSession {
         let channel = self.usb.as_mut().ok_or("No USB claim")?;
         let tag = channel.tag();
         let mut bytes = vec![0; 20];
-        let actual = channel.io_mut().transfer(Direction::In, &mut bytes)?;
+        let actual =
+            channel
+                .io_mut()
+                .transfer(Direction::In, &mut bytes, Duration::from_secs(5))?;
         bytes.truncate(actual);
         if actual == 13 && bytes.starts_with(b"USBS") {
             return Ok(format!(
@@ -674,7 +684,10 @@ impl BluetoothSession {
         }
         if actual == 20 {
             let mut status = [0; 13];
-            let count = channel.io_mut().transfer(Direction::In, &mut status)?;
+            let count =
+                channel
+                    .io_mut()
+                    .transfer(Direction::In, &mut status, Duration::from_secs(5))?;
             return Ok(format!(
                 "Late F1 data raw={bytes:02x?}; CSW={:02x?}; validation={:?}; original deadline still failed",
                 &status[..count],
