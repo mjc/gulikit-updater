@@ -8,6 +8,7 @@ fn main() -> Result<(), String> {
     );
     if std::env::args().any(|arg| arg == "--confirm-ns39-read-only") {
         let mut session = Session::open(true)?.bluetooth()?;
+        println!("GET_MAX_LUN: {:?}", session.max_lun());
         let inquiry = session.inquiry();
         println!("INQUIRY: {inquiry:02x?}");
         // A failed transport command invalidates BOT state: no implicit recovery/reset.

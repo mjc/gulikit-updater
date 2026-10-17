@@ -9,7 +9,10 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Inspect reviewed GuliKit firmware packages offline")]
+#[command(
+    version,
+    about = "Inspect and update a user-confirmed KK3 Max NS39 controller"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -17,6 +20,44 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Enumerate all recognized update candidates. Put only one device in update mode.
+    Devices {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read an installed version; confirm the physical NS39 label and Max controls.
+    Probe {
+        #[arg(long)]
+        component: Component,
+        #[arg(long, required = true)]
+        confirm_ns39: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update one component using a reviewed original ZIP and record the attempt.
+    Update {
+        path: PathBuf,
+        #[arg(long)]
+        model: Model,
+        #[arg(long)]
+        component: Component,
+        #[arg(long, required = true)]
+        confirm_ns39: bool,
+        #[arg(long)]
+        record: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// After off/on restart and update-mode re-entry, verify the same physical controller.
+    Verify {
+        attempt: PathBuf,
+        #[arg(long, required = true)]
+        confirm_ns39: bool,
+        #[arg(long, required = true)]
+        confirm_same_controller: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// List the reviewed firmware releases supported by this build.
     Packages {
         #[arg(long)]
@@ -64,6 +105,40 @@ fn write_json(writer: impl Write, body: impl Serialize) -> io::Result<()> {
 
 fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     match cli.command {
+        command @ (Command::Devices { .. }
+        | Command::Probe { .. }
+        | Command::Update { .. }
+        | Command::Verify { .. }) => {
+            let json = match &command {
+                Command::Devices { json }
+                | Command::Probe { json, .. }
+                | Command::Update { json, .. }
+                | Command::Verify { json, .. } => *json,
+                _ => unreachable!(),
+            };
+            match native_command(command) {
+                Ok(value) => {
+                    let code = outcome_code(&value);
+                    if json {
+                        write_json(out, value)?;
+                    } else {
+                        writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
+                    }
+                    Ok(ExitCode::from(code))
+                }
+                Err((kind, code, message)) => {
+                    if json {
+                        write_json(
+                            err,
+                            serde_json::json!({"error":{"kind":kind,"message":message}}),
+                        )?;
+                    } else {
+                        writeln!(err, "{message}")?;
+                    }
+                    Ok(ExitCode::from(code))
+                }
+            }
+        }
         Command::Packages { json } => {
             if json {
                 write_json(out, serde_json::json!({"packages": catalog()}))?;
@@ -129,6 +204,42 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
         },
     }
 }
+
+type AppError = (&'static str, u8, String);
+fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
+    // Package rejection precedes device access and attempt-file creation on every OS.
+    let package = if let Command::Update {
+        path,
+        model,
+        component,
+        ..
+    } = &command
+    {
+        Some(inspect_package(path, *model, *component).map_err(|e| {
+            let (kind, code) = if matches!(e, InspectError::Rejected(_)) {
+                ("package_rejected", 3)
+            } else {
+                ("package_io", 4)
+            };
+            (kind, code, e.to_string())
+        })?)
+    } else {
+        None
+    };
+    native::execute(command, package).map_err(|e| ("device_refused", 5, e))
+}
+fn outcome_code(value: &serde_json::Value) -> u8 {
+    match value.pointer("/transfer/outcome").and_then(|v| v.as_str()) {
+        Some("already_current" | "installed_verified") | None => 0,
+        Some(
+            "transfer_completed_awaiting_verification" | "transfer_submitted_pending_completion",
+        ) => 7,
+        Some("outcome_unknown") => 9,
+        _ => 5,
+    }
+}
+
+mod native;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

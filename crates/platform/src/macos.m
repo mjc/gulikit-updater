@@ -194,3 +194,15 @@ void gu_usb_close(void *context) {
         [transport.interface destroy];[transport.device destroy];
     }
 }
+int gu_usb_max_lun(void *context,uint8_t *value,char *message,size_t capacity) {
+    @autoreleasepool {
+        GuTransport *transport=(__bridge GuTransport *)context;
+        IOUSBDeviceRequest request={.bmRequestType=0xa1,.bRequest=0xfe,.wValue=0,.wIndex=transport.interface.interfaceDescriptor->bInterfaceNumber,.wLength=1};
+        NSMutableData *data=[NSMutableData dataWithLength:1];NSUInteger actual=0;NSError *error=nil;
+        BOOL result=[transport.interface sendDeviceRequest:request data:data bytesTransferred:&actual completionTimeout:5 error:&error];
+        if(!result || actual!=1){error_text(message,capacity,error.description ?: @"Short GET_MAX_LUN");return -1;}
+        *value=((const uint8_t *)data.bytes)[0];return 0;
+    }
+}
+uint32_t gu_entry_hold(uint64_t id){return IOServiceGetMatchingService(kIOMainPortDefault,IORegistryEntryIDMatching(id));}
+void gu_entry_release(uint32_t entry){IOObjectRelease(entry);}

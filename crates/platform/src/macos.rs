@@ -36,6 +36,10 @@ unsafe extern "C" {
         capacity: usize,
     ) -> i32;
     fn gu_usb_close(value: *mut c_void);
+    fn gu_usb_max_lun(value: *mut c_void, lun: *mut u8, error: *mut c_char, capacity: usize)
+    -> i32;
+    fn gu_entry_hold(id: u64) -> u32;
+    fn gu_entry_release(entry: u32);
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -130,8 +134,59 @@ pub struct Session {
     pub target: NativeCandidate,
     watch: Watch,
     _lock: File,
+    service: u32,
 }
 impl Session {
+    /// Create the host audit log relative to an open directory, excluding device volumes.
+    pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
+        use nix::{
+            fcntl::{OFlag, open, openat},
+            sys::stat::Mode,
+        };
+        use std::os::unix::fs::MetadataExt;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let name = path
+            .file_name()
+            .ok_or("Attempt record requires a filename")?;
+        let dir = File::from(
+            open(
+                parent,
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let device = dir.metadata().map_err(|e| e.to_string())?.dev();
+        for disk in &self.target.disks {
+            if !disk.mount.as_os_str().is_empty()
+                && std::fs::metadata(&disk.mount)
+                    .map_err(|e| e.to_string())?
+                    .dev()
+                    == device
+            {
+                return Err(
+                    "Attempt records must be stored on the host, outside the controller volume"
+                        .into(),
+                );
+            }
+        }
+        Ok(File::from(
+            openat(
+                &dir,
+                name,
+                OFlag::O_WRONLY
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|e| e.to_string())?,
+        ))
+    }
     pub fn open(confirmed: bool) -> Result<Self, String> {
         let home = std::env::var_os("HOME").ok_or("HOME unavailable for updater lock")?;
         let state = PathBuf::from(home).join("Library/Application Support/gulikit-updater");
@@ -147,10 +202,15 @@ impl Session {
             .map_err(|e| format!("Another updater owns the process lock: {e}"))?;
         let watch = Watch::new()?;
         let target = discover()?.select(confirmed)?;
+        let service = unsafe { gu_entry_hold(target.ancestor) };
+        if service == 0 {
+            return Err("Selected physical attachment disappeared".into());
+        }
         let session = Self {
             target,
             watch,
             _lock: lock,
+            service,
         };
         session.check()?;
         Ok(session)
@@ -255,6 +315,13 @@ impl Session {
         Ok(())
     }
 }
+impl Drop for Session {
+    fn drop(&mut self) {
+        unsafe {
+            gu_entry_release(self.service);
+        }
+    }
+}
 fn error_string(bytes: &[i8]) -> String {
     let bytes: Vec<u8> = bytes
         .iter()
@@ -355,6 +422,21 @@ pub struct BluetoothSession {
     finished: bool,
 }
 impl BluetoothSession {
+    pub fn max_lun(&mut self) -> Result<u8, String> {
+        self.check_session()?;
+        let mut value = 0;
+        let mut error = [0i8; 1024];
+        let usb = self.usb.ok_or("No exclusive USB claim")?;
+        let result =
+            unsafe { gu_usb_max_lun(usb.as_ptr(), &mut value, error.as_mut_ptr(), error.len()) };
+        if result != 0 {
+            return Err(error_string(&error));
+        }
+        if value > 15 {
+            return Err(format!("Invalid advertised maximum LUN {value}"));
+        }
+        Ok(value)
+    }
     pub fn target(&self) -> &NativeCandidate {
         &self.session.target
     }
@@ -506,5 +588,5 @@ pub fn read_main(confirmed: bool) -> Result<(NativeCandidate, Vec<u8>, MainVersi
     let mut port = Session::open(confirmed)?.main()?;
     let raw = port.read_version()?;
     let version = MainVersion::parse(&raw).map_err(|e| e.to_string())?;
-    Ok((port.session.target, raw, version))
+    Ok((port.session.target.clone(), raw, version))
 }

@@ -47,9 +47,46 @@ fn malformed_package_is_a_structured_error_with_empty_stdout() {
 }
 
 #[test]
-fn update_is_unavailable_in_the_offline_slice() {
+fn update_requires_physical_confirmation_and_rejects_bad_package_before_io() {
     Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
         .arg("update")
+        .assert()
+        .code(2);
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("bad.zip");
+    std::fs::write(&archive, b"bad").unwrap();
+    let record = dir.path().join("attempt.jsonl");
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .arg("update")
+        .arg(&archive)
+        .args([
+            "--model",
+            "kk3-max",
+            "--component",
+            "main",
+            "--confirm-ns39",
+            "--json",
+            "--record",
+        ])
+        .arg(&record)
+        .assert()
+        .code(3);
+    assert!(result.get_output().stdout.is_empty());
+    assert!(!record.exists());
+    let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "package_rejected");
+}
+
+#[test]
+fn native_commands_describe_assisted_identity_and_restart_association() {
+    for command in ["devices", "probe", "update", "verify"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+            .args([command, "--help"])
+            .assert()
+            .success();
+    }
+    Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .args(["probe", "--component", "main"])
         .assert()
         .code(2);
 }
