@@ -35,8 +35,10 @@ an NS38 binary, which is never selected for NS39. Repacked archives and unknown
 releases are rejected. A digest match ties the bytes to the reviewed catalog;
 it does not independently establish publisher authenticity.
 
-`--json` produces schema version 1. Successful package information goes to
-stdout; runtime errors go to stderr with an empty stdout. Exit codes are 0 for
+`--json` produces schema version 1. Package information and completed attempt or
+verification records go to stdout. An attempt can report refusal, uncertainty or
+cleanup failure and still produce its structured record there. Errors before a
+result can be recorded go to stderr with an empty stdout. Exit codes are 0 for
 successful inspection, an already-current component, or verified installation;
 2 for command-line usage; 3 for rejected firmware; 4 for package/output I/O;
 5 for device/preflight refusal; 7 for a transfer awaiting completion or restart
