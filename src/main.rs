@@ -234,6 +234,11 @@ fn outcome_code(value: &serde_json::Value) -> u8 {
     if value.pointer("/transfer/outcome").and_then(|v| v.as_str()) == Some("outcome_unknown") {
         return 9;
     }
+    if value.pointer("/transfer/outcome").and_then(|v| v.as_str())
+        == Some("destination_created_without_payload")
+    {
+        return 8;
+    }
     if ["/transfer/cleanup_errors", "/cleanup_errors"]
         .iter()
         .any(|path| {
@@ -284,6 +289,11 @@ mod tests {
         assert_eq!(outcome_code(&value), 8);
         let unknown = serde_json::json!({"transfer":{"outcome":"outcome_unknown","cleanup_errors":["remount failed"]}});
         assert_eq!(outcome_code(&unknown), 9);
+    }
+    #[test]
+    fn created_main_file_without_payload_requires_attention() {
+        let value = serde_json::json!({"transfer":{"outcome":"destination_created_without_payload","main_destination_created":true,"bytes_submitted":0,"error":"cancelled","cleanup_errors":[]}});
+        assert_eq!(outcome_code(&value), 8);
     }
     #[test]
     fn probe_cleanup_failure_preserves_readback_but_requires_attention() {

@@ -121,6 +121,9 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 Outcome::OutcomeUnknown => {
                     "Keep the cable connected. No retry or resume will be attempted. Use the documented recovery procedure if needed, then obtain a fresh independent version observation."
                 }
+                Outcome::DestinationCreatedWithoutPayload => {
+                    "No firmware payload bytes were submitted, but the destination file was created. It remains on the controller and requires inspection before another attempt; the updater does not delete or overwrite it."
+                }
                 Outcome::AlreadyCurrent => {
                     "This component is already current. No firmware bytes were sent."
                 }

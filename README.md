@@ -68,6 +68,10 @@ automatic reset is used after submission. Other OSes currently support package c
 Each update uses one original, verified package and creates an exclusive host
 attempt record outside the controller volume. Operation submission, actual
 results, raw version bytes and cleanup results are persisted as JSON lines.
+If cancellation or audit failure follows successful Main destination creation but
+precedes payload submission, the result records `destination_created_without_payload`
+and `main_destination_created`, with zero firmware bytes submitted and exit 8.
+The file remains for inspection; another attempt cannot silently overwrite it.
 An incomplete record preserves an interrupted attempt; it does not prove a
 transfer completed. Equal and unknown installed versions write nothing. A newer installed version
 refuses by default; `update --allow-downgrade` explicitly permits installing the

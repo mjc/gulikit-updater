@@ -13,6 +13,7 @@ pub enum Outcome {
     AlreadyCurrent,
     NewerThanSupported,
     CancelledBeforeWrite,
+    DestinationCreatedWithoutPayload,
     OutcomeUnknown,
     TransferCompletedAwaitingVerification,
     TransferSubmittedPendingCompletion,
@@ -89,6 +90,7 @@ pub struct TransferRecord {
     pub outcome: Outcome,
     pub version_policy: VersionPolicy,
     pub prewrite_version: Option<String>,
+    pub main_destination_created: bool,
     pub bytes_submitted: usize,
     pub bytes_confirmed: usize,
     pub commands: Vec<CommandRecord>,
@@ -101,6 +103,7 @@ impl Default for TransferRecord {
             outcome: Outcome::Refused,
             version_policy: VersionPolicy::UpgradeOnly,
             prewrite_version: None,
+            main_destination_created: false,
             bytes_submitted: 0,
             bytes_confirmed: 0,
             commands: Vec::new(),
@@ -256,11 +259,27 @@ fn command(
 
 /// A mounted, writable, verified root held open throughout the operation.
 /// Creation is exclusive and does not follow symlinks; cleanup never deletes firmware.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct DestinationCreationError {
+    pub error: String,
+    /// Preserve actual creation even if recording its successful result failed.
+    pub created: bool,
+}
+impl From<String> for DestinationCreationError {
+    fn from(error: String) -> Self {
+        Self {
+            error,
+            created: false,
+        }
+    }
+}
+
 pub trait MainPort {
     fn prepare_write(&mut self) -> Result<(), String>;
     fn read_version(&mut self) -> Result<Vec<u8>, String>;
     fn check_session(&mut self) -> Result<(), String>;
-    fn create_destination(&mut self) -> Result<(), String>;
+    fn create_destination(&mut self) -> Result<(), DestinationCreationError>;
     fn write(&mut self, bytes: &[u8]) -> Result<usize, String>;
     fn flush(&mut self) -> Result<(), String>;
     fn close(&mut self) -> Result<(), String>;
@@ -329,13 +348,16 @@ fn main_transfer(
             record.outcome = Outcome::CancelledBeforeWrite;
             return Ok(());
         }
-        port.create_destination()?;
+        if let Err(error) = port.create_destination() {
+            record.main_destination_created = error.created;
+            return Err(error.error);
+        }
+        record.main_destination_created = true;
         let mut offset = 0;
         while offset < payload.len() {
             if cancelled() {
                 if offset == 0 {
-                    record.outcome = Outcome::CancelledBeforeWrite;
-                    return Ok(());
+                    return Err("Cancelled after destination creation; the empty firmware file remains and requires inspection before another attempt".into());
                 }
                 return Err("Cancelled after firmware submission".into());
             }
@@ -363,6 +385,8 @@ fn main_transfer(
         record.error = Some(error);
         record.outcome = if record.bytes_submitted > 0 {
             Outcome::OutcomeUnknown
+        } else if record.main_destination_created {
+            Outcome::DestinationCreatedWithoutPayload
         } else {
             Outcome::Refused
         };
@@ -399,8 +423,15 @@ mod tests {
         fn check_session(&mut self) -> Result<(), String> {
             Ok(())
         }
-        fn create_destination(&mut self) -> Result<(), String> {
-            self.event("create")
+        fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+            if self.fail == Some("creation_audit") {
+                self.events.push("create");
+                return Err(DestinationCreationError {
+                    error: "creation audit failed".into(),
+                    created: true,
+                });
+            }
+            self.event("create").map_err(Into::into)
         }
         fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
             self.event("write")?;
@@ -456,6 +487,42 @@ mod tests {
         assert_eq!(port.written, payload);
         let tail = &port.events[port.events.len() - 5..];
         assert_eq!(tail, ["flush", "close", "volume_flush", "detach", "finish"]);
+    }
+    #[test]
+    fn cancellation_after_main_creation_requires_attention_without_claiming_payload_submission() {
+        let mut port = main_port();
+        let mut checks = 0;
+        let record = main_transfer(
+            &mut port,
+            &vec![0; 51500],
+            VersionPolicy::UpgradeOnly,
+            || {
+                checks += 1;
+                checks == 3
+            },
+        );
+        assert_eq!(record.outcome, Outcome::DestinationCreatedWithoutPayload);
+        assert!(record.main_destination_created);
+        assert_eq!(record.bytes_submitted, 0);
+        assert_eq!(record.bytes_confirmed, 0);
+        assert!(port.written.is_empty());
+        assert_eq!(port.events, ["create", "finish"]);
+        assert!(record.error.as_deref().unwrap().contains("destination"));
+    }
+    #[test]
+    fn created_destination_survives_a_failure_recording_its_creation() {
+        let mut port = main_port();
+        port.fail = Some("creation_audit");
+        let record = main_transfer(
+            &mut port,
+            &vec![0; 51500],
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(record.outcome, Outcome::DestinationCreatedWithoutPayload);
+        assert!(record.main_destination_created);
+        assert_eq!(record.bytes_submitted, 0);
+        assert_eq!(port.events, ["create", "finish"]);
     }
     #[test]
     fn main_equal_newer_unknown_and_existing_destination_write_nothing() {

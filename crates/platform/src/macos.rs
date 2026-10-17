@@ -463,10 +463,10 @@ impl MainPort for MainSession {
         self.session.check()?;
         self.volume.check_root()
     }
-    fn create_destination(&mut self) -> Result<(), String> {
+    fn create_destination(&mut self) -> Result<(), gulikit_core::update::DestinationCreationError> {
         self.prepare_write()?;
         self.check_session()?;
-        self.volume.create()
+        self.volume.create().map_err(Into::into)
     }
     fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
         self.check_session()?;

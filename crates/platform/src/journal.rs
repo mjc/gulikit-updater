@@ -1,6 +1,6 @@
 //! Durable host-side operation records around the same ports used by the updater.
 
-use gulikit_core::update::{BluetoothPort, MainPort};
+use gulikit_core::update::{BluetoothPort, DestinationCreationError, MainPort};
 use serde_json::json;
 use std::{fs::File, io::Write};
 
@@ -103,10 +103,16 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
         let result = self.inner.read_version();
         self.result("main_version", result, |bytes| json!(bytes))
     }
-    fn create_destination(&mut self) -> Result<(), String> {
+    fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
         self.event(json!({"event":"main_create_submitted","index":self.index}))?;
         let result = self.inner.create_destination();
-        self.result("main_create_result", result, |_| json!(null))
+        let created = result.as_ref().map_or_else(|error| error.created, |_| true);
+        self.result(
+            "main_create_result",
+            result.map_err(|error| error.error),
+            |_| json!({"created":true}),
+        )
+        .map_err(|error| DestinationCreationError { error, created })
     }
     fn write(&mut self, bytes: &[u8]) -> Result<usize, String> {
         self.event(
