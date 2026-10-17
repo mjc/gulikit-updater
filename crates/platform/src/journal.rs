@@ -39,6 +39,9 @@ impl<'a, P> Recorded<'a, P> {
     }
 }
 impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
+    fn prepare_write(&mut self) -> Result<(), String> {
+        self.inner.prepare_write()
+    }
     fn check_session(&mut self) -> Result<(), String> {
         self.inner.check_session()
     }
@@ -53,6 +56,9 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
     }
 }
 impl<P: MainPort> MainPort for Recorded<'_, P> {
+    fn prepare_write(&mut self) -> Result<(), String> {
+        self.inner.prepare_write()
+    }
     fn check_session(&mut self) -> Result<(), String> {
         self.inner.check_session()
     }
@@ -103,6 +109,9 @@ mod tests {
         finished: bool,
     }
     impl BluetoothPort for Fake {
+        fn prepare_write(&mut self) -> Result<(), String> {
+            Ok(())
+        }
         fn check_session(&mut self) -> Result<(), String> {
             Ok(())
         }

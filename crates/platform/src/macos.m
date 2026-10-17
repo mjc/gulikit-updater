@@ -126,6 +126,8 @@ void gu_watch_close(void *context) {
 @property IOUSBHostInterface *interface;
 @property IOUSBHostPipe *input;
 @property IOUSBHostPipe *output;
+@property uint8_t inputAddress;
+@property uint8_t outputAddress;
 @end
 @implementation GuTransport
 @end
@@ -172,6 +174,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         }
         if(valid && input && output){transport.input=[transport.interface copyPipeWithAddress:input error:&error];transport.output=[transport.interface copyPipeWithAddress:output error:&error];}
         if(!transport.input || !transport.output){error_text(message,capacity,error.description ?: @"Invalid bulk endpoint descriptors");[transport.interface destroy];[transport.device destroy];return NULL;}
+        transport.inputAddress=input;transport.outputAddress=output;
         return (__bridge_retained void *)transport;
     }
 }
@@ -206,3 +209,20 @@ int gu_usb_max_lun(void *context,uint8_t *value,char *message,size_t capacity) {
 }
 uint32_t gu_entry_hold(uint64_t id){return IOServiceGetMatchingService(kIOMainPortDefault,IORegistryEntryIDMatching(id));}
 void gu_entry_release(uint32_t entry){IOObjectRelease(entry);}
+int gu_usb_endpoint_status(void *context,int input,uint8_t *address,uint16_t *status,char *message,size_t capacity) {
+    @autoreleasepool {
+        GuTransport *transport=(__bridge GuTransport *)context;
+        *address=input ? transport.inputAddress : transport.outputAddress;
+        IOUSBDeviceRequest request={.bmRequestType=0x82,.bRequest=0,.wValue=0,.wIndex=*address,.wLength=2};
+        NSMutableData *data=[NSMutableData dataWithLength:2];NSUInteger actual=0;NSError *error=nil;
+        BOOL result=[transport.device sendDeviceRequest:request data:data bytesTransferred:&actual completionTimeout:5 error:&error];
+        if(!result || actual!=2){error_text(message,capacity,error.description ?: @"Short endpoint GET_STATUS");return -1;}
+        const uint8_t *bytes=data.bytes;*status=bytes[0]|((uint16_t)bytes[1]<<8);return 0;
+    }
+}
+char *gu_usb_description(void *context){
+    @autoreleasepool {
+        GuTransport *transport=(__bridge GuTransport *)context;
+        return strdup([NSString stringWithFormat:@"configuration=%u interface=%u alternate=%u bulk_in=0x%02x bulk_out=0x%02x",transport.interface.configurationDescriptor->bConfigurationValue,transport.interface.interfaceDescriptor->bInterfaceNumber,transport.interface.interfaceDescriptor->bAlternateSetting,transport.inputAddress,transport.outputAddress].UTF8String);
+    }
+}

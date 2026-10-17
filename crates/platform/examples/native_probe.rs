@@ -8,14 +8,30 @@ fn main() -> Result<(), String> {
     );
     if std::env::args().any(|arg| arg == "--confirm-ns39-read-only") {
         let mut session = Session::open(true)?.bluetooth()?;
+        println!("Claimed: {}", session.enable_diagnostics()?);
         println!("GET_MAX_LUN: {:?}", session.max_lun());
         let inquiry = session.inquiry();
         println!("INQUIRY: {inquiry:02x?}");
         // A failed transport command invalidates BOT state: no implicit recovery/reset.
         if inquiry.is_ok() {
-            println!("F1: {:02x?}", session.read_info());
+            let info = session.read_info();
+            println!("F1: {info:02x?}");
+            if info.is_err() {
+                println!(
+                    "Endpoint IN GET_STATUS: {:?}",
+                    session.endpoint_status(true)
+                );
+                println!(
+                    "Endpoint OUT GET_STATUS: {:?}",
+                    session.endpoint_status(false)
+                );
+            }
         }
         session.finish()?;
+        println!(
+            "After release: {}",
+            serde_json::to_string_pretty(&discover()?).map_err(|e| e.to_string())?
+        );
     }
     Ok(())
 }

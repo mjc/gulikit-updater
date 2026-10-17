@@ -1,8 +1,11 @@
 # GuliKit updater
 
-The first implementation slice inspects the reviewed KK3 Max NS39 Main 5.9
-and Bluetooth 5.07 packages offline. It does not flash a controller. Native
-inspection, transfer and post-restart verification remain tracked work.
+The updater supports the reviewed KK3 Max NS39 Main 5.9 and Bluetooth 5.07
+packages. The shared Rust core implements both component transactions and
+restart verification. Native macOS discovery and Main version inspection work;
+native firmware writes remain gated while transport and filesystem hardware
+qualification is in progress. The current controller reports Main 5.9, which
+correctly returns `already_current` with zero firmware writes.
 
 ## Development
 
@@ -13,6 +16,10 @@ devenv shell
 cargo run -- packages
 cargo run -- package inspect /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main
 cargo run -- package inspect /path/to/GuliKit_NS38_NS39_NS59_BT_V5.07.zip --model kk3-max --component bluetooth --json
+cargo run -- devices --json
+cargo run -- probe --component main --confirm-ns39 --json
+cargo run -- update /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main --confirm-ns39 --record ./main-attempt.jsonl --json
+cargo run -- verify ./main-attempt.jsonl --confirm-ns39 --confirm-same-controller --json
 devenv tasks run check:all
 ```
 
@@ -30,9 +37,36 @@ it does not independently establish publisher authenticity.
 
 `--json` produces schema version 1. Successful package information goes to
 stdout; runtime errors go to stderr with an empty stdout. Exit codes are 0 for
-successful offline inspection, 2 for command-line usage, 3 for rejected firmware,
-and 4 for file/output I/O failures. No code in this slice claims installation
-success or reads an installed version.
+successful inspection, an already-current component, or verified installation;
+2 for command-line usage; 3 for rejected firmware; 4 for package/output I/O;
+5 for device/preflight refusal; 7 for a transfer awaiting completion or restart
+verification; and 9 for an uncertain outcome after firmware submission.
+
+Put only one controller in update mode. `--confirm-ns39` attests that you checked
+the physical NS39 label and Max controls. USB IDs and the shared F1 signature
+are observed profile evidence, not automatic proof of the model. The first
+native adapter currently requires macOS 26 or later for exclusive USB access.
+`probe --component bluetooth` normally unmounts the controller volume before
+requesting exclusive ownership, then releases the claim and restores the mount.
+A busy volume refuses without forcing an unmount. No reset or firmware retry is
+used to recover a failed command. Other OSes currently support package commands.
+
+Each update uses one original, verified package and creates an exclusive host
+attempt record outside the controller volume. Operation submission, actual
+results, raw version bytes and cleanup results are persisted as JSON lines.
+An incomplete record preserves an interrupted attempt; it does not prove a
+transfer completed. Equal, newer and unknown installed versions write nothing;
+there is no force, reinstall or downgrade option. Main copying and raw Bluetooth
+traffic are serialized. A topology change invalidates the active session.
+
+Transfer completion is separate from installation verification. After a completed
+transfer, power the controller off and on normally and re-enter update mode if
+needed. `verify` requires a fresh version read on a new attachment plus explicit
+confirmation of the same physical controller. No USB serial is available, so
+this assisted association is recorded separately from the machine-read version.
+Final F2, a host copy, a matching port or a different already-current controller
+cannot establish that the original attempt installed successfully. Unknown or
+pending outcomes never cause automatic recopy, resend, deletion, erase or recovery.
 
 ## Tests
 
@@ -56,8 +90,12 @@ the archive tests require separately supplied vendor downloads.
 ## Source boundaries
 
 `gulikit-core` owns reviewed package metadata, validation, physical-controller
-grouping/selection and BOT framing/status parsing. `gulikit-platform` owns
-bounded host-file I/O. The CLI parses arguments and renders core results. The
+grouping/selection, component version policy, transaction sequencing, outcomes,
+restart association and BOT framing/status parsing. `gulikit-platform` owns
+bounded host-file I/O, directory-relative exclusive creation, audit persistence,
+native discovery, topology watching and exclusive resource ownership. A small
+Objective-C bridge uses the shipped Apple USB/registry APIs; it contains no
+firmware compatibility or transfer policy. The CLI parses arguments and renders core results. The
 same core can serve Slint, and native adapters can provide each OS's discovery,
 SCSI command and update-volume operations without duplicating firmware policy.
 
@@ -66,7 +104,9 @@ counts physical controllers, requires both component accesses on the same
 target and refuses more than one device in update mode. A shared Bluetooth
 protocol signature is not an NS39 model identifier. Native discovery must
 correlate the Main volume and BT command path and recheck uniqueness before
-any future write. The current CLI exposes package commands only.
+any write. Both native write adapters refuse before firmware submission until
+their hardware qualification gates are satisfied. Portable tests and mocked
+official-instruction traces do not establish actual-device flash acceptance.
 
 The [CLI execution plan](https://lific.mjc.lol/GULI/plans/141) and
 [architecture](https://lific.mjc.lol/GULI/pages/252) hold the delivery scope.

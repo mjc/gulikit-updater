@@ -87,6 +87,8 @@ impl Default for TransferRecord {
 /// Each command must validate OS success, exact data length and passed transport status.
 /// Implementations must never retry a submitted vendor command or reset after failure.
 pub trait BluetoothPort {
+    /// Refuse unsupported/unqualified writes before any submission is recorded.
+    fn prepare_write(&mut self) -> Result<(), String>;
     fn check_session(&mut self) -> Result<(), String>;
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String>;
     /// Release all claims and restore storage access on every exit.
@@ -141,6 +143,7 @@ fn bluetooth(
         if payload.len() != 345088 {
             return Err("Incorrect Bluetooth payload size".into());
         }
+        port.prepare_write()?;
         for (index, block) in payload.as_chunks::<512>().0.iter().enumerate() {
             if cancelled() {
                 if !submitted {
@@ -215,6 +218,7 @@ fn command(
 /// A mounted, writable, verified root held open throughout the operation.
 /// Creation is exclusive and does not follow symlinks; cleanup never deletes firmware.
 pub trait MainPort {
+    fn prepare_write(&mut self) -> Result<(), String>;
     fn read_version(&mut self) -> Result<Vec<u8>, String>;
     fn check_session(&mut self) -> Result<(), String>;
     fn create_destination(&mut self) -> Result<(), String>;
@@ -274,6 +278,7 @@ fn main_transfer(
         if payload.len() != 51500 {
             return Err("Incorrect Main payload size".into());
         }
+        port.prepare_write()?;
         port.check_session()?;
         if cancelled() {
             record.outcome = Outcome::CancelledBeforeWrite;
@@ -335,6 +340,9 @@ mod tests {
         fail: Option<&'static str>,
     }
     impl MainPort for MainFake {
+        fn prepare_write(&mut self) -> Result<(), String> {
+            Ok(())
+        }
         fn read_version(&mut self) -> Result<Vec<u8>, String> {
             Ok(self.version.to_vec())
         }
@@ -445,8 +453,16 @@ mod tests {
         invalidate: Option<usize>,
         version: u16,
         cleanup: bool,
+        refuse_write: bool,
     }
     impl BluetoothPort for Fake {
+        fn prepare_write(&mut self) -> Result<(), String> {
+            if self.refuse_write {
+                Err("unqualified adapter".into())
+            } else {
+                Ok(())
+            }
+        }
         fn check_session(&mut self) -> Result<(), String> {
             if self.invalidate == Some(self.calls.len()) {
                 Err("extra device arrived".into())
@@ -519,6 +535,19 @@ mod tests {
             assert_eq!(port.calls, [0xf1]);
             assert!(port.cleanup);
         }
+    }
+    #[test]
+    fn unqualified_adapter_refuses_before_firmware_submission() {
+        let mut port = Fake {
+            version: 506,
+            refuse_write: true,
+            ..Fake::default()
+        };
+        let record = bluetooth(&mut port, &vec![0; 345088], || false);
+        assert_eq!(record.outcome, Outcome::Refused);
+        assert_eq!(record.bytes_submitted, 0);
+        assert_eq!(port.calls, [0xf1]);
+        assert!(port.cleanup);
     }
     #[test]
     fn every_failed_command_stops_without_retry_and_releases() {

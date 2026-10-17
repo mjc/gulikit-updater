@@ -40,15 +40,24 @@ unsafe extern "C" {
     -> i32;
     fn gu_entry_hold(id: u64) -> u32;
     fn gu_entry_release(entry: u32);
+    fn gu_usb_endpoint_status(
+        value: *mut c_void,
+        input: i32,
+        address: *mut u8,
+        status: *mut u16,
+        error: *mut c_char,
+        capacity: usize,
+    ) -> i32;
+    fn gu_usb_description(value: *mut c_void) -> *mut c_char;
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Disk {
     pub bsd: String,
     pub mount: PathBuf,
     pub writable: bool,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NativeCandidate {
     pub ancestor: u64,
     pub generation: u64,
@@ -220,8 +229,7 @@ impl Session {
             return Err("USB topology changed; this session is invalidated. Rediscover and confirm the controller again.".into());
         }
         let current = discover()?.select(true)?;
-        if current.ancestor != self.target.ancestor || current.generation != self.target.generation
-        {
+        if current != self.target {
             return Err("Selected attachment changed".into());
         }
         if !self.watch.unchanged() {
@@ -230,13 +238,23 @@ impl Session {
         Ok(())
     }
     pub fn main(self) -> Result<MainSession, String> {
+        use std::os::unix::fs::MetadataExt;
         self.check()?;
         let mount = self
             .target
             .mount
             .as_ref()
             .ok_or("Main volume is not mounted")?;
-        let volume = Volume::open(mount)?;
+        let disk = self
+            .target
+            .disks
+            .iter()
+            .find(|disk| disk.mount == *mount && disk.writable)
+            .ok_or("Selected mount is not a writable device volume")?;
+        let device = std::fs::metadata(PathBuf::from("/dev").join(&disk.bsd))
+            .map_err(|e| e.to_string())?
+            .rdev();
+        let volume = Volume::open_on_device(mount, device)?;
         self.check()?;
         Ok(MainSession {
             session: self,
@@ -251,6 +269,7 @@ impl Session {
             unmounted: Vec::new(),
             tag: 0,
             finished: false,
+            diagnostic: false,
         };
         let result = (|| {
             for disk in port.session.target.disks.clone() {
@@ -358,6 +377,9 @@ impl MainSession {
     }
 }
 impl MainPort for MainSession {
+    fn prepare_write(&mut self) -> Result<(), String> {
+        Err("Native Main writes remain gated until filesystem durability and completion qualification succeed".into())
+    }
     fn read_version(&mut self) -> Result<Vec<u8>, String> {
         self.session.check()?;
         self.volume.read_version()
@@ -367,6 +389,7 @@ impl MainPort for MainSession {
         self.volume.check_root()
     }
     fn create_destination(&mut self) -> Result<(), String> {
+        self.prepare_write()?;
         self.check_session()?;
         self.volume.create()
     }
@@ -420,8 +443,44 @@ pub struct BluetoothSession {
     unmounted: Vec<String>,
     tag: u32,
     finished: bool,
+    diagnostic: bool,
 }
 impl BluetoothSession {
+    pub fn enable_diagnostics(&mut self) -> Result<String, String> {
+        self.diagnostic = true;
+        let usb = self.usb.ok_or("No exclusive USB claim")?;
+        unsafe {
+            let p = NonNull::new(gu_usb_description(usb.as_ptr()))
+                .ok_or("Description allocation failed")?;
+            let value = CStr::from_ptr(p.as_ptr()).to_string_lossy().into_owned();
+            gu_free(p.as_ptr().cast());
+            Ok(value)
+        }
+    }
+    /// Standard read-only EP0 diagnostics while BOT may be unfinished. No recovery command.
+    pub fn endpoint_status(&mut self, input: bool) -> Result<(u8, u16), String> {
+        let usb = self.usb.ok_or("No exclusive USB claim")?;
+        let mut address = 0;
+        let mut status = 0;
+        let mut error = [0i8; 1024];
+        let result = unsafe {
+            gu_usb_endpoint_status(
+                usb.as_ptr(),
+                i32::from(input),
+                &mut address,
+                &mut status,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if result != 0 {
+            return Err(format!(
+                "Endpoint 0x{address:02x} GET_STATUS: {}",
+                error_string(&error)
+            ));
+        }
+        Ok((address, status))
+    }
     pub fn max_lun(&mut self) -> Result<u8, String> {
         self.check_session()?;
         let mut value = 0;
@@ -446,6 +505,7 @@ impl BluetoothSession {
         let mut error = [0i8; 1024];
         // SAFETY: uniquely owned live bridge object and bounded mutable buffers;
         // synchronous transfer returns before any buffer can be dropped.
+        let started = Instant::now();
         let result = unsafe {
             gu_usb_transfer(
                 usb.as_ptr(),
@@ -457,6 +517,19 @@ impl BluetoothSession {
                 error.len(),
             )
         };
+        if self.diagnostic {
+            eprintln!(
+                "USB tag={} direction={} requested={} actual={} elapsed_ms={} os_result={} raw={:02x?} error={}",
+                self.tag,
+                if input { "in" } else { "out" },
+                bytes.len(),
+                actual,
+                started.elapsed().as_millis(),
+                result,
+                bytes,
+                error_string(&error)
+            );
+        }
         if result != 0 {
             return Err(format!(
                 "USB transfer failed after {actual}/{} bytes: {}; raw={:02x?}",
@@ -526,6 +599,9 @@ impl BluetoothSession {
     }
 }
 impl BluetoothPort for BluetoothSession {
+    fn prepare_write(&mut self) -> Result<(), String> {
+        Err("Native Bluetooth writes remain gated until address, zero-tail F1 and ownership qualification succeed".into())
+    }
     fn check_session(&mut self) -> Result<(), String> {
         self.session.check_transport()
     }

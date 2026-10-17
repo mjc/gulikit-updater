@@ -19,6 +19,14 @@ pub struct Volume {
     destination: Option<File>,
 }
 impl Volume {
+    /// Bind an opened directory to the OS device number of its selected filesystem.
+    pub fn open_on_device(path: &Path, device: u64) -> Result<Self, String> {
+        let volume = Self::open(path)?;
+        if volume.device != device {
+            return Err("Opened root does not belong to the selected USB volume".into());
+        }
+        Ok(volume)
+    }
     pub fn open(path: &Path) -> Result<Self, String> {
         let root = File::from(
             open(
@@ -115,6 +123,16 @@ impl Volume {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replacement_before_open_is_not_the_selected_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("GULI.TXT"), b"www.gulikit.com\nversion 5.8").unwrap();
+        let replacement_device = std::fs::metadata(dir.path()).unwrap().dev();
+        assert!(
+            Volume::open_on_device(dir.path(), replacement_device.checked_add(1).unwrap()).is_err()
+        );
+        assert!(!dir.path().join("NS39_KK3_MAX_V5.9.bin").exists());
+    }
     #[test]
     fn rejects_symlinked_version_and_existing_destination_without_truncation() {
         let dir = tempfile::tempdir().unwrap();
