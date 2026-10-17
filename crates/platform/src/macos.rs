@@ -275,8 +275,8 @@ impl Session {
             for disk in port.session.target.disks.clone() {
                 if !disk.mount.as_os_str().is_empty() {
                     port.session.check()?;
+                    port.unmounted.push(disk.bsd.clone());
                     diskutil("unmount", &disk.bsd)?;
-                    port.unmounted.push(disk.bsd);
                 }
             }
             port.session.check_transport()?;
@@ -353,10 +353,10 @@ fn diskutil(action: &str, bsd: &str) -> Result<(), String> {
     if !bsd.starts_with("disk") || !bsd.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err("Invalid OS disk identifier".into());
     }
-    let output = Command::new("/usr/sbin/diskutil")
-        .args([action, bsd])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = crate::process::run_with_deadline(
+        Command::new("/usr/sbin/diskutil").args([action, bsd]),
+        Duration::from_secs(30),
+    )?;
     if !output.status.success() {
         return Err(format!(
             "diskutil {action} refused: {} {}",
@@ -642,6 +642,15 @@ impl BluetoothPort for BluetoothSession {
             if let Err(error) = self.session.check_transport() {
                 errors.push(format!("Remount requires rediscovery: {error}"));
                 break;
+            }
+            let current = discover()?;
+            if current.candidates.iter().any(|c| {
+                c.ancestor == self.session.target.ancestor
+                    && c.disks
+                        .iter()
+                        .any(|d| d.bsd == disk && !d.mount.as_os_str().is_empty())
+            }) {
+                continue;
             }
             if let Err(error) = diskutil("mount", &disk) {
                 errors.push(error);
