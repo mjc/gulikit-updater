@@ -238,6 +238,13 @@ fn outcome_code(value: &serde_json::Value) -> u8 {
     {
         return 8;
     }
+    if value
+        .pointer("/transfer/error")
+        .and_then(|value| value.as_str())
+        .is_some()
+    {
+        return 5;
+    }
     match value.pointer("/transfer/outcome").and_then(|v| v.as_str()) {
         Some("already_current" | "installed_verified") | None => 0,
         Some(
@@ -270,6 +277,11 @@ mod tests {
         assert_eq!(outcome_code(&value), 8);
         let unknown = serde_json::json!({"transfer":{"outcome":"outcome_unknown","cleanup_errors":["remount failed"]}});
         assert_eq!(outcome_code(&unknown), 9);
+    }
+    #[test]
+    fn verification_read_error_cannot_reuse_a_previous_success_exit_status() {
+        let value = serde_json::json!({"transfer":{"outcome":"already_current","error":"fresh read failed","cleanup_errors":[]}});
+        assert_eq!(outcome_code(&value), 5);
     }
     #[test]
     fn json_envelope_replaces_existing_schema_marker() {
