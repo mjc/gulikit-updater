@@ -2,8 +2,17 @@
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
 #import <IOUSBHost/IOUSBHost.h>
+#import <IOKit/usb/USB.h>
 #import <DiskArbitration/DiskArbitration.h>
 #include <stdatomic.h>
+
+// The pinned build SDK predates this public method. Match the current Apple
+// header's NSUInteger ABI and require runtime support before any capture.
+#if __MAC_OS_X_VERSION_MAX_ALLOWED < 260000
+@interface IOUSBHostObject (GuSurrenderDeclaration)
+- (void)destroyWithOptions:(NSUInteger)options;
+@end
+#endif
 
 static NSDictionary *properties(io_registry_entry_t entry) {
     CFMutableDictionaryRef value = NULL;
@@ -136,15 +145,17 @@ void gu_watch_close(void *context) {
 static void error_text(char *buffer,size_t size,NSString *text) { if(size)snprintf(buffer,size,"%s",text.UTF8String ?: "unknown IOUSBHost error"); }
 void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
     @autoreleasepool {
+        if(![IOUSBHostDevice instancesRespondToSelector:@selector(destroyWithOptions:)]) {error_text(message,capacity,@"Native ownership requires documented DeviceSurrender support; capture refused");return NULL;}
         io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IORegistryEntryIDMatching(id));
         if (!service) {error_text(message,capacity,@"Selected USB attachment disappeared");return NULL;}
         NSError *error=nil;GuTransport *transport=[GuTransport new];
-        // Seize requests exclusive ownership without DeviceCapture's reset-on-destroy behavior.
-        // DeviceSeize is bit1 in the current Apple SDK. Older build SDKs omit
-        // the enum name; keep this adapter restricted to the qualified OS family.
-        if (@available(macOS 26.0,*)) {} else {IOObjectRelease(service);error_text(message,capacity,@"Exclusive USB adapter requires macOS 26 or later");return NULL;}
-        transport.device=[[IOUSBHostDevice alloc] initWithIOService:service options:(IOUSBHostObjectInitOptions)(1U<<1) queue:nil error:&error interestHandler:nil];
+        // Modern Capture includes MSC interfaces. Ordinary destroy resets/rematches;
+        // Rust selects explicit DeviceSurrender after any possible firmware submission.
+        transport.device=[[IOUSBHostDevice alloc] initWithIOService:service options:IOUSBHostObjectInitOptionsDeviceCapture queue:nil error:&error interestHandler:nil];
         if (!transport.device) {IOObjectRelease(service);error_text(message,capacity,error.description);return NULL;}
+        mach_timespec_t deadline={5,0};
+        kern_return_t quiet=IOServiceWaitQuiet(service,&deadline);
+        if(quiet!=KERN_SUCCESS){IOObjectRelease(service);error_text(message,capacity,[NSString stringWithFormat:@"Capture did not reach quiet state: 0x%x",quiet]);[transport.device destroy];return NULL;}
         io_iterator_t children=0;
         kern_return_t kr=IORegistryEntryCreateIterator(service,kIOServicePlane,kIORegistryIterateRecursively,&children);
         IOObjectRelease(service);
@@ -153,7 +164,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         while ((child=IOIteratorNext(children))) {
             if (IOObjectConformsTo(child,"IOUSBHostInterface") && bot_profile(properties(child))) {
                 matches++;
-                if(matches==1) transport.interface=[[IOUSBHostInterface alloc] initWithIOService:child options:(IOUSBHostObjectInitOptions)(1U<<1) queue:nil error:&error interestHandler:nil];
+                if(matches==1) transport.interface=[[IOUSBHostInterface alloc] initWithIOService:child options:0 queue:nil error:&error interestHandler:nil];
             }
             IOObjectRelease(child);
         }
@@ -161,6 +172,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         if(matches!=1 || !transport.interface) {error_text(message,capacity,error.description ?: @"Expected one BOT interface");[transport.interface destroy];[transport.device destroy];return NULL;}
         const IOUSBInterfaceDescriptor *interface=transport.interface.interfaceDescriptor;
         const IOUSBConfigurationDescriptor *config=transport.interface.configurationDescriptor;
+        if(!interface || !config){error_text(message,capacity,@"Descriptors unavailable after capture");[transport.interface destroy];[transport.device destroy];return NULL;}
         const uint8_t *bytes=(const uint8_t *)config;
         NSUInteger total=OSSwapLittleToHostInt16(config->wTotalLength);
         uint8_t input=0,output=0;BOOL ours=NO,valid=YES;
@@ -180,7 +192,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         return (__bridge_retained void *)transport;
     }
 }
-int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,size_t *actual,char *message,size_t capacity) {
+int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,size_t *actual,int *timed_out,char *message,size_t capacity) {
     @autoreleasepool {
         GuTransport *transport=(__bridge GuTransport *)context;
         NSMutableData *data=[NSMutableData dataWithLength:length];
@@ -188,15 +200,18 @@ int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,size_t 
         NSError *error=nil;NSUInteger count=0;
         BOOL result=[(input ? transport.input : transport.output) sendIORequestWithData:data bytesTransferred:&count completionTimeout:5 error:&error];
         *actual=count;
+        *timed_out=!result && (error.code==(NSInteger)(int32_t)kIOReturnTimeout || error.code==(NSInteger)(int32_t)kIOUSBTransactionTimeout);
         if(input)memcpy(bytes,data.bytes,MIN(count,length));
         if(!result)error_text(message,capacity,error.description);
         return result ? 0 : -1;
     }
 }
-void gu_usb_close(void *context) {
+void gu_usb_close(void *context,int surrender) {
     @autoreleasepool {
         GuTransport *transport=CFBridgingRelease(context);
-        [transport.interface destroy];[transport.device destroy];
+        [transport.interface destroy];
+        // DeviceSurrender is bit0 in the current public Apple SDK.
+        [transport.device destroyWithOptions:surrender ? 1U : 0U];
     }
 }
 int gu_usb_max_lun(void *context,uint8_t *value,char *message,size_t capacity) {

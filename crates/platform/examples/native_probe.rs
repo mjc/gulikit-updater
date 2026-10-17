@@ -25,13 +25,19 @@ fn main() -> Result<(), String> {
                     "Endpoint OUT GET_STATUS: {:?}",
                     session.endpoint_status(false)
                 );
+                println!(
+                    "Original transaction continuation: {:?}",
+                    session.diagnostic_continuation()
+                );
             }
         }
-        session.finish()?;
+        let cleanup = session.finish();
+        println!("Cleanup result: {cleanup:?}");
         println!(
             "After release: {}",
             serde_json::to_string_pretty(&discover()?).map_err(|e| e.to_string())?
         );
+        cleanup?;
     }
     Ok(())
 }

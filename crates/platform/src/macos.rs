@@ -4,7 +4,7 @@
 
 use crate::volume::Volume;
 use gulikit_core::{
-    bot::{DataStage, Direction, command_block, data_stage, validate_status},
+    bot::{self, BulkIo, Direction, validate_status},
     device::{Candidate, Discovery},
     update::{BluetoothPort, CompletionDecision, CompletionObservation, MainPort},
     version::MainVersion,
@@ -33,10 +33,11 @@ unsafe extern "C" {
         bytes: *mut u8,
         length: usize,
         actual: *mut usize,
+        timed_out: *mut i32,
         error: *mut c_char,
         capacity: usize,
     ) -> i32;
-    fn gu_usb_close(value: *mut c_void);
+    fn gu_usb_close(value: *mut c_void, surrender: i32);
     fn gu_usb_max_lun(value: *mut c_void, lun: *mut u8, error: *mut c_char, capacity: usize)
     -> i32;
     fn gu_entry_hold(id: u64) -> u32;
@@ -288,9 +289,9 @@ impl Session {
             session: self,
             usb: None,
             unmounted: Vec::new(),
-            tag: 0,
             finished: false,
-            diagnostic: false,
+            last_opcode: 0,
+            continuation_used: false,
         };
         let result = (|| {
             for disk in port.session.target.disks.clone() {
@@ -309,6 +310,14 @@ impl Session {
                     error.as_mut_ptr(),
                     error.len(),
                 )
+            })
+            .map(|ptr| {
+                bot::Session::new(NativeUsb {
+                    ptr: Some(ptr),
+                    diagnostic: false,
+                    tag: 0,
+                    zero_input_timeout: false,
+                })
             });
             if port.usb.is_none() {
                 return Err(error_string(&error));
@@ -452,18 +461,109 @@ impl MainPort for MainSession {
     }
 }
 
+struct NativeUsb {
+    ptr: Option<NonNull<c_void>>,
+    diagnostic: bool,
+    tag: u32,
+    zero_input_timeout: bool,
+}
+impl NativeUsb {
+    fn pointer(&self) -> Result<NonNull<c_void>, String> {
+        self.ptr.ok_or_else(|| "USB claim is closed".into())
+    }
+    fn close(mut self, surrender: bool) {
+        if let Some(ptr) = self.ptr.take() {
+            // SAFETY: unique bridge ownership, consumed exactly once. Explicit
+            // destruction precedes ARC release; later destruction is idempotent.
+            unsafe {
+                gu_usb_close(ptr.as_ptr(), i32::from(surrender));
+            }
+        }
+    }
+}
+impl Drop for NativeUsb {
+    fn drop(&mut self) {
+        // Panic/early-drop must never choose reset after an unknown F0. Normal
+        // read-only reset/restoration is an explicit successful finish phase.
+        if let Some(ptr) = self.ptr.take() {
+            unsafe {
+                gu_usb_close(ptr.as_ptr(), 1);
+            }
+        }
+    }
+}
+fn transfer_result(result: i32, actual: usize, bytes: &[u8], error: &str) -> Result<usize, String> {
+    if result != 0 || actual > bytes.len() {
+        return Err(format!(
+            "USB status={result} actual={actual} requested={} error={error}; raw={:02x?}",
+            bytes.len(),
+            &bytes[..actual.min(bytes.len())]
+        ));
+    }
+    Ok(actual)
+}
+impl BulkIo for NativeUsb {
+    fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String> {
+        let usb = self.pointer()?;
+        let input = direction == Direction::In;
+        let mut actual = 0;
+        let mut timed_out = 0;
+        let mut error = [0i8; 1024];
+        if !input && bytes.len() == 31 && bytes.starts_with(b"USBC") {
+            self.tag = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        }
+        let started = Instant::now();
+        // SAFETY: owned live bridge object and bounded buffers remain valid
+        // until the synchronous operation returns; actual is separately retained.
+        let result = unsafe {
+            gu_usb_transfer(
+                usb.as_ptr(),
+                i32::from(input),
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                &mut actual,
+                &mut timed_out,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        self.zero_input_timeout = result != 0 && timed_out != 0 && input && actual == 0;
+        if self.diagnostic {
+            eprintln!(
+                "USB tag={} direction={} requested={} actual={} elapsed_ms={} os_result={} raw={:02x?} error={}",
+                self.tag,
+                if input { "in" } else { "out" },
+                bytes.len(),
+                actual,
+                started.elapsed().as_millis(),
+                result,
+                bytes,
+                error_string(&error)
+            );
+        }
+        transfer_result(result, actual, bytes, &error_string(&error))
+    }
+}
+
 pub struct BluetoothSession {
     session: Session,
-    usb: Option<NonNull<c_void>>,
+    usb: Option<bot::Session<NativeUsb>>,
     unmounted: Vec<String>,
-    tag: u32,
     finished: bool,
-    diagnostic: bool,
+    last_opcode: u8,
+    continuation_used: bool,
 }
 impl BluetoothSession {
+    fn native(&mut self) -> Result<&mut NativeUsb, String> {
+        self.usb
+            .as_mut()
+            .map(bot::Session::io_mut)
+            .ok_or_else(|| "No exclusive USB claim".into())
+    }
     pub fn enable_diagnostics(&mut self) -> Result<String, String> {
-        self.diagnostic = true;
-        let usb = self.usb.ok_or("No exclusive USB claim")?;
+        let io = self.native()?;
+        io.diagnostic = true;
+        let usb = io.pointer()?;
         unsafe {
             let p = NonNull::new(gu_usb_description(usb.as_ptr()))
                 .ok_or("Description allocation failed")?;
@@ -472,9 +572,9 @@ impl BluetoothSession {
             Ok(value)
         }
     }
-    /// Standard read-only EP0 diagnostics while BOT may be unfinished. No recovery command.
+    /// Standard read-only EP0 diagnostics; no recovery or firmware opcode.
     pub fn endpoint_status(&mut self, input: bool) -> Result<(u8, u16), String> {
-        let usb = self.usb.ok_or("No exclusive USB claim")?;
+        let usb = self.native()?.pointer()?;
         let mut address = 0;
         let mut status = 0;
         let mut error = [0i8; 1024];
@@ -498,9 +598,9 @@ impl BluetoothSession {
     }
     pub fn max_lun(&mut self) -> Result<u8, String> {
         self.check_session()?;
+        let usb = self.native()?.pointer()?;
         let mut value = 0;
         let mut error = [0i8; 1024];
-        let usb = self.usb.ok_or("No exclusive USB claim")?;
         let result =
             unsafe { gu_usb_max_lun(usb.as_ptr(), &mut value, error.as_mut_ptr(), error.len()) };
         if result != 0 {
@@ -514,56 +614,10 @@ impl BluetoothSession {
     pub fn target(&self) -> &NativeCandidate {
         &self.session.target
     }
-    fn transfer(&mut self, input: bool, bytes: &mut [u8]) -> Result<usize, String> {
-        let usb = self.usb.ok_or("No exclusive USB claim")?;
-        let mut actual = 0;
-        let mut error = [0i8; 1024];
-        // SAFETY: uniquely owned live bridge object and bounded mutable buffers;
-        // synchronous transfer returns before any buffer can be dropped.
-        let started = Instant::now();
-        let result = unsafe {
-            gu_usb_transfer(
-                usb.as_ptr(),
-                i32::from(input),
-                bytes.as_mut_ptr(),
-                bytes.len(),
-                &mut actual,
-                error.as_mut_ptr(),
-                error.len(),
-            )
-        };
-        if self.diagnostic {
-            eprintln!(
-                "USB tag={} direction={} requested={} actual={} elapsed_ms={} os_result={} raw={:02x?} error={}",
-                self.tag,
-                if input { "in" } else { "out" },
-                bytes.len(),
-                actual,
-                started.elapsed().as_millis(),
-                result,
-                bytes,
-                error_string(&error)
-            );
-        }
-        if result != 0 {
-            return Err(format!(
-                "USB transfer failed after {actual}/{} bytes: {}; raw={:02x?}",
-                bytes.len(),
-                error_string(&error),
-                &bytes[..actual.min(bytes.len())]
-            ));
-        }
-        if actual > bytes.len() {
-            return Err("USB adapter returned an invalid transfer length".into());
-        }
-        Ok(actual)
-    }
-    /// Read-only qualification: zero-tail F1 with strict BOT checks.
     pub fn read_info(&mut self) -> Result<Vec<u8>, String> {
         self.check_session()?;
         self.command(0xf1, &[])
     }
-    /// Read-only diagnostic in the same exclusive session, with no reset/reclaim.
     pub fn inquiry(&mut self) -> Result<Vec<u8>, String> {
         self.check_session()?;
         self.bot(&[0x12, 0, 0, 0, 36, 0], Direction::In, &[], 36)
@@ -575,42 +629,58 @@ impl BluetoothSession {
         data: &[u8],
         length: usize,
     ) -> Result<Vec<u8>, String> {
-        self.tag = self.tag.checked_add(1).ok_or("BOT tag exhausted")?;
-        let mut cbw =
-            command_block(self.tag, direction, length as u32, cdb).map_err(|e| e.to_string())?;
-        if self.transfer(false, &mut cbw)? != 31 {
-            return Err("Short CBW; command is uncertain".into());
+        self.last_opcode = cdb.first().copied().unwrap_or(0);
+        self.usb
+            .as_mut()
+            .ok_or("No exclusive USB claim")?
+            .command(cdb, direction, data, length)
+    }
+    /// At most one diagnostic continuation of the original timed-out F1 IN
+    /// phase. Never clears the failure latch or authorizes a firmware command.
+    pub fn diagnostic_continuation(&mut self) -> Result<String, String> {
+        if self.continuation_used || self.last_opcode != 0xf1 {
+            return Err("No eligible F1 continuation".into());
         }
-        let mut bytes = if direction == Direction::In {
-            vec![0; length]
-        } else {
-            data.to_vec()
-        };
-        let actual = self.transfer(direction == Direction::In, &mut bytes)?;
-        bytes.truncate(actual);
-        if direction == Direction::In
-            && data_stage(&bytes, self.tag, length as u32).map_err(|e| e.to_string())?
-                == DataStage::EarlyStatus
+        let channel = self.usb.as_mut().ok_or("No USB claim")?;
+        if !channel.failed()
+            || channel.firmware_may_have_been_submitted()
+            || !channel.io_mut().diagnostic
+            || !channel.io_mut().zero_input_timeout
         {
-            return Err(format!("Early CSW instead of vendor data: {bytes:02x?}"));
+            return Err("Continuation requires a read-only zero-byte F1 timeout".into());
         }
-        let mut status = [0; 13];
-        let status_actual = self.transfer(true, &mut status)?;
-        validate_status(
-            &status[..status_actual],
-            self.tag,
-            length as u32,
-            actual as u32,
-        )
-        .map_err(|e| format!("{e}; CSW={status:02x?}, data={bytes:02x?}"))?;
-        if actual != length {
-            return Err(format!("Short vendor data {actual}/{length}: {bytes:02x?}"));
+        self.continuation_used = true;
+        for input in [true, false] {
+            let (address, status) = self.endpoint_status(input)?;
+            if status & 1 != 0 {
+                return Err(format!(
+                    "Endpoint 0x{address:02x} is halted; no continuation issued"
+                ));
+            }
         }
-        Ok(if direction == Direction::In {
-            bytes
-        } else {
-            Vec::new()
-        })
+        let channel = self.usb.as_mut().ok_or("No USB claim")?;
+        let tag = channel.tag();
+        let mut bytes = vec![0; 20];
+        let actual = channel.io_mut().transfer(Direction::In, &mut bytes)?;
+        bytes.truncate(actual);
+        if actual == 13 && bytes.starts_with(b"USBS") {
+            return Ok(format!(
+                "Original transaction early CSW raw={bytes:02x?}; validation={:?}",
+                validate_status(&bytes, tag, 20, 0)
+            ));
+        }
+        if actual == 20 {
+            let mut status = [0; 13];
+            let count = channel.io_mut().transfer(Direction::In, &mut status)?;
+            return Ok(format!(
+                "Late F1 data raw={bytes:02x?}; CSW={:02x?}; validation={:?}; original deadline still failed",
+                &status[..count],
+                validate_status(&status[..count], tag, 20, 20)
+            ));
+        }
+        Ok(format!(
+            "Original transaction continuation actual={actual} raw={bytes:02x?}; remains failed"
+        ))
     }
 }
 impl BluetoothPort for BluetoothSession {
@@ -618,6 +688,9 @@ impl BluetoothPort for BluetoothSession {
         Err("Native Bluetooth writes remain gated until address, zero-tail F1 and ownership qualification succeed".into())
     }
     fn check_session(&mut self) -> Result<(), String> {
+        if self.finished {
+            return Err("USB session has ended".into());
+        }
         self.session.check_transport()
     }
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
@@ -646,9 +719,21 @@ impl BluetoothPort for BluetoothSession {
             return Ok(());
         }
         self.finished = true;
-        if let Some(usb) = self.usb.take() {
-            unsafe {
-                gu_usb_close(usb.as_ptr());
+        if let Some(mut usb) = self.usb.take() {
+            let preserve = usb.firmware_may_have_been_submitted();
+            if usb.io_mut().diagnostic {
+                eprintln!(
+                    "Cleanup disposition: {}",
+                    if preserve {
+                        "no-reset DeviceSurrender; driver restoration pending"
+                    } else {
+                        "read-only ordinary destroy; documented USB reset and driver rematch"
+                    }
+                );
+            }
+            usb.into_inner().close(preserve);
+            if preserve {
+                return Err("Host claim surrendered without reset after possible F0; storage driver restoration remains pending. Restart normally before fresh discovery/verification.".into());
             }
         }
         let mut errors = Vec::new();
@@ -695,4 +780,21 @@ pub fn read_main(confirmed: bool) -> Result<(NativeCandidate, Vec<u8>, MainVersi
     let raw = port.read_version()?;
     let version = MainVersion::parse(&raw).map_err(|e| e.to_string())?;
     Ok((port.session.target.clone(), raw, version))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transfer_result;
+    #[test]
+    fn native_error_and_actual_length_are_independent() {
+        let data = [0xa1; 20];
+        for count in [0, 7, 20] {
+            let error = transfer_result(-1, count, &data, "NSError timeout").unwrap_err();
+            assert!(error.contains("status=-1"));
+            assert!(error.contains(&format!("actual={count}")));
+            assert!(error.contains("raw="));
+        }
+        assert!(transfer_result(0, 21, &data, "").is_err());
+        assert_eq!(transfer_result(0, 7, &data, "").unwrap(), 7);
+    }
 }

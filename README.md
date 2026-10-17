@@ -45,12 +45,15 @@ and 9 for an uncertain outcome after firmware submission.
 
 Put only one controller in update mode. `--confirm-ns39` attests that you checked
 the physical NS39 label and Max controls. USB IDs and the shared F1 signature
-are observed profile evidence, not automatic proof of the model. The first
-native adapter currently requires macOS 26 or later for exclusive USB access.
+are observed profile evidence, not automatic proof of the model. The native
+adapter checks runtime support for modern IOUSBHost and DeviceSurrender.
 `probe --component bluetooth` normally unmounts the controller volume before
-requesting exclusive ownership, then releases the claim and restores the mount.
-A busy volume refuses without forcing an unmount. No reset or firmware retry is
-used to recover a failed command. Other OSes currently support package commands.
+requesting modern Capture. Read-only cleanup explicitly destroys the capture,
+which resets USB and restarts driver matching; restored storage is checked
+separately. A busy volume refuses without forcing an unmount. After any possible
+firmware submission, cleanup uses no-reset DeviceSurrender and reports storage
+restoration pending, including after final F2 success. No firmware replay or
+automatic reset is used after submission. Other OSes currently support package commands.
 
 Each update uses one original, verified package and creates an exclusive host
 attempt record outside the controller volume. Operation submission, actual

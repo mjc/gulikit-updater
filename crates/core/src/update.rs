@@ -111,13 +111,15 @@ impl Default for TransferRecord {
 
 /// An exclusive, quiesced transport bound to one attachment and a live topology watcher.
 /// Each command must validate OS success, exact data length and passed transport status.
-/// Implementations must never retry a submitted vendor command or reset after failure.
+/// Implementations must never retry a submitted vendor command or automatically reset
+/// once firmware may have been submitted. Read-only cleanup effects must be explicit.
 pub trait BluetoothPort {
     /// Refuse unsupported/unqualified writes before any submission is recorded.
     fn prepare_write(&mut self) -> Result<(), String>;
     fn check_session(&mut self) -> Result<(), String>;
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String>;
-    /// Release all claims and restore storage access on every exit.
+    /// Release claims on every exit; report restoration or preservation pending.
+    /// No-reset surrender after F0 may deliberately leave storage drivers detached.
     fn finish(&mut self) -> Result<(), String>;
 }
 
