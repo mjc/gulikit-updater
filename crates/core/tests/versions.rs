@@ -28,6 +28,7 @@ fn ambiguous_or_unbounded_main_text_is_unknown() {
         b"www.gulikit.com\nversion +5.8",
         b"www.gulikit.com\nversion 5.8\0",
         b"www.gulikit.com\rversion 5.8",
+        b"www.gulikit.com\nversion 5.8\r",
         b"www.gulikit.com\nversion 5.8\nextra",
         b"www.gulikit.com\nversion 10000.8",
     ] {

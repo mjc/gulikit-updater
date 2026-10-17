@@ -84,22 +84,18 @@ enum PackageCommand {
     },
 }
 
-#[derive(Serialize)]
-struct Envelope<T> {
-    schema_version: u8,
-    #[serde(flatten)]
-    body: T,
-}
-
 fn write_json(writer: impl Write, body: impl Serialize) -> io::Result<()> {
     let mut writer = writer;
-    serde_json::to_writer_pretty(
-        &mut writer,
-        &Envelope {
-            schema_version: 1,
-            body,
-        },
-    )?;
+    let mut body = serde_json::to_value(body)?;
+    body.as_object_mut()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "JSON output body must be an object",
+            )
+        })?
+        .insert("schema_version".into(), serde_json::json!(1));
+    serde_json::to_writer_pretty(&mut writer, &body)?;
     writeln!(writer)
 }
 
@@ -249,5 +245,25 @@ fn main() -> ExitCode {
             eprintln!("output failed: {error}");
             ExitCode::from(4)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn json_envelope_replaces_existing_schema_marker() {
+        let mut out = Vec::new();
+        write_json(
+            &mut out,
+            serde_json::json!({"schema_version":1,"event":"attempt_result"}),
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches("\"schema_version\"").count(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()["schema_version"],
+            1
+        );
     }
 }

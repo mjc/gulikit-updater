@@ -39,6 +39,9 @@ impl MainVersion {
             return Err(UnknownVersion);
         }
         let text = std::str::from_utf8(bytes).map_err(|_| UnknownVersion)?;
+        if text.replace("\r\n", "").contains('\r') {
+            return Err(UnknownVersion);
+        }
         let mut website = false;
         let mut version = None;
         for line in text.split('\n') {

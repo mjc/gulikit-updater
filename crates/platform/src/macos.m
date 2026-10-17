@@ -151,7 +151,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         while ((child=IOIteratorNext(children))) {
             if (IOObjectConformsTo(child,"IOUSBHostInterface") && bot_profile(properties(child))) {
                 matches++;
-                if(matches==1) transport.interface=[[IOUSBHostInterface alloc] initWithIOService:child options:0 queue:nil error:&error interestHandler:nil];
+                if(matches==1) transport.interface=[[IOUSBHostInterface alloc] initWithIOService:child options:(IOUSBHostObjectInitOptions)(1U<<1) queue:nil error:&error interestHandler:nil];
             }
             IOObjectRelease(child);
         }
