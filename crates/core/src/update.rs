@@ -19,6 +19,32 @@ pub enum Outcome {
     InstalledVerified,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionDecision {
+    Pending,
+    ExpectedDetach,
+    Invalidated,
+}
+pub struct CompletionObservation {
+    pub selected_present: bool,
+    pub other_candidate_present: bool,
+    pub discovery_complete: bool,
+    pub usb_events: u64,
+    pub usb_arrivals: u64,
+}
+impl CompletionObservation {
+    pub fn decision(&self) -> CompletionDecision {
+        if !self.discovery_complete || self.other_candidate_present || self.usb_arrivals != 0 {
+            return CompletionDecision::Invalidated;
+        }
+        match (self.selected_present, self.usb_events) {
+            (true, 0) => CompletionDecision::Pending,
+            (false, 1) => CompletionDecision::ExpectedDetach,
+            _ => CompletionDecision::Invalidated,
+        }
+    }
+}
+
 /// A fresh machine readback and separately recorded assisted association.
 #[derive(Debug, Serialize)]
 pub struct Verification {
@@ -227,7 +253,7 @@ pub trait MainPort {
     fn close(&mut self) -> Result<(), String>;
     fn volume_flush(&mut self) -> Result<(), String>;
     /// Bounded host wait for automatic controller detach, never an eject/reset.
-    fn wait_for_completion(&mut self) -> Result<bool, String>;
+    fn wait_for_completion(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<bool, String>;
     fn finish(&mut self) -> Result<(), String>;
 }
 
@@ -307,7 +333,7 @@ fn main_transfer(
         port.flush()?;
         port.close()?;
         port.volume_flush()?;
-        record.outcome = if port.wait_for_completion()? {
+        record.outcome = if port.wait_for_completion(&mut cancelled)? {
             Outcome::TransferCompletedAwaitingVerification
         } else {
             Outcome::TransferSubmittedPendingCompletion
@@ -367,7 +393,7 @@ mod tests {
         fn volume_flush(&mut self) -> Result<(), String> {
             self.event("volume_flush")
         }
-        fn wait_for_completion(&mut self) -> Result<bool, String> {
+        fn wait_for_completion(&mut self, _: &mut dyn FnMut() -> bool) -> Result<bool, String> {
             self.event("detach")?;
             Ok(true)
         }

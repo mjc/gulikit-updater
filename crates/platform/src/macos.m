@@ -96,14 +96,15 @@ char *gu_snapshot(void) {
 }
 void gu_free(void *value) { free(value); }
 
-typedef struct { IONotificationPortRef port; dispatch_queue_t queue; io_iterator_t added,removed; atomic_uint_fast64_t epoch; } GuWatch;
+typedef struct { IONotificationPortRef port; dispatch_queue_t queue; io_iterator_t added,removed; atomic_uint_fast64_t epoch,arrivals; } GuWatch;
 static void watch_event(void *context,io_iterator_t iterator) {
     GuWatch *watch=context;io_service_t entry;
-    while ((entry=IOIteratorNext(iterator))) { atomic_fetch_add(&watch->epoch,1);IOObjectRelease(entry); }
+    while ((entry=IOIteratorNext(iterator))) { atomic_fetch_add(&watch->epoch,1);if(iterator==watch->added)atomic_fetch_add(&watch->arrivals,1);IOObjectRelease(entry); }
 }
 void *gu_watch_open(void) {
     GuWatch *watch=calloc(1,sizeof(*watch));if (!watch) return NULL;
     atomic_init(&watch->epoch,0);
+    atomic_init(&watch->arrivals,0);
     watch->port=IONotificationPortCreate(kIOMainPortDefault);
     if (!watch->port) {free(watch);return NULL;}
     watch->queue=dispatch_queue_create("lol.mjc.gulikit-usb-watch",DISPATCH_QUEUE_SERIAL);
@@ -115,10 +116,11 @@ void *gu_watch_open(void) {
     return watch;
 }
 uint64_t gu_watch_epoch(void *context) {GuWatch *watch=context;dispatch_sync(watch->queue,^{});return atomic_load(&watch->epoch);}
+void gu_watch_state(void *context,uint64_t *epoch,uint64_t *arrivals) {GuWatch *watch=context;dispatch_sync(watch->queue,^{*epoch=atomic_load(&watch->epoch);*arrivals=atomic_load(&watch->arrivals);});}
 void gu_watch_close(void *context) {
     GuWatch *watch=context;IONotificationPortSetDispatchQueue(watch->port,NULL);
     dispatch_sync(watch->queue,^{});IONotificationPortDestroy(watch->port);
-    IOObjectRelease(watch->added);IOObjectRelease(watch->removed);free(watch);
+    IOObjectRelease(watch->added);IOObjectRelease(watch->removed);watch->queue=nil;free(watch);
 }
 
 @interface GuTransport : NSObject

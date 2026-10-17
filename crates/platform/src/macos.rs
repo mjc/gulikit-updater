@@ -6,7 +6,7 @@ use crate::volume::Volume;
 use gulikit_core::{
     bot::{DataStage, Direction, command_block, data_stage, validate_status},
     device::{Candidate, Discovery},
-    update::{BluetoothPort, MainPort},
+    update::{BluetoothPort, CompletionDecision, CompletionObservation, MainPort},
     version::MainVersion,
 };
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,7 @@ unsafe extern "C" {
     fn gu_free(value: *mut c_void);
     fn gu_watch_open() -> *mut c_void;
     fn gu_watch_epoch(value: *mut c_void) -> u64;
+    fn gu_watch_state(value: *mut c_void, epoch: *mut u64, arrivals: *mut u64);
     fn gu_watch_close(value: *mut c_void);
     fn gu_usb_open(id: u64, error: *mut c_char, capacity: usize) -> *mut c_void;
     fn gu_usb_transfer(
@@ -116,17 +117,37 @@ pub fn discover() -> Result<Snapshot, String> {
 struct Watch {
     ptr: NonNull<c_void>,
     epoch: u64,
+    arrivals: u64,
 }
 impl Watch {
     fn new() -> Result<Self, String> {
         // SAFETY: unique opaque owner, released once in Drop. Bridge synchronizes callbacks.
         let ptr =
             NonNull::new(unsafe { gu_watch_open() }).ok_or("USB topology watcher unavailable")?;
-        let epoch = unsafe { gu_watch_epoch(ptr.as_ptr()) };
-        Ok(Self { ptr, epoch })
+        let mut epoch = 0;
+        let mut arrivals = 0;
+        unsafe {
+            gu_watch_state(ptr.as_ptr(), &mut epoch, &mut arrivals);
+        }
+        Ok(Self {
+            ptr,
+            epoch,
+            arrivals,
+        })
     }
     fn unchanged(&self) -> bool {
         unsafe { gu_watch_epoch(self.ptr.as_ptr()) == self.epoch }
+    }
+    fn changes(&self) -> (u64, u64) {
+        let mut epoch = 0;
+        let mut arrivals = 0;
+        unsafe {
+            gu_watch_state(self.ptr.as_ptr(), &mut epoch, &mut arrivals);
+        }
+        (
+            epoch.saturating_sub(self.epoch),
+            arrivals.saturating_sub(self.arrivals),
+        )
     }
 }
 impl Drop for Watch {
@@ -407,26 +428,20 @@ impl MainPort for MainSession {
     fn volume_flush(&mut self) -> Result<(), String> {
         Ok(())
     }
-    fn wait_for_completion(&mut self) -> Result<bool, String> {
+    fn wait_for_completion(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<bool, String> {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(120) {
+            if cancelled() {
+                return Err(
+                    "Cancelled while awaiting Main completion after firmware submission".into(),
+                );
+            }
             let snapshot = discover()?;
-            if !snapshot.incomplete.is_empty() {
-                return Err("Discovery incomplete while awaiting Main completion".into());
-            }
-            if snapshot
-                .candidates
-                .iter()
-                .any(|c| c.ancestor != self.session.target.ancestor)
-            {
-                return Err("Another update device appeared while awaiting completion".into());
-            }
-            if !snapshot
-                .candidates
-                .iter()
-                .any(|c| c.ancestor == self.session.target.ancestor)
-            {
-                return Ok(true);
+            let (events, arrivals) = self.session.watch.changes();
+            match (CompletionObservation {selected_present:snapshot.candidates.iter().any(|c|c.ancestor==self.session.target.ancestor),other_candidate_present:snapshot.candidates.iter().any(|c|c.ancestor!=self.session.target.ancestor),discovery_complete:snapshot.incomplete.is_empty(),usb_events:events,usb_arrivals:arrivals}).decision(){
+                CompletionDecision::ExpectedDetach=>return Ok(true),
+                CompletionDecision::Invalidated=>return Err("Unexpected topology change or incomplete discovery while awaiting Main completion".into()),
+                CompletionDecision::Pending=>{}
             }
             std::thread::sleep(Duration::from_millis(250));
         }

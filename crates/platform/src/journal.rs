@@ -90,8 +90,8 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
         let result = self.inner.volume_flush();
         self.result("volume_durability",result,|_|json!("No separate qualified volume-flush API; sync_all on open file and checked close are recorded separately"))
     }
-    fn wait_for_completion(&mut self) -> Result<bool, String> {
-        let result = self.inner.wait_for_completion();
+    fn wait_for_completion(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<bool, String> {
+        let result = self.inner.wait_for_completion(cancelled);
         self.result("main_completion_indication", result, |value| json!(value))
     }
     fn finish(&mut self) -> Result<(), String> {
