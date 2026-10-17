@@ -22,6 +22,7 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
+      - run: cargo build --workspace --bins --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --all-features --locked
       - run: cargo test --workspace --doc --all-features --locked
