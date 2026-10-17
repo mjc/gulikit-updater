@@ -14,6 +14,9 @@ tracked separately from portable tests and offline instruction emulation.
 | Bluetooth | 5.07 | 345,088 | 674 |
 
 The observed NS39 has passed read-only Bluetooth identity/version qualification.
+The first 3.24 hardware attempt confirmed one 512-byte block, then stopped on a
+stalled command-status read. Its outcome is unknown; complete flashing and
+installed-version verification have not passed on hardware.
 Firmware transfer completion requires every block and both status checks;
 installation requires a fresh independent read after restarting. Hardware
 acceptance evidence and remaining work live in the linked CLI plan and product
@@ -67,6 +70,11 @@ components, leave the current mode with Mode off and a normal Mode-on restart,
 then power off and enter the other component's update mode. Rediscover after
 each transition. The updater does not switch modes automatically.
 
+These mode-entry instructions apply before an update or after a completed
+transfer. After a partial or unknown outcome, keep the cable connected and leave
+the controller unchanged. Do not restart, reset, retry, resume, inspect or verify
+until a recovery procedure has been qualified for that interrupted state.
+
 Put only one controller in update mode. `--confirm-ns39` attests that you checked
 the physical NS39 label and Max controls. USB IDs and the shared F1 signature
 are observed profile evidence, not automatic proof of the model. The native
@@ -78,6 +86,19 @@ separately. A busy volume refuses without forcing an unmount. After any possible
 firmware submission, cleanup uses no-reset DeviceSurrender and reports storage
 restoration pending, including after final F2 success. No firmware replay or
 automatic reset is used after submission. Other OSes currently support package commands.
+
+BOT transport requests a 20-byte F2 reply and accepts 1–20 received bytes only
+with a matching, successful command-status wrapper and exact residue; byte zero
+must report success. F1 still requires all 20 bytes and each F0 requires all 512
+bytes. If the first command-status read stalls with zero bytes received, the
+adapter clears the Bulk-IN halt and reads that same status once more. It sends
+no new command or firmware block. A repeated stall, partial status, timeout or
+invalid wrapper stops the session. The attempt record retains actual counts,
+received data, status packets, errors and halt-clearance results. Commands have
+a five-second budget, checked before and after each operation. Apple's synchronous
+halt-clearance API has no timeout parameter: ownership remains held until it
+returns, and an overrun prevents the next read. This budget is not a hard
+wall-clock bound on that host call.
 
 Each update uses one original, verified package and creates an exclusive host
 attempt record outside the controller volume. Operation submission, actual

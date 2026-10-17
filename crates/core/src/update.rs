@@ -153,10 +153,15 @@ impl From<&str> for SubmissionError {
 }
 
 /// An exclusive, quiesced transport bound to one attachment and a live topology watcher.
-/// Each command must validate OS success, exact data length and passed transport status.
+/// Each command must validate OS success and passed transport status. F0 requires
+/// exact OUT512; F1 exact IN20; F2 requests IN20 and consumes a nonempty 1..20-byte
+/// status reply with an exact transport residue. No missing byte may be padded.
 /// Implementations must never retry a submitted vendor command or automatically reset
 /// once firmware may have been submitted. Read-only cleanup effects must be explicit.
 pub trait BluetoothPort {
+    fn take_transport_evidence(&mut self) -> Option<crate::bot::CommandEvidence> {
+        None
+    }
     fn lun_evidence(&self) -> Option<crate::bot::MaxLun> {
         None
     }
@@ -330,8 +335,13 @@ fn command(
 ) -> Result<Vec<u8>, String> {
     let requested = if opcode == 0xf0 { 512 } else { 20 };
     let result = port.command(opcode, data).and_then(|response| {
-        if response.len() != if opcode == 0xf0 { 0 } else { 20 } {
-            return Err(format!("Short/invalid vendor response: {} bytes", response.len()).into());
+        let accepted = match opcode {
+            0xf0 => response.is_empty(),
+            0xf2 => (1..=20).contains(&response.len()),
+            _ => response.len() == 20,
+        };
+        if !accepted {
+            return Err(format!("Invalid vendor response length: {} bytes", response.len()).into());
         }
         Ok(response)
     });
@@ -353,7 +363,13 @@ fn command(
         index: record.commands.len(),
         opcode,
         requested,
-        confirmed: if result.is_ok() { requested } else { 0 },
+        confirmed: result.as_ref().map_or(0, |response| {
+            if opcode == 0xf0 {
+                requested
+            } else {
+                response.len()
+            }
+        }),
         error: result.as_ref().err().map(|error| error.message.clone()),
     });
     result.map_err(|error| error.message)
@@ -800,6 +816,7 @@ mod tests {
         cleanup: bool,
         refuse_write: bool,
         audit_before_firmware: bool,
+        f2_response: Option<Vec<u8>>,
     }
     impl BluetoothPort for Fake {
         fn prepare_write(&mut self) -> Result<(), String> {
@@ -835,13 +852,60 @@ mod tests {
                     self.bytes.extend_from_slice(data);
                     Ok(Vec::new())
                 }
-                0xf2 => Ok(vec![0; 20]),
+                0xf2 => Ok(self.f2_response.clone().unwrap_or_else(|| vec![0; 20])),
                 _ => unreachable!(),
             }
         }
         fn finish(&mut self) -> Result<(), String> {
             self.cleanup = true;
             Ok(())
+        }
+    }
+    #[test]
+    fn first_and_final_f2_use_only_received_nonempty_status() {
+        let mut port = Fake {
+            version: 323,
+            f2_response: Some(vec![0]),
+            ..Fake::default()
+        };
+        let record = bluetooth_release(
+            &mut port,
+            &vec![0; 361472],
+            324,
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(
+            record.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        let statuses: Vec<_> = record
+            .commands
+            .iter()
+            .filter(|command| command.opcode == 0xf2)
+            .collect();
+        assert_eq!(statuses.len(), 2);
+        assert!(
+            statuses
+                .iter()
+                .all(|status| status.requested == 20 && status.confirmed == 1)
+        );
+        for response in [vec![], vec![1], vec![0; 21]] {
+            let mut port = Fake {
+                version: 323,
+                f2_response: Some(response),
+                ..Fake::default()
+            };
+            let record = bluetooth_release(
+                &mut port,
+                &vec![0; 361472],
+                324,
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
+            assert_eq!(record.outcome, Outcome::OutcomeUnknown);
+            assert_eq!(record.bytes_confirmed, 512);
+            assert_eq!(port.calls, [0xf1, 0xf0, 0xf2]);
         }
     }
     #[test]

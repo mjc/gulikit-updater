@@ -1,4 +1,4 @@
-use gulikit_core::bot::{BulkIo, Direction, MaxLun, Session};
+use gulikit_core::bot::{BulkIo, Direction, MaxLun, Session, TransferError, TransferFailureKind};
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -16,11 +16,23 @@ struct Fake {
     short_cbw: bool,
     error_after_read: bool,
     writes: Vec<Vec<u8>>,
+    stalls: Vec<usize>,
+    stall_actual: usize,
+    clears: usize,
+    clear_cost: Duration,
+    clear_error: Option<String>,
 }
 impl BulkIo for Fake {
     fn max_lun(&mut self) -> Result<MaxLun, String> {
         self.address_queries += 1;
         self.max_lun.clone()
+    }
+    fn clear_stall(&mut self, _budget: Duration) -> Result<(), TransferError> {
+        self.clears += 1;
+        self.clock += self.clear_cost;
+        self.clear_error
+            .clone()
+            .map_or(Ok(()), |error| Err(error.into()))
     }
     fn now(&self) -> Instant {
         self.clock
@@ -30,12 +42,25 @@ impl BulkIo for Fake {
         direction: Direction,
         bytes: &mut [u8],
         timeout: Duration,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, TransferError> {
         self.allowances.push(timeout);
         self.clock += self.costs.pop_front().unwrap_or(Duration::ZERO);
         self.calls.push(direction);
+        if self.stalls.contains(&self.calls.len()) {
+            return Err(TransferError {
+                kind: TransferFailureKind::Stall,
+                actual: self.stall_actual,
+                raw: vec![0x55; self.stall_actual.min(bytes.len())],
+                message: "pipe stalled".into(),
+            });
+        }
         if self.fail_at == Some(self.calls.len()) {
-            return Err("timeout actual=0 raw=[]".into());
+            return Err(TransferError {
+                kind: TransferFailureKind::Timeout,
+                actual: 0,
+                raw: vec![],
+                message: "timeout".into(),
+            });
         }
         if direction == Direction::Out {
             self.writes.push(bytes.to_vec());
@@ -48,10 +73,7 @@ impl BulkIo for Fake {
             let response = self.reads.pop_front().unwrap();
             bytes[..response.len()].copy_from_slice(&response);
             if self.error_after_read {
-                Err(format!(
-                    "OS error actual={} raw={response:02x?}",
-                    response.len()
-                ))
+                Err(format!("OS error actual={} raw={response:02x?}", response.len()).into())
             } else {
                 Ok(response.len())
             }
@@ -71,6 +93,11 @@ fn io() -> Fake {
         short_cbw: false,
         error_after_read: false,
         writes: vec![],
+        stalls: vec![],
+        stall_actual: 0,
+        clears: 0,
+        clear_cost: Duration::ZERO,
+        clear_error: None,
     }
 }
 
@@ -379,4 +406,175 @@ fn standard_single_lun_stall_is_qualified_and_retained_as_distinct_evidence() {
     session.command(&f1(), Direction::In, &[], 20).unwrap();
     assert_eq!(session.io_mut().address_queries, 1);
     assert_eq!(session.io_mut().writes[0][13], 0);
+}
+
+#[test]
+fn first_csw_stall_clears_once_and_retries_only_the_original_status() {
+    let mut fake = io();
+    fake.reads = VecDeque::from([status(1, 0, 0), vec![0; 20], status(2, 0, 0)]);
+    fake.stalls = vec![6];
+    let mut session = Session::new(fake);
+    session
+        .command(
+            &[0xf0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            Direction::Out,
+            &[0; 512],
+            512,
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .command(&[0xf2, 0, 0, 0, 0, 0, 0, 0, 0, 0], Direction::In, &[], 20)
+            .unwrap(),
+        vec![0; 20]
+    );
+    assert!(!session.failed());
+    assert!(session.firmware_may_have_been_submitted());
+    assert_eq!(session.io_mut().clears, 1);
+    assert_eq!(session.io_mut().calls.len(), 7);
+    assert_eq!(session.io_mut().writes.len(), 3); // F0 CBW, its payload, F2 CBW; no CBW replay.
+}
+
+#[test]
+fn f2_short_status_uses_the_received_byte_with_exact_transport_residue() {
+    for length in [1, 4, 19] {
+        let mut fake = io();
+        fake.reads = VecDeque::from([vec![0; length], status(1, 20 - length as u32, 0)]);
+        let mut session = Session::new(fake);
+        assert_eq!(
+            session
+                .command(&[0xf2, 0, 0, 0, 0, 0, 0, 0, 0, 0], Direction::In, &[], 20)
+                .unwrap(),
+            vec![0; length]
+        );
+    }
+}
+
+fn after_first_f0(data: Vec<u8>, csw: Vec<u8>) -> Session<Fake> {
+    let mut fake = io();
+    fake.reads = VecDeque::from([status(1, 0, 0), data, csw]);
+    fake.stalls = vec![6];
+    let mut session = Session::new(fake);
+    session
+        .command(
+            &[0xf0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            Direction::Out,
+            &[0; 512],
+            512,
+        )
+        .unwrap();
+    session
+}
+fn f2() -> [u8; 10] {
+    [0xf2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+}
+#[test]
+fn csw_recovery_retains_short_f2_data_and_refuses_empty_or_inconsistent_status() {
+    let mut session = after_first_f0(vec![0], status(2, 19, 0));
+    assert_eq!(session.command(&f2(), Direction::In, &[], 20).unwrap(), [0]);
+    let evidence = session.take_evidence().unwrap();
+    assert_eq!(evidence.data_actual, Some(1));
+    assert_eq!(evidence.data_in, Some(vec![0]));
+    assert_eq!(evidence.csw_raw, status(2, 19, 0));
+    assert_eq!(evidence.csw_reads, 2);
+    for (data, csw) in [
+        (vec![], status(2, 20, 0)),
+        (vec![0], status(2, 0, 0)),
+        (vec![0], status(3, 19, 0)),
+        (vec![0], status(2, 19, 1)),
+        (vec![0], status(2, 19, 2)),
+    ] {
+        let mut session = after_first_f0(data.clone(), csw.clone());
+        let error = session.command(&f2(), Direction::In, &[], 20).unwrap_err();
+        assert!(session.failed());
+        assert!(session.firmware_may_have_been_submitted());
+        let evidence = session.take_evidence().unwrap();
+        assert_eq!(evidence.data_actual, Some(data.len()));
+        assert_eq!(evidence.data_in, Some(data));
+        assert_eq!(evidence.csw_raw, csw);
+        assert_eq!(evidence.csw_reads, 2);
+        let calls = session.io_mut().calls.len();
+        assert!(
+            session
+                .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+                .is_err(),
+            "{error}"
+        );
+        assert_eq!(session.io_mut().calls.len(), calls);
+    }
+}
+#[test]
+fn csw_second_stall_clear_failure_and_data_errors_never_replay_or_reset() {
+    for case in 0..3 {
+        let mut session = after_first_f0(vec![0; 20], status(2, 0, 0));
+        match case {
+            0 => session.io_mut().stalls.push(7),
+            1 => session.io_mut().clear_error = Some("clear failed".into()),
+            _ => session.io_mut().stalls = vec![5],
+        }
+        let error = session.command(&f2(), Direction::In, &[], 20).unwrap_err();
+        assert!(session.failed());
+        assert!(session.firmware_may_have_been_submitted());
+        assert_eq!(session.io_mut().clears, usize::from(case != 2));
+        assert_eq!(session.io_mut().writes.len(), 3); // No replayed CBW or payload.
+        if case != 2 {
+            assert!(error.contains("data_actual=20"), "{error}");
+        }
+    }
+}
+#[test]
+fn clearance_overrun_keeps_ownership_and_prevents_a_late_second_status_read() {
+    let mut session = after_first_f0(vec![0; 20], status(2, 0, 0));
+    session.io_mut().costs = VecDeque::from([
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::ZERO,
+    ]);
+    session.io_mut().clear_cost = Duration::from_secs(4);
+    let error = session.command(&f2(), Direction::In, &[], 20).unwrap_err();
+    assert!(error.contains("budget expired"), "{error}");
+    assert_eq!(session.io_mut().clears, 1);
+    assert_eq!(session.io_mut().calls.len(), 6); // The second CSW was never scheduled.
+    assert!(session.failed());
+    assert!(session.firmware_may_have_been_submitted());
+}
+#[test]
+fn short_f1_and_noncanonical_f2_remain_exact_length_commands() {
+    for cdb in [f1(), [0xf2, 1, 0, 0, 0, 0, 0, 0, 0, 0]] {
+        let mut fake = io();
+        fake.reads = VecDeque::from([vec![0], status(1, 19, 0)]);
+        assert!(
+            Session::new(fake)
+                .command(&cdb, Direction::In, &[], 20)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn partial_status_stall_timeout_and_expired_budget_are_not_recovered() {
+    for case in 0..3 {
+        let mut session = after_first_f0(vec![0; 20], status(2, 0, 0));
+        match case {
+            0 => session.io_mut().stall_actual = 5,
+            1 => {
+                session.io_mut().stalls.clear();
+                session.io_mut().fail_at = Some(6);
+            }
+            _ => {
+                session.io_mut().costs =
+                    VecDeque::from([Duration::ZERO, Duration::ZERO, Duration::from_secs(5)])
+            }
+        }
+        assert!(session.command(&f2(), Direction::In, &[], 20).is_err());
+        assert_eq!(session.io_mut().clears, 0);
+        assert_eq!(session.io_mut().calls.len(), 6);
+        assert!(session.failed());
+        assert!(session.firmware_may_have_been_submitted());
+        if case == 0 {
+            let evidence = session.take_evidence().unwrap();
+            assert_eq!(evidence.csw_actual, Some(5));
+            assert_eq!(evidence.csw_raw, vec![0x55; 5]);
+        }
+    }
 }

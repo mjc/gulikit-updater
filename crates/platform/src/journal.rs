@@ -65,9 +65,10 @@ impl<'a, P> Recorded<'a, P> {
         &mut self,
         name: &str,
         result: Result<T, SubmissionError>,
+        transport: Option<gulikit_core::bot::CommandEvidence>,
         actual: impl FnOnce(&T) -> serde_json::Value,
     ) -> Result<T, SubmissionError> {
-        let logged = self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err().map(|error| &error.message),"may_have_been_submitted":result.as_ref().map_or_else(|error|error.may_have_been_submitted, |_|true)}));
+        let logged = self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err().map(|error| &error.message),"may_have_been_submitted":result.as_ref().map_or_else(|error|error.may_have_been_submitted, |_|true),"transport":transport}));
         self.index += 1;
         match (result, logged) {
             (Err(mut error), Err(log)) => {
@@ -116,7 +117,8 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError> {
         self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"lun_evidence":self.inner.lun_evidence(),"requested":if opcode==0xf0{data.len()}else{20}})).map_err(SubmissionError::audit_before)?;
         let result = self.inner.command(opcode, data);
-        self.submission_result("command_result",result,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
+        let transport = self.inner.take_transport_evidence();
+        self.submission_result("command_result",result,transport,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
     }
     fn finish(&mut self) -> Result<(), String> {
         let result = self.inner.finish();
@@ -151,7 +153,7 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
         )
         .map_err(SubmissionError::audit_before)?;
         let result = self.inner.write(bytes);
-        self.submission_result("main_write_result", result, |count| json!(count))
+        self.submission_result("main_write_result", result, None, |count| json!(count))
     }
     fn flush(&mut self) -> Result<(), String> {
         let result = self.inner.flush();
@@ -235,7 +237,7 @@ mod tests {
             (Ok(7usize), true),
         ] {
             let error = port
-                .submission_result("result", result, |count| json!(count))
+                .submission_result("result", result, None, |count| json!(count))
                 .unwrap_err();
             assert_eq!(error.may_have_been_submitted, expected);
             assert!(error.audit_failure);

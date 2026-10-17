@@ -57,6 +57,9 @@ mode via Mode off, then normal Mode-on restart. With the controller off, connect
 USB, hold Gear first and then press A. Fresh discovery has observed Bluetooth
 `8087:1024` with cached SCSI `Gamepad / Updater / 1.00` and no Main volume.
 A shared BOT interface does not make both update modes available together.
+These entry steps do not establish safe recovery from an interrupted update.
+After a partial or unknown transfer, keep the controller connected and unchanged
+until recovery has been qualified for that state.
 These observed profiles are not unique model or unit identity. The maintained
 `crates/platform/examples/native_probe.rs` uses production discovery; a complete
 fresh F1 reply and matching status are required before any Bluetooth update.

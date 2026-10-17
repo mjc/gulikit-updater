@@ -231,12 +231,18 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
             offset+=length;
         }
         if(valid && input && output){transport.input=[transport.interface copyPipeWithAddress:input error:&error];transport.output=[transport.interface copyPipeWithAddress:output error:&error];}
-        if(!transport.input || !transport.output){error_text(message,capacity,error.description ?: @"Invalid bulk endpoint descriptors");[transport.interface destroy];[transport.device destroy];return NULL;}
+        if(!transport.input || !transport.output || ![transport.input respondsToSelector:@selector(clearStallWithError:)]){error_text(message,capacity,error.description ?: @"Invalid bulk endpoint descriptors");[transport.interface destroy];[transport.device destroy];return NULL;}
         transport.inputAddress=input;transport.outputAddress=output;
         return (__bridge_retained void *)transport;
     }
 }
-int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,double timeout,size_t *actual,int *timed_out,char *message,size_t capacity) {
+// IOUSBHost's current stall namespace differs from legacy IOUSBFamily.
+int gu_usb_failure_kind(int32_t code) {
+    if(code==(int32_t)0xe0005000U || code==(int32_t)kIOUSBPipeStalled)return 1;
+    if(code==(int32_t)kIOReturnTimeout || code==(int32_t)kIOUSBTransactionTimeout)return 2;
+    return 0;
+}
+int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,double timeout,size_t *actual,int *failure_kind,char *message,size_t capacity) {
     @autoreleasepool {
         GuTransport *transport=(__bridge GuTransport *)context;
         NSMutableData *data=[NSMutableData dataWithLength:length];
@@ -244,8 +250,19 @@ int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,double 
         NSError *error=nil;NSUInteger count=0;
         BOOL result=[(input ? transport.input : transport.output) sendIORequestWithData:data bytesTransferred:&count completionTimeout:timeout error:&error];
         *actual=count;
-        *timed_out=!result && (error.code==(NSInteger)(int32_t)kIOReturnTimeout || error.code==(NSInteger)(int32_t)kIOUSBTransactionTimeout);
+        *failure_kind=!result && [error.domain isEqualToString:IOUSBHostErrorDomain] ? gu_usb_failure_kind((int32_t)error.code) : 0;
         if(input)memcpy(bytes,data.bytes,MIN(count,length));
+        if(!result)error_text(message,capacity,error.description);
+        return result ? 0 : -1;
+    }
+}
+int gu_usb_clear_stall(void *context,char *message,size_t capacity) {
+    @autoreleasepool {
+        GuTransport *transport=(__bridge GuTransport *)context;
+        NSError *error=nil;
+        // Public IOUSBHostPipe operation clears the IN halt and resets its toggle.
+        // It has no caller-configurable timeout; retain this claim until it returns.
+        BOOL result=[transport.input clearStallWithError:&error];
         if(!result)error_text(message,capacity,error.description);
         return result ? 0 : -1;
     }
@@ -260,7 +277,7 @@ void gu_usb_close(void *context,int surrender) {
 }
 int gu_max_lun_result(int succeeded,size_t actual,int32_t code) {
     if(succeeded && actual==1)return 0;
-    return !succeeded && actual==0 && code==(int32_t)kIOUSBPipeStalled ? 1 : -1;
+    return !succeeded && actual==0 && gu_usb_failure_kind(code)==1 ? 1 : -1;
 }
 int gu_usb_max_lun(void *context,uint8_t *value,char *message,size_t capacity) {
     @autoreleasepool {

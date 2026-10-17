@@ -5,7 +5,7 @@
 pub use crate::discovery::{Disk, NativeCandidate, Snapshot, StorageIdentity};
 use crate::{acquisition::AcquisitionError, volume::Volume};
 use gulikit_core::{
-    bot::{self, BulkIo, Direction, MaxLun, validate_status},
+    bot::{self, BulkIo, Direction, MaxLun, TransferError, TransferFailureKind, validate_status},
     package::Component,
     update::{BluetoothPort, CompletionDecision, CompletionObservation, MainPort},
     version::MainVersion,
@@ -54,10 +54,11 @@ unsafe extern "C" {
         length: usize,
         timeout: f64,
         actual: *mut usize,
-        timed_out: *mut i32,
+        failure_kind: *mut i32,
         error: *mut c_char,
         capacity: usize,
     ) -> i32;
+    fn gu_usb_clear_stall(value: *mut c_void, error: *mut c_char, capacity: usize) -> i32;
     fn gu_usb_close(value: *mut c_void, surrender: i32);
     #[cfg(test)]
     fn gu_max_lun_result(succeeded: i32, actual: usize, code: i32) -> i32;
@@ -465,13 +466,22 @@ impl Drop for NativeUsb {
         }
     }
 }
-fn transfer_result(result: i32, actual: usize, bytes: &[u8], error: &str) -> Result<usize, String> {
+fn transfer_result(
+    result: i32,
+    actual: usize,
+    bytes: &[u8],
+    error: &str,
+) -> Result<usize, TransferError> {
     if result != 0 || actual > bytes.len() {
-        return Err(format!(
-            "USB status={result} actual={actual} requested={} error={error}; raw={:02x?}",
-            bytes.len(),
-            &bytes[..actual.min(bytes.len())]
-        ));
+        return Err(TransferError {
+            kind: TransferFailureKind::Other,
+            actual,
+            raw: bytes[..actual.min(bytes.len())].to_vec(),
+            message: format!(
+                "USB status={result} requested={} error={error}",
+                bytes.len()
+            ),
+        });
     }
     Ok(actual)
 }
@@ -489,16 +499,36 @@ impl BulkIo for NativeUsb {
         }
     }
 
+    fn clear_stall(&mut self, budget: Duration) -> Result<(), TransferError> {
+        if budget.is_zero() {
+            return Err(TransferError {
+                kind: TransferFailureKind::Timeout,
+                actual: 0,
+                raw: Vec::new(),
+                message: "No remaining CSW-clearance budget".into(),
+            });
+        }
+        let usb = self.pointer()?;
+        let mut error = [0i8; 1024];
+        // The synchronous API has no timeout parameter. Ownership and the global
+        // lease stay held until it returns; the BOT layer rejects any overrun
+        // before scheduling another transfer. Never kill a captured USB worker.
+        let result = unsafe { gu_usb_clear_stall(usb.as_ptr(), error.as_mut_ptr(), error.len()) };
+        if result != 0 {
+            return Err(format!("Bulk-IN halt clearance failed: {}", error_string(&error)).into());
+        }
+        Ok(())
+    }
     fn transfer(
         &mut self,
         direction: Direction,
         bytes: &mut [u8],
         timeout: Duration,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, TransferError> {
         let usb = self.pointer()?;
         let input = direction == Direction::In;
         let mut actual = 0;
-        let mut timed_out = 0;
+        let mut failure_kind = 0;
         let mut error = [0i8; 1024];
         if !input && bytes.len() == 31 && bytes.starts_with(b"USBC") {
             self.tag = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
@@ -514,13 +544,13 @@ impl BulkIo for NativeUsb {
                 bytes.len(),
                 timeout.as_secs_f64(),
                 &mut actual,
-                &mut timed_out,
+                &mut failure_kind,
                 error.as_mut_ptr(),
                 error.len(),
             )
         };
         self.zero_input_timeout =
-            result != 0 && timed_out != 0 && input && actual == 0 && bytes.len() == 20;
+            result != 0 && failure_kind == 2 && input && actual == 0 && bytes.len() == 20;
         if self.diagnostic {
             eprintln!(
                 "USB tag={} direction={} requested={} actual={} elapsed_ms={} os_result={} raw={:02x?} error={}",
@@ -534,7 +564,14 @@ impl BulkIo for NativeUsb {
                 error_string(&error)
             );
         }
-        transfer_result(result, actual, bytes, &error_string(&error))
+        transfer_result(result, actual, bytes, &error_string(&error)).map_err(|mut error| {
+            error.kind = match failure_kind {
+                1 => TransferFailureKind::Stall,
+                2 => TransferFailureKind::Timeout,
+                _ => TransferFailureKind::Other,
+            };
+            error
+        })
     }
 }
 
@@ -790,6 +827,10 @@ impl BluetoothSession {
     }
 }
 impl BluetoothPort for BluetoothSession {
+    fn take_transport_evidence(&mut self) -> Option<bot::CommandEvidence> {
+        self.usb.as_mut().and_then(bot::Session::take_evidence)
+    }
+
     fn lun_evidence(&self) -> Option<MaxLun> {
         self.usb.as_ref().and_then(bot::Session::lun_evidence)
     }
@@ -819,6 +860,9 @@ impl BluetoothPort for BluetoothSession {
         opcode: u8,
         data: &[u8],
     ) -> Result<Vec<u8>, gulikit_core::update::SubmissionError> {
+        if let Some(channel) = self.usb.as_mut() {
+            channel.clear_evidence();
+        }
         let before = self.usb.as_ref().map(bot::Session::tag);
         let result = self.vendor_command(opcode, data);
         let attempted = self.usb.as_ref().map(bot::Session::tag) != before;
@@ -935,6 +979,10 @@ mod tests {
     #[test]
     fn max_lun_accepts_only_a_zero_byte_stall_as_the_single_lun_fallback() {
         const STALL: i32 = 0xe000404f_u32 as i32;
+        assert_eq!(
+            unsafe { super::gu_max_lun_result(0, 0, 0xe0005000_u32 as i32) },
+            1
+        );
         // SAFETY: pure bridge decoder takes values only and performs no I/O.
         unsafe {
             assert_eq!(super::gu_max_lun_result(0, 0, STALL), 1);
@@ -1092,7 +1140,9 @@ mod tests {
     fn native_error_and_actual_length_are_independent() {
         let data = [0xa1; 20];
         for count in [0, 7, 20] {
-            let error = transfer_result(-1, count, &data, "NSError timeout").unwrap_err();
+            let error = transfer_result(-1, count, &data, "NSError timeout")
+                .unwrap_err()
+                .to_string();
             assert!(error.contains("status=-1"));
             assert!(error.contains(&format!("actual={count}")));
             assert!(error.contains("raw="));

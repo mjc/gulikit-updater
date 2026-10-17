@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum Direction {
     In,
     Out,
@@ -25,9 +25,76 @@ impl MaxLun {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferFailureKind {
+    Stall,
+    Timeout,
+    Other,
+}
+
+#[derive(Clone, Debug, thiserror::Error, serde::Serialize)]
+#[error("{message}; kind={kind:?} actual={actual} raw={raw:02x?}")]
+pub struct TransferError {
+    pub kind: TransferFailureKind,
+    pub actual: usize,
+    pub raw: Vec<u8>,
+    pub message: String,
+}
+impl From<String> for TransferError {
+    fn from(message: String) -> Self {
+        Self {
+            kind: TransferFailureKind::Other,
+            actual: 0,
+            raw: Vec::new(),
+            message,
+        }
+    }
+}
+impl From<&str> for TransferError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl From<TransferError> for String {
+    fn from(error: TransferError) -> Self {
+        error.to_string()
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "outcome", content = "error", rename_all = "snake_case")]
+pub enum StallClear {
+    Passed,
+    Failed(TransferError),
+}
+
+/// Bounded evidence for the latest command. OUT payload bytes are already hash-pinned.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CommandEvidence {
+    pub tag: u32,
+    pub opcode: u8,
+    pub requested: usize,
+    pub cbw_actual: Option<usize>,
+    pub cbw_error: Option<TransferError>,
+    pub data_actual: Option<usize>,
+    pub data_in: Option<Vec<u8>>,
+    pub csw_reads: u8,
+    pub csw_raw: Vec<u8>,
+    pub csw_actual: Option<usize>,
+    pub csw_errors: Vec<TransferError>,
+    pub stall_clear: Option<StallClear>,
+    pub stall_clear_elapsed: Option<Duration>,
+}
+
 /// One serialized bulk stage. An error must retain OS status, actual count and raw bytes.
 pub trait BulkIo {
     fn max_lun(&mut self) -> Result<MaxLun, String>;
+    /// Clear only the Bulk-IN halt for the original CSW. Never reset or resubmit a CBW.
+    /// Keep ownership until this operation has finished, including any OS deadline overrun.
+    fn clear_stall(&mut self, _budget: Duration) -> Result<(), TransferError> {
+        Err("Bulk-IN stall clearance is unsupported by this adapter".into())
+    }
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -36,7 +103,14 @@ pub trait BulkIo {
         direction: Direction,
         bytes: &mut [u8],
         timeout: Duration,
-    ) -> Result<usize, String>;
+    ) -> Result<usize, TransferError>;
+}
+
+#[derive(Clone, Copy)]
+enum DataPolicy {
+    Exact,
+    F2Status,
+    DiagnosticSense,
 }
 
 /// A BOT command session is never resumed after a failed stage. Keep ownership of
@@ -50,6 +124,7 @@ pub struct Session<T> {
     lun_evidence: Option<MaxLun>,
     failed_f1_status: Option<[u8; 13]>,
     sense_used: bool,
+    evidence: Option<CommandEvidence>,
 }
 impl<T: BulkIo> Session<T> {
     pub fn new(io: T) -> Self {
@@ -62,6 +137,7 @@ impl<T: BulkIo> Session<T> {
             lun_evidence: None,
             failed_f1_status: None,
             sense_used: false,
+            evidence: None,
         }
     }
     /// This implementation supports only an attachment advertising exactly LUN0.
@@ -94,6 +170,12 @@ impl<T: BulkIo> Session<T> {
     pub fn qualified_lun(&self) -> Option<u8> {
         self.qualified_lun
     }
+    pub fn take_evidence(&mut self) -> Option<CommandEvidence> {
+        self.evidence.take()
+    }
+    pub fn clear_evidence(&mut self) {
+        self.evidence = None;
+    }
     pub fn io_mut(&mut self) -> &mut T {
         &mut self.io
     }
@@ -125,28 +207,43 @@ impl<T: BulkIo> Session<T> {
             return Err("No diagnostic sense allowance".into());
         }
         self.sense_used = true;
-        self.exchange(&[3, 0, 0, 0, 18, 0], Direction::In, &[], 18, false)
+        self.exchange(
+            &[3, 0, 0, 0, 18, 0],
+            Direction::In,
+            &[],
+            18,
+            DataPolicy::DiagnosticSense,
+        )
     }
     pub fn tag(&self) -> u32 {
         self.tag
+    }
+    fn remaining(&self, deadline: Instant) -> Result<Duration, TransferError> {
+        deadline
+            .checked_duration_since(self.io.now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| TransferError {
+                kind: TransferFailureKind::Timeout,
+                actual: 0,
+                raw: Vec::new(),
+                message: "BOT request budget expired before next stage".into(),
+            })
     }
     fn transfer_before(
         &mut self,
         direction: Direction,
         bytes: &mut [u8],
         deadline: Instant,
-    ) -> Result<usize, String> {
-        let remaining = deadline
-            .checked_duration_since(self.io.now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or("BOT command deadline expired before next stage")?;
+    ) -> Result<usize, TransferError> {
+        let remaining = self.remaining(deadline)?;
         let actual = self.io.transfer(direction, bytes, remaining)?;
         if self.io.now() >= deadline {
-            return Err(format!(
-                "BOT command deadline expired; actual={actual} requested={} raw={:02x?}",
-                bytes.len(),
-                &bytes[..actual.min(bytes.len())]
-            ));
+            return Err(TransferError {
+                kind: TransferFailureKind::Timeout,
+                actual,
+                raw: bytes[..actual.min(bytes.len())].to_vec(),
+                message: format!("BOT request budget expired; requested={}", bytes.len()),
+            });
         }
         Ok(actual)
     }
@@ -157,6 +254,7 @@ impl<T: BulkIo> Session<T> {
         data: &[u8],
         length: usize,
     ) -> Result<Vec<u8>, String> {
+        self.clear_evidence();
         if self.failed {
             return Err("BOT session failed; no new command, reset or replay is authorized".into());
         }
@@ -164,7 +262,16 @@ impl<T: BulkIo> Session<T> {
             return Err("OUT buffer length differs from the command".into());
         }
         self.qualify_addressing()?;
-        self.exchange(cdb, direction, data, length, true)
+        let policy = if cdb == [0xf2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            && direction == Direction::In
+            && length == 20
+            && data.is_empty()
+        {
+            DataPolicy::F2Status
+        } else {
+            DataPolicy::Exact
+        };
+        self.exchange(cdb, direction, data, length, policy)
     }
     fn exchange(
         &mut self,
@@ -172,30 +279,81 @@ impl<T: BulkIo> Session<T> {
         direction: Direction,
         data: &[u8],
         length: usize,
-        exact: bool,
+        policy: DataPolicy,
     ) -> Result<Vec<u8>, String> {
         let expected = u32::try_from(length).map_err(|_| "BOT length exceeds u32")?;
         let tag = self.tag.checked_add(1).ok_or("BOT tag exhausted")?;
         let mut cbw = command_block(tag, direction, expected, cdb).map_err(|e| e.to_string())?;
         self.tag = tag;
+        self.evidence = Some(CommandEvidence {
+            tag,
+            opcode: cdb[0],
+            requested: length,
+            cbw_actual: None,
+            cbw_error: None,
+            data_actual: None,
+            data_in: None,
+            csw_reads: 0,
+            csw_raw: Vec::new(),
+            csw_actual: None,
+            csw_errors: Vec::new(),
+            stall_clear: None,
+            stall_clear_elapsed: None,
+        });
         if cdb[0] == 0xf0 {
             self.firmware_submitted = true;
         }
         let deadline = self.io.now() + Duration::from_secs(5);
         let result = (|| -> Result<Vec<u8>, String> {
-            if self.transfer_before(Direction::Out, &mut cbw, deadline)? != 31 {
-                return Err("Short CBW; command is uncertain".into());
+            let cbw_result = self.transfer_before(Direction::Out, &mut cbw, deadline);
+            if let Some(evidence) = self.evidence.as_mut() {
+                evidence.cbw_actual = Some(
+                    cbw_result
+                        .as_ref()
+                        .map_or_else(|error| error.actual, |count| *count),
+                );
+                evidence.cbw_error = cbw_result.as_ref().err().cloned();
+            }
+            let cbw_actual = cbw_result.map_err(|error| format!("CBW failed: {error}"))?;
+            if cbw_actual != 31 {
+                let error = TransferError {
+                    kind: TransferFailureKind::Other,
+                    actual: cbw_actual,
+                    raw: cbw[..cbw_actual.min(cbw.len())].to_vec(),
+                    message: "Short CBW; command is uncertain".into(),
+                };
+                if let Some(evidence) = self.evidence.as_mut() {
+                    evidence.cbw_error = Some(error.clone());
+                }
+                return Err(error.to_string());
             }
             let mut bytes = if direction == Direction::In {
                 vec![0; length]
             } else {
                 data.to_vec()
             };
-            let actual = self.transfer_before(direction, &mut bytes, deadline)?;
+            let actual = match self.transfer_before(direction, &mut bytes, deadline) {
+                Ok(actual) => actual,
+                Err(error) => {
+                    if let Some(evidence) = self.evidence.as_mut() {
+                        evidence.data_actual = Some(error.actual);
+                        if direction == Direction::In {
+                            evidence.data_in = Some(error.raw.clone());
+                        }
+                    }
+                    return Err(format!("Data stage failed: {error}"));
+                }
+            };
             if actual > length {
                 return Err("Invalid bulk data length".into());
             }
             bytes.truncate(actual);
+            if let Some(evidence) = self.evidence.as_mut() {
+                evidence.data_actual = Some(actual);
+                if direction == Direction::In {
+                    evidence.data_in = Some(bytes.clone());
+                }
+            }
             if direction == Direction::In {
                 // Retain a normally completed early status, never timeout/error bytes.
                 // This is the exact observed F1 quirk, not arbitrary failed BOT recovery.
@@ -220,20 +378,81 @@ impl<T: BulkIo> Session<T> {
                 }
             }
             let mut status = [0; 13];
-            let status_actual = self.transfer_before(Direction::In, &mut status, deadline)?;
+            if let Some(evidence) = self.evidence.as_mut() {
+                evidence.csw_reads = 1;
+            }
+            let first = self.transfer_before(Direction::In, &mut status, deadline);
+            if let Err(error) = &first
+                && let Some(evidence) = self.evidence.as_mut()
+            {
+                evidence.csw_actual = Some(error.actual);
+                evidence.csw_raw = error.raw.clone();
+                evidence.csw_errors.push(error.clone());
+            }
+            let status_actual = match first {
+                Ok(count) => count,
+                Err(first) if first.kind == TransferFailureKind::Stall && first.actual == 0 => {
+                    let remaining = self.remaining(deadline).map_err(|error|format!("{error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"))?;
+                    let clear_started = self.io.now();
+                    let cleared = self.io.clear_stall(remaining);
+                    let clear_elapsed = self.io.now().saturating_duration_since(clear_started);
+                    if let Some(evidence) = self.evidence.as_mut() {
+                        evidence.stall_clear_elapsed = Some(clear_elapsed);
+                        evidence.stall_clear = Some(match &cleared {
+                            Ok(()) => StallClear::Passed,
+                            Err(error) => StallClear::Failed(error.clone()),
+                        });
+                    }
+                    cleared.map_err(|error|format!("CSW halt clearance failed: {error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"))?;
+                    self.remaining(deadline).map_err(|error|format!("{error}; after CSW halt clearance; data_actual={actual} data={bytes:02x?}"))?;
+                    if let Some(evidence) = self.evidence.as_mut() {
+                        evidence.csw_reads = 2;
+                    }
+                    match self.transfer_before(Direction::In, &mut status, deadline) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            if let Some(evidence) = self.evidence.as_mut() {
+                                evidence.csw_actual = Some(error.actual);
+                                evidence.csw_raw = error.raw.clone();
+                                evidence.csw_errors.push(error.clone());
+                            }
+                            return Err(format!(
+                                "Second CSW read failed: {error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "CSW read failed: {error}; data_actual={actual} data={bytes:02x?}"
+                    ));
+                }
+            };
+            if let Some(evidence) = self.evidence.as_mut() {
+                evidence.csw_actual = Some(status_actual);
+                evidence.csw_raw = status[..status_actual.min(status.len())].to_vec();
+            }
             if status_actual > status.len() {
                 return Err("Invalid CSW transfer length".into());
             }
             validate_status(&status[..status_actual], tag, expected, actual as u32).map_err(
                 |e| {
                     format!(
-                        "{e}; CSW={:02x?}; data={bytes:02x?}",
+                        "{e}; CSW={:02x?}; data_actual={actual} data={bytes:02x?}",
                         &status[..status_actual]
                     )
                 },
             )?;
-            if exact && actual != length {
-                return Err(format!("Short vendor data {actual}/{length}: {bytes:02x?}"));
+            let accepted = match policy {
+                DataPolicy::Exact => actual == length,
+                DataPolicy::F2Status => (1..=20).contains(&actual),
+                DataPolicy::DiagnosticSense => true,
+            };
+            if !accepted {
+                return Err(format!(
+                    "Invalid vendor data length {actual}/{length}; data={bytes:02x?}; CSW={:02x?}",
+                    &status[..status_actual]
+                ));
             }
             Ok(if direction == Direction::In {
                 bytes
