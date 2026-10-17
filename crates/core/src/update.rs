@@ -39,8 +39,11 @@ impl CompletionObservation {
             return CompletionDecision::Invalidated;
         }
         match (self.selected_present, self.usb_events) {
-            (true, 0) => CompletionDecision::Pending,
             (false, 1) => CompletionDecision::ExpectedDetach,
+            // Registry enumeration and dispatch-queue notification can observe
+            // the same removal in either order. Wait for both within the caller's
+            // existing deadline; arrivals and extra events still invalidate it.
+            (_, 0) | (true, 1) => CompletionDecision::Pending,
             _ => CompletionDecision::Invalidated,
         }
     }

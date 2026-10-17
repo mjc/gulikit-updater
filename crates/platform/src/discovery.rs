@@ -6,13 +6,13 @@ use gulikit_core::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Disk {
     pub bsd: String,
     pub mount: PathBuf,
     pub writable: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct StorageIdentity {
     pub entry: u64,
     pub vendor: Option<String>,
@@ -62,6 +62,13 @@ impl Snapshot {
             .iter()
             .find(|c| c.ancestor == selected.ancestor)
             .cloned()
+            .map(|mut candidate| {
+                // Native iterator order is not attachment identity. Preserve all
+                // entries and fields while making exact session checks stable.
+                candidate.disks.sort();
+                candidate.storage_identities.sort();
+                candidate
+            })
             .ok_or_else(|| "Selected attachment vanished".into())
     }
     #[cfg(target_os = "macos")]
@@ -80,5 +87,41 @@ impl Snapshot {
             return Err("Transport attachment changed".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_ignores_enumeration_order_but_retains_changed_device_evidence() {
+        let candidate: NativeCandidate = serde_json::from_value(serde_json::json!({
+            "ancestor": 1, "generation": 1, "main_volume_candidate": true,
+            "bluetooth_transport_candidate": false, "observed_profile": true,
+            "conflicting_model": false, "mount": "/Volumes/GuliKit",
+            "disks": [
+                {"bsd":"disk2", "mount":"/Volumes/GuliKit", "writable":true},
+                {"bsd":"disk1", "mount":"", "writable":false}
+            ],
+            "storage_identities": [
+                {"entry":2, "vendor":"GuliKit", "product":"Updater", "revision":"1.00"},
+                {"entry":1, "vendor":null, "product":null, "revision":null}
+            ]
+        }))
+        .unwrap();
+        let mut snapshot = Snapshot {
+            candidates: vec![candidate],
+            incomplete: vec![],
+        };
+        let original = snapshot.select(true, Component::Main).unwrap();
+        snapshot.candidates[0].disks.reverse();
+        snapshot.candidates[0].storage_identities.reverse();
+        assert_eq!(snapshot.select(true, Component::Main).unwrap(), original);
+        snapshot.candidates[0].disks[0].writable = true;
+        assert_ne!(snapshot.select(true, Component::Main).unwrap(), original);
+        snapshot.candidates[0].disks[0].writable = false;
+        snapshot.candidates[0].storage_identities[0].entry = 3;
+        assert_ne!(snapshot.select(true, Component::Main).unwrap(), original);
     }
 }

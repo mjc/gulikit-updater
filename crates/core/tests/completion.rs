@@ -11,9 +11,15 @@ fn main_detach_requires_one_expected_removal_and_no_transient_arrival() {
     };
     assert_eq!(event.decision(), CompletionDecision::Pending);
     event.selected_present = false;
-    assert_eq!(event.decision(), CompletionDecision::Invalidated);
+    assert_eq!(event.decision(), CompletionDecision::Pending);
     event.usb_events = 1;
     assert_eq!(event.decision(), CompletionDecision::ExpectedDetach);
+    event.selected_present = true;
+    assert_eq!(event.decision(), CompletionDecision::Pending);
+    event.selected_present = false;
+    assert_eq!(event.decision(), CompletionDecision::ExpectedDetach);
+    event.usb_events = 2;
+    assert_eq!(event.decision(), CompletionDecision::Invalidated);
     event.usb_events = 3;
     event.usb_arrivals = 1;
     assert_eq!(event.decision(), CompletionDecision::Invalidated);

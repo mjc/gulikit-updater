@@ -84,6 +84,7 @@ pub struct VerificationTransfer {
 pub struct Readback {
     pub event: &'static str,
     pub schema_version: u8,
+    #[serde(serialize_with = "serialize_record_path")]
     pub source_attempt: PathBuf,
     pub verification: Option<Verification>,
     pub raw_version_bytes: Option<Vec<u8>>,
@@ -91,6 +92,13 @@ pub struct Readback {
     pub target: NativeCandidate,
     pub same_unit_association: &'static str,
     pub transfer: VerificationTransfer,
+}
+
+fn serialize_record_path<S: serde::Serializer>(
+    path: &std::path::Path,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    native::record_path(path).serialize(serializer)
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +337,62 @@ pub fn operator_action(component: Component, outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_readback_serializes_native_source_path_units_losslessly() {
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_vec(b"attempt-\xff.jsonl".to_vec()))
+        };
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_wide(&[0x61, 0xd800, 0x62]))
+        };
+        #[cfg(not(any(unix, windows)))]
+        let path = PathBuf::from("attempt.jsonl");
+        let target = serde_json::from_value(serde_json::json!({
+            "ancestor": 1, "generation": 1, "main_volume_candidate": false,
+            "bluetooth_transport_candidate": true, "observed_profile": true,
+            "conflicting_model": false, "storage_identities": [], "disks": [], "mount": null
+        }))
+        .unwrap();
+        let reply = Reply::Readback(Readback {
+            event: "verification_result",
+            schema_version: 1,
+            source_attempt: path.clone(),
+            verification: None,
+            raw_version_bytes: None,
+            qualified_bot_lun: None,
+            target,
+            same_unit_association: "user-confirmed",
+            transfer: VerificationTransfer {
+                outcome: Outcome::OutcomeUnknown,
+                error: None,
+                cleanup_errors: vec![],
+            },
+        });
+        let value = serde_json::to_value(reply).unwrap();
+        assert_eq!(
+            value["source_attempt"]["display"],
+            path.to_string_lossy().as_ref()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let units: Vec<u8> =
+                serde_json::from_value(value["source_attempt"]["unix_bytes"].clone()).unwrap();
+            assert_eq!(units, path.as_os_str().as_bytes());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let units: Vec<u16> =
+                serde_json::from_value(value["source_attempt"]["windows_wide"].clone()).unwrap();
+            assert_eq!(units, path.as_os_str().encode_wide().collect::<Vec<_>>());
+        }
+    }
 
     #[test]
     fn receipts_preserve_the_original_reviewed_release_and_reject_changed_metadata() {

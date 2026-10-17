@@ -269,8 +269,7 @@ pub(super) fn attempt_target(
     Ok((component, version.into()))
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn record_path(path: &std::path::Path) -> Value {
+pub(super) fn record_path(path: &std::path::Path) -> Value {
     let mut value = serde_json::json!({"display": path.to_string_lossy()});
     #[cfg(unix)]
     {
