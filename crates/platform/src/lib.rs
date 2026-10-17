@@ -1,6 +1,9 @@
 //! Host I/O adapters. Firmware compatibility decisions belong to the core.
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+pub mod volume;
+
 use gulikit_core::package::{Component, MAX_ARCHIVE_SIZE, Model, PackageError, VerifiedPackage};
 use std::{fs::File, io::Read, path::Path};
 
