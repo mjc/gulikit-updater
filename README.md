@@ -19,7 +19,7 @@ cargo run -- package inspect /path/to/GuliKit_NS38_NS39_NS59_BT_V5.07.zip --mode
 cargo run -- devices --json
 cargo run -- probe --component main --confirm-ns39 --json
 cargo run -- update /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main --confirm-ns39 --record ./main-attempt.jsonl --json
-cargo run -- verify ./main-attempt.jsonl --confirm-ns39 --confirm-same-controller --json
+cargo run -- verify ./main-attempt.jsonl --record ./main-verification.jsonl --confirm-ns39 --confirm-same-controller --json
 devenv tasks run check:all
 ```
 
@@ -68,6 +68,9 @@ transfer, power the controller off and on normally and re-enter update mode if
 needed. `verify` requires a fresh version read on a new attachment plus explicit
 confirmation of the same physical controller. No USB serial is available, so
 this assisted association is recorded separately from the machine-read version.
+The required `verify --record` creates a new exclusive host record linking the
+original attempt to fresh raw readback, attachment provenance, cleanup and outcome.
+It preserves the original attempt; failed persistence requires attention.
 Final F2, a host copy, a matching port or a different already-current controller
 cannot establish that the original attempt installed successfully. Unknown or
 pending outcomes never cause automatic recopy, resend, deletion, erase or recovery.

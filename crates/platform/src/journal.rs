@@ -194,3 +194,64 @@ mod tests {
         assert_eq!(events[2]["event"], "cleanup_result");
     }
 }
+
+/// Complete an outcome record without hiding persistence failure from its caller.
+pub fn write_event(journal: &mut File, value: &serde_json::Value) -> Result<(), String> {
+    serde_json::to_writer(&mut *journal, value).map_err(|e| e.to_string())?;
+    writeln!(journal).map_err(|e| e.to_string())?;
+    journal.sync_all().map_err(|e| e.to_string())
+}
+pub fn finalize_record(journal: &mut File, mut value: serde_json::Value) -> serde_json::Value {
+    if let Err(error) = write_event(journal, &value) {
+        // Outcome remains a statement about the device observation. Persistence
+        // failure separately makes this result require attention (CLI exit8).
+        let transfer = value["transfer"]
+            .as_object_mut()
+            .expect("typed transfer object");
+        transfer
+            .entry("cleanup_errors")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("typed cleanup array")
+            .push(json!(format!(
+                "Host record could not be finalized: {error}"
+            )));
+    }
+    value
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+    #[test]
+    fn fresh_verification_is_durable_and_failed_persistence_requires_attention() {
+        let input = json!({
+            "event":"verification_result", "schema_version":1,
+            "source_attempt":"attempt.jsonl",
+            "raw_version_bytes":[118,53,57],
+            "verification":{"generation":12,"previous_generation":11,"same_unit_confirmed":true,"model_confirmed":true,"version":"5.9"},
+            "transfer":{"outcome":"installed_verified","cleanup_errors":[]}
+        });
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        let mut journal = temporary.reopen().unwrap();
+        let result = finalize_record(&mut journal, input.clone());
+        assert_eq!(result, input);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temporary.path()).unwrap()).unwrap();
+        assert_eq!(saved, input);
+        let mut readonly = File::open(temporary.path()).unwrap();
+        let failed = finalize_record(&mut readonly, input.clone());
+        assert_eq!(failed["transfer"]["outcome"], "installed_verified");
+        assert!(
+            !failed["transfer"]["cleanup_errors"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(temporary.path()).unwrap())
+                .unwrap(),
+            input
+        );
+    }
+}

@@ -15,20 +15,17 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
     use gulikit_core::{
         package::Component,
         update::{
-            BluetoothPort, Outcome, TransferRecord, Verification, update_bluetooth, update_main,
-            verify_restart,
+            BluetoothPort, MainPort, Outcome, TransferRecord, Verification, update_bluetooth,
+            update_main, verify_restart,
         },
-        version::bluetooth_info,
+        version::{MainVersion, bluetooth_info},
     };
-    use gulikit_platform::journal::Recorded;
+    use gulikit_platform::journal::{Recorded, finalize_record, write_event};
     use gulikit_platform::macos::{Session, discover, read_main};
     use serde_json::json;
-    use std::{
-        io::Write,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
     match command {
         Command::Devices { .. } => Ok(
@@ -74,10 +71,8 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let target = session.target.clone();
             let mut journal = session.create_record(&record)?;
             let header = json!({"event":"attempt_started","schema_version":1,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
-            serde_json::to_writer(&mut journal, &header).map_err(|e| e.to_string())?;
-            writeln!(journal).map_err(|e| e.to_string())?;
-            journal.sync_all().map_err(|e| e.to_string())?;
-            let mut result = match component {
+            write_event(&mut journal, &header)?;
+            let result = match component {
                 Component::Main => match session.main() {
                     Ok(port) => {
                         update_main(&mut Recorded::new(port, &mut journal), &package, || {
@@ -117,21 +112,11 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 }
             };
             let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"transfer":result,"operator_action":action});
-            if let Err(e) = (|| -> Result<(), String> {
-                serde_json::to_writer(&mut journal, &value).map_err(|e| e.to_string())?;
-                writeln!(journal).map_err(|e| e.to_string())?;
-                journal.sync_all().map_err(|e| e.to_string())?;
-                Ok(())
-            })() {
-                result
-                    .cleanup_errors
-                    .push(format!("Attempt record could not be finalized: {e}"));
-                return Ok(json!({"target":target,"package":package.info(),"transfer":result}));
-            }
-            Ok(value)
+            Ok(finalize_record(&mut journal, value))
         }
         Command::Verify {
             attempt,
+            record,
             confirm_ns39,
             confirm_same_controller,
             ..
@@ -154,35 +139,65 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let generation = prior["target"]["generation"]
                 .as_u64()
                 .ok_or("Missing attachment generation")?;
-            let (target, version) = match component {
-                Component::Main => {
-                    let (target, _, version) = read_main(confirm_ns39)?;
-                    (target, version.to_string())
-                }
-                Component::Bluetooth => {
-                    let mut port = Session::open(confirm_ns39)?.bluetooth()?;
-                    let target = port.target().clone();
-                    let raw = port.read_info();
-                    let cleanup = port.finish();
-                    let raw = raw.map_err(|e| format!("{e};cleanup={cleanup:?}"))?;
-                    cleanup?;
-                    (
-                        target,
-                        bluetooth_info(&raw).map_err(|e| e.to_string())?.to_string(),
-                    )
-                }
+            let mut session = Session::open(confirm_ns39)?;
+            let target = session.target.clone();
+            let mut journal = session.create_record(&record)?;
+            write_event(
+                &mut journal,
+                &json!({"event":"verification_started","schema_version":1,"source_attempt":attempt,"prior_result":prior,"target":target,"same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity"}),
+            )?;
+            let (readback, cleanup) = match component {
+                Component::Main => match session.main() {
+                    Ok(mut port) => {
+                        let raw = port.read_version();
+                        let cleanup = port.finish();
+                        (raw, cleanup)
+                    }
+                    Err(error) => (Err(error), Ok(())),
+                },
+                Component::Bluetooth => match session.bluetooth() {
+                    Ok(mut port) => {
+                        let raw = port.read_info();
+                        let cleanup = port.finish();
+                        (raw, cleanup)
+                    }
+                    Err(error) => (Err(error), Ok(())),
+                },
             };
-            let observation = Verification {
+            let version = readback
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|raw| match component {
+                    Component::Main => MainVersion::parse(raw)
+                        .map(|version| version.to_string())
+                        .map_err(|e| e.to_string()),
+                    Component::Bluetooth => bluetooth_info(raw)
+                        .map(|version| version.to_string())
+                        .map_err(|e| e.to_string()),
+                });
+            let error = version.as_ref().err().cloned();
+            let observation = version.ok().map(|version| Verification {
                 component,
                 previous_generation: generation,
                 generation: target.generation,
                 same_unit_confirmed: confirm_same_controller,
                 model_confirmed: confirm_ns39,
                 version,
-            };
-            Ok(
-                json!({"verification":observation,"target":target,"same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity","transfer":{"outcome":verify_restart(previous,&observation)}}),
-            )
+            });
+            let outcome = observation.as_ref().map_or(previous, |observation| {
+                verify_restart(previous, observation)
+            });
+            let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
+            Ok(finalize_record(
+                &mut journal,
+                json!({
+                    "event":"verification_result", "schema_version":1,
+                    "source_attempt":attempt, "verification":observation,
+                    "raw_version_bytes":readback.ok(), "target":target,
+                    "same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity",
+                    "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
+                }),
+            ))
         }
         _ => Err("Not a native command".into()),
     }

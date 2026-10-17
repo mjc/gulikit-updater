@@ -154,6 +154,8 @@ fn verification_refuses_symlinks_and_fifos_before_device_access() {
             .timeout(std::time::Duration::from_secs(2))
             .arg("verify")
             .arg(path)
+            .arg("--record")
+            .arg(directory.path().join("verification.jsonl"))
             .args(["--confirm-ns39", "--confirm-same-controller", "--json"])
             .assert()
             .code(5);

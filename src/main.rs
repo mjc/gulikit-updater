@@ -51,6 +51,9 @@ enum Command {
     /// After off/on restart and update-mode re-entry, verify the same physical controller.
     Verify {
         attempt: PathBuf,
+        /// New host record linking this fresh readback to the original attempt.
+        #[arg(long)]
+        record: PathBuf,
         #[arg(long, required = true)]
         confirm_ns39: bool,
         #[arg(long, required = true)]
