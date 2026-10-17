@@ -20,6 +20,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(target_os = "macos")]
+    #[command(hide = true, name = "__main-guardian")]
+    MainGuardian,
+    #[cfg(target_os = "macos")]
+    #[command(hide = true, name = "__main-worker")]
+    MainWorker,
     /// Enumerate all recognized update candidates. Put only one device in update mode.
     Devices {
         #[arg(long)]
@@ -107,6 +113,8 @@ fn write_json(writer: impl Write, body: impl Serialize) -> io::Result<()> {
 
 fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     match cli.command {
+        #[cfg(target_os = "macos")]
+        Command::MainGuardian | Command::MainWorker => unreachable!("internal process entrypoint"),
         command @ (Command::Devices { .. }
         | Command::Probe { .. }
         | Command::Update { .. }
@@ -272,6 +280,16 @@ fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
     } else {
         None
     };
+    #[cfg(target_os = "macos")]
+    if matches!(
+        &command,
+        Command::Update {
+            component: Component::Main,
+            ..
+        }
+    ) {
+        return main_supervision::update(command);
+    }
     native::execute(command, package)
 }
 fn outcome_code(value: &serde_json::Value) -> u8 {
@@ -311,10 +329,16 @@ fn outcome_code(value: &serde_json::Value) -> u8 {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod main_supervision;
 mod native;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    #[cfg(target_os = "macos")]
+    if matches!(&cli.command, Command::MainGuardian | Command::MainWorker) {
+        return main_supervision::internal(cli.command);
+    }
     match run(cli, &mut io::stdout().lock(), &mut io::stderr().lock()) {
         Ok(code) => code,
         Err(error) => {

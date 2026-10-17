@@ -242,7 +242,22 @@ impl Session {
         crate::journal::create_host_record(path, &devices)
     }
     pub fn open(confirmed: bool, component: Component) -> Result<Self, String> {
-        let lock = crate::lock::ProcessLock::acquire()?;
+        Self::open_locked(confirmed, component, crate::lock::ProcessLock::acquire()?)
+    }
+    pub fn open_main_worker(
+        confirmed: bool,
+        lease: crate::lock::ProcessLock,
+    ) -> Result<Self, String> {
+        if !lease.is_worker_lease() {
+            return Err("Main worker requires a guardian-owned lease".into());
+        }
+        Self::open_locked(confirmed, Component::Main, lease)
+    }
+    fn open_locked(
+        confirmed: bool,
+        component: Component,
+        lock: crate::lock::ProcessLock,
+    ) -> Result<Self, String> {
         let watch = Watch::new()?;
         let target = discover()?.select(confirmed, component)?;
         let service = unsafe { gu_entry_hold(target.ancestor) };
@@ -422,9 +437,24 @@ impl MainSession {
         &self.session.target
     }
 }
+fn main_write_capability(supervised: bool, writable: bool) -> Result<(), String> {
+    if !supervised {
+        return Err("Main writes require supervised filesystem I/O with retained ownership".into());
+    }
+    if !writable {
+        return Err("Selected Main update volume is not writable".into());
+    }
+    Ok(())
+}
 impl MainPort for MainSession {
     fn prepare_write(&mut self) -> Result<(), String> {
-        Err("Native Main writes remain gated until filesystem durability and completion qualification succeed".into())
+        self.check_session()?;
+        let writable =
+            self.session.target.disks.iter().any(|disk| {
+                Some(&disk.mount) == self.session.target.mount.as_ref() && disk.writable
+            });
+        main_write_capability(self.session.lock.is_worker_lease(), writable)?;
+        self.check_session()
     }
     fn read_version(&mut self) -> Result<Vec<u8>, String> {
         self.session.check()?;
@@ -930,6 +960,13 @@ mod tests {
     use super::{
         NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
     };
+    #[test]
+    fn main_writes_require_both_a_supervised_lease_and_writable_media() {
+        for (supervised, writable) in [(false, false), (false, true), (true, false)] {
+            assert!(super::main_write_capability(supervised, writable).is_err());
+        }
+        super::main_write_capability(true, true).unwrap();
+    }
     #[test]
     fn bluetooth_write_gate_requires_fresh_valid_f1_and_qualified_live_bot() {
         let mut gate = super::BluetoothWriteGate::default();

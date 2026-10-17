@@ -12,6 +12,31 @@ pub fn execute(_command: Command, _package: Option<VerifiedPackage>) -> Result<V
 
 #[cfg(target_os = "macos")]
 pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Value, AppError> {
+    execute_with_main_lease(command, package, None)
+}
+#[cfg(target_os = "macos")]
+pub fn execute_main_worker(
+    command: Command,
+    package: VerifiedPackage,
+    lease: gulikit_platform::lock::ProcessLock,
+) -> Result<Value, AppError> {
+    if !matches!(
+        &command,
+        Command::Update {
+            component: gulikit_core::package::Component::Main,
+            ..
+        }
+    ) {
+        return Err("Filesystem supervision is restricted to Main updates; never terminate a Bluetooth capture worker".into());
+    }
+    execute_with_main_lease(command, Some(package), Some(lease))
+}
+#[cfg(target_os = "macos")]
+fn execute_with_main_lease(
+    command: Command,
+    package: Option<VerifiedPackage>,
+    mut main_lease: Option<gulikit_platform::lock::ProcessLock>,
+) -> Result<Value, AppError> {
     use gulikit_core::{
         package::Component,
         update::{
@@ -102,7 +127,11 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             } else {
                 VersionPolicy::UpgradeOnly
             };
-            let mut session = Session::open(confirm_ns39, component)?;
+            let mut session = if let Some(lease) = main_lease.take() {
+                Session::open_main_worker(confirm_ns39, lease)?
+            } else {
+                Session::open(confirm_ns39, component)?
+            };
             let target = session.target.clone();
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
             let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
