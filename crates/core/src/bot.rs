@@ -6,6 +6,113 @@ pub enum Direction {
     Out,
 }
 
+/// One serialized bulk stage. An error must retain OS status, actual count and raw bytes.
+pub trait BulkIo {
+    fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String>;
+}
+
+/// A BOT command session is never resumed after a failed stage. Keep ownership of
+/// this object through cleanup so the pre-CBW F0 latch cannot be lost on errors.
+pub struct Session<T> {
+    io: T,
+    tag: u32,
+    failed: bool,
+    firmware_submitted: bool,
+}
+impl<T: BulkIo> Session<T> {
+    pub fn new(io: T) -> Self {
+        Self {
+            io,
+            tag: 0,
+            failed: false,
+            firmware_submitted: false,
+        }
+    }
+    pub fn io_mut(&mut self) -> &mut T {
+        &mut self.io
+    }
+    pub fn into_inner(self) -> T {
+        self.io
+    }
+    pub fn firmware_may_have_been_submitted(&self) -> bool {
+        self.firmware_submitted
+    }
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+    pub fn tag(&self) -> u32 {
+        self.tag
+    }
+    pub fn command(
+        &mut self,
+        cdb: &[u8],
+        direction: Direction,
+        data: &[u8],
+        length: usize,
+    ) -> Result<Vec<u8>, String> {
+        if self.failed {
+            return Err("BOT session failed; no new command, reset or replay is authorized".into());
+        }
+        if direction == Direction::Out && data.len() != length {
+            return Err("OUT buffer length differs from the command".into());
+        }
+        let expected = u32::try_from(length).map_err(|_| "BOT length exceeds u32")?;
+        let tag = self.tag.checked_add(1).ok_or("BOT tag exhausted")?;
+        let mut cbw = command_block(tag, direction, expected, cdb).map_err(|e| e.to_string())?;
+        self.tag = tag;
+        if cdb[0] == 0xf0 {
+            self.firmware_submitted = true;
+        }
+        let result = (|| -> Result<Vec<u8>, String> {
+            if self.io.transfer(Direction::Out, &mut cbw)? != 31 {
+                return Err("Short CBW; command is uncertain".into());
+            }
+            let mut bytes = if direction == Direction::In {
+                vec![0; length]
+            } else {
+                data.to_vec()
+            };
+            let actual = self.io.transfer(direction, &mut bytes)?;
+            if actual > length {
+                return Err("Invalid bulk data length".into());
+            }
+            bytes.truncate(actual);
+            if direction == Direction::In {
+                let stage = data_stage(&bytes, tag, expected)
+                    .map_err(|e| format!("{e}; raw={bytes:02x?}"))?;
+                if stage == DataStage::EarlyStatus {
+                    return Err(format!("Early CSW instead of vendor data: {bytes:02x?}"));
+                }
+            }
+            let mut status = [0; 13];
+            let status_actual = self.io.transfer(Direction::In, &mut status)?;
+            if status_actual > status.len() {
+                return Err("Invalid CSW transfer length".into());
+            }
+            validate_status(&status[..status_actual], tag, expected, actual as u32).map_err(
+                |e| {
+                    format!(
+                        "{e}; CSW={:02x?}; data={bytes:02x?}",
+                        &status[..status_actual]
+                    )
+                },
+            )?;
+            if actual != length {
+                return Err(format!("Short vendor data {actual}/{length}: {bytes:02x?}"));
+            }
+            Ok(if direction == Direction::In {
+                bytes
+            } else {
+                Vec::new()
+            })
+        })();
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CommandError {
     #[error("SCSI CDB must contain 1 to 16 bytes")]

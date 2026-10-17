@@ -3,8 +3,6 @@
 
 #[cfg(target_os = "macos")]
 pub mod macos;
-#[cfg(target_os = "macos")]
-pub mod usb;
 
 pub mod journal;
 pub mod process;
