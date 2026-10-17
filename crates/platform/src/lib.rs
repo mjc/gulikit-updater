@@ -4,6 +4,7 @@
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+pub mod journal;
 #[cfg(unix)]
 pub mod volume;
 

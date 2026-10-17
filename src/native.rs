@@ -19,6 +19,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
         },
         version::bluetooth_info,
     };
+    use gulikit_platform::journal::Recorded;
     use gulikit_platform::macos::{Session, discover, read_main};
     use serde_json::json;
     use std::{
@@ -78,11 +79,11 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             journal.sync_all().map_err(|e| e.to_string())?;
             let mut result = match component {
                 Component::Main => {
-                    let mut port = session.main()?;
+                    let mut port = Recorded::new(session.main()?, &mut journal);
                     update_main(&mut port, &package, || cancelled.load(Ordering::SeqCst))
                 }
                 Component::Bluetooth => {
-                    let mut port = session.bluetooth()?;
+                    let mut port = Recorded::new(session.bluetooth()?, &mut journal);
                     update_bluetooth(&mut port, &package, || cancelled.load(Ordering::SeqCst))
                 }
             };
