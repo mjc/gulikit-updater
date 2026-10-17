@@ -231,10 +231,14 @@ fn outcome_code(value: &serde_json::Value) -> u8 {
     if value.pointer("/transfer/outcome").and_then(|v| v.as_str()) == Some("outcome_unknown") {
         return 9;
     }
-    if value
-        .pointer("/transfer/cleanup_errors")
-        .and_then(|v| v.as_array())
-        .is_some_and(|errors| !errors.is_empty())
+    if ["/transfer/cleanup_errors", "/cleanup_errors"]
+        .iter()
+        .any(|path| {
+            value
+                .pointer(path)
+                .and_then(|v| v.as_array())
+                .is_some_and(|errors| !errors.is_empty())
+        })
     {
         return 8;
     }
@@ -277,6 +281,11 @@ mod tests {
         assert_eq!(outcome_code(&value), 8);
         let unknown = serde_json::json!({"transfer":{"outcome":"outcome_unknown","cleanup_errors":["remount failed"]}});
         assert_eq!(outcome_code(&unknown), 9);
+    }
+    #[test]
+    fn probe_cleanup_failure_preserves_readback_but_requires_attention() {
+        let value = serde_json::json!({"installed_version":"5.07","raw_version_bytes":[1,2],"cleanup_errors":["driver restoration pending"]});
+        assert_eq!(outcome_code(&value), 8);
     }
     #[test]
     fn verification_read_error_cannot_reuse_a_previous_success_exit_status() {

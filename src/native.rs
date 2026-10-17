@@ -36,25 +36,26 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             confirm_ns39,
             ..
         } => {
-            let (target, raw, version, qualified_lun) = match component {
+            let (target, raw, version, qualified_lun, cleanup_errors) = match component {
                 Component::Main => {
                     let (target, raw, version) = read_main(confirm_ns39)?;
-                    (target, raw, version.to_string(), None)
+                    (target, raw, version.to_string(), None, Vec::<String>::new())
                 }
                 Component::Bluetooth => {
                     let mut port = Session::open(confirm_ns39)?.bluetooth()?;
                     let target = port.target().clone();
                     let qualified_lun = port.qualified_lun();
                     let raw = port.read_info();
-                    let cleanup = port.finish();
-                    let raw = raw.map_err(|e| format!("{e}; cleanup={cleanup:?}"))?;
-                    cleanup?;
-                    let version = bluetooth_info(&raw).map_err(|e| e.to_string())?.to_string();
-                    (target, raw, version, qualified_lun)
+                    let cleanup_errors: Vec<_> = port.finish().err().into_iter().collect();
+                    let raw = raw.map_err(|e| format!("{e}; cleanup={cleanup_errors:?}"))?;
+                    let version = bluetooth_info(&raw)
+                        .map_err(|e| format!("{e}; raw={raw:02x?}; cleanup={cleanup_errors:?}"))?
+                        .to_string();
+                    (target, raw, version, qualified_lun, cleanup_errors)
                 }
             };
             Ok(
-                json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"qualified_bot_lun":qualified_lun,"target":target,"identity_provenance":"user-confirmed NS39; observed update profile"}),
+                json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"qualified_bot_lun":qualified_lun,"cleanup_errors":cleanup_errors,"target":target,"identity_provenance":"user-confirmed NS39; observed update profile"}),
             )
         }
         Command::Update {
