@@ -48,3 +48,36 @@ within an explicitly requested hardware session. The original probe's NS39/BT
 labels describe the research context, not a proven model detector. The observed
 34d3:1100 storage interface and Main update volume belong to the same physical
 device, and Main/BT access must not be assumed mutually exclusive.
+
+## Reproduce the expanded Bluetooth Windows context
+
+After preparation, run the actual discovery worker, update handler and embedded
+USB DLL in the bounded Unicorn fixture:
+
+```sh
+uv run --with-requirements research/requirements.txt python -O research/run_context_suite.py
+uv run --with-requirements research/requirements.txt python -O -m unittest discover -s research -p 'test_*.py'
+```
+
+`--exe`, `--dll` and `--output` select reference paths and the generated trace
+cache. Defaults use the files produced by `prepare.py` and the ignored research
+cache. Both reference images are size/hash checked before PE parsing or mapping;
+optimization cannot remove input checks or scenario acceptance checks. No vendor
+binary or generated firmware trace belongs in Git.
+
+Seven scenarios execute the real descriptor filter and DLL exports: matching,
+ASCII Guli, raw-UTF16-conditioned Guli and non-USB descriptor fixtures; F1 retry
+and exhaustion; and the complete synthetic 5.06-to-5.07 update. The latter checks
+674 exact 512-byte blocks, complete payload hash, first/final F2 placement,
+progress/message pumping, success dialog, handle closure and discovery resumption.
+A selected drive is obtained through the real discovery instructions. The fixture
+records the storage query's eight initialized bytes and four stack bytes rather
+than treating all twelve bytes as initialized.
+
+Windows/CRT imports, loader/runtime objects, responses and scheduling are fixtures.
+Two static CRT text-formatting functions are also modeled; DeviceUsb exports and
+MFC/UI wrappers execute their actual instructions. The descriptor cases do not
+establish the controller's actual Windows descriptor. This proves the stated
+userspace control flow, including the misleading mismatch dialog after failed
+F1 transport. Windows kernel behavior, USB wire packets, native F1 acceptance,
+real firmware transfer and installed-version readback remain separate evidence.
