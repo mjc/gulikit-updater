@@ -261,3 +261,85 @@ mod verification_tests {
         );
     }
 }
+
+/// Create one exclusive host record and durably publish its directory entry.
+#[cfg(unix)]
+pub fn create_host_record(
+    path: &std::path::Path,
+    excluded_devices: &[u64],
+) -> Result<File, String> {
+    use nix::{
+        fcntl::{OFlag, open},
+        sys::stat::Mode,
+    };
+    use std::os::unix::fs::MetadataExt;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or("Attempt record requires a filename")?;
+    let directory = File::from(
+        open(
+            parent,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| e.to_string())?,
+    );
+    if excluded_devices.contains(&directory.metadata().map_err(|e| e.to_string())?.dev()) {
+        return Err(
+            "Attempt records must be stored on the host, outside the controller volume".into(),
+        );
+    }
+    create_in_directory(&directory, name, File::sync_all)
+}
+#[cfg(unix)]
+fn create_in_directory(
+    directory: &File,
+    name: &std::ffi::OsStr,
+    sync_parent: impl FnOnce(&File) -> std::io::Result<()>,
+) -> Result<File, String> {
+    use nix::{
+        fcntl::{OFlag, openat},
+        sys::stat::Mode,
+    };
+    let file = File::from(
+        openat(
+            directory,
+            name,
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(|e| e.to_string())?,
+    );
+    sync_parent(directory)
+        .map_err(|error| format!("Host record directory entry could not be persisted: {error}"))?;
+    Ok(file)
+}
+#[cfg(all(test, unix))]
+mod creation_tests {
+    use super::*;
+    #[test]
+    fn parent_entry_is_synced_before_record_is_returned_and_sync_failure_refuses_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = File::open(temporary.path()).unwrap();
+        let name = std::ffi::OsStr::new("attempt.jsonl");
+        let mut synced = false;
+        let file = create_in_directory(&directory, name, |parent| {
+            assert!(temporary.path().join(name).is_file());
+            synced = true;
+            parent.sync_all()
+        })
+        .unwrap();
+        assert!(synced);
+        drop(file);
+        let failed = create_in_directory(&directory, std::ffi::OsStr::new("failed.jsonl"), |_| {
+            Err(std::io::Error::other("directory sync failed"))
+        });
+        assert!(failed.unwrap_err().contains("directory sync failed"));
+        assert!(temporary.path().join("failed.jsonl").is_file());
+        assert!(create_host_record(&temporary.path().join(name), &[]).is_err());
+    }
+}

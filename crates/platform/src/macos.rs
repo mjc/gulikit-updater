@@ -225,53 +225,19 @@ pub struct Session {
 impl Session {
     /// Create the host audit log relative to an open directory, excluding device volumes.
     pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
-        use nix::{
-            fcntl::{OFlag, open, openat},
-            sys::stat::Mode,
-        };
         use std::os::unix::fs::MetadataExt;
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(std::path::Path::new("."));
-        let name = path
-            .file_name()
-            .ok_or("Attempt record requires a filename")?;
-        let dir = File::from(
-            open(
-                parent,
-                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|e| e.to_string())?,
-        );
-        let device = dir.metadata().map_err(|e| e.to_string())?.dev();
-        for disk in &self.target.disks {
-            if !disk.mount.as_os_str().is_empty()
-                && std::fs::metadata(&disk.mount)
-                    .map_err(|e| e.to_string())?
-                    .dev()
-                    == device
-            {
-                return Err(
-                    "Attempt records must be stored on the host, outside the controller volume"
-                        .into(),
-                );
-            }
-        }
-        Ok(File::from(
-            openat(
-                &dir,
-                name,
-                OFlag::O_WRONLY
-                    | OFlag::O_CREAT
-                    | OFlag::O_EXCL
-                    | OFlag::O_NOFOLLOW
-                    | OFlag::O_CLOEXEC,
-                Mode::from_bits_truncate(0o600),
-            )
-            .map_err(|e| e.to_string())?,
-        ))
+        let devices = self
+            .target
+            .disks
+            .iter()
+            .filter(|disk| !disk.mount.as_os_str().is_empty())
+            .map(|disk| {
+                std::fs::metadata(&disk.mount)
+                    .map(|metadata| metadata.dev())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::journal::create_host_record(path, &devices)
     }
     pub fn open(confirmed: bool, component: Component) -> Result<Self, String> {
         let lock = crate::lock::ProcessLock::acquire()?;
