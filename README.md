@@ -113,11 +113,15 @@ Main and Bluetooth access may be available together on one NS39. Native discover
 reports a `bluetooth_transport_candidate` when it correlates a suitable command
 interface; that alone does not prove the Windows updater would select this storage
 identity or that F1 succeeds. A fresh complete F1 response remains required. Selection
-counts physical controllers, requires both component accesses on the same
-target and refuses more than one device in update mode. A shared Bluetooth
+counts recognized physical update candidates before component filtering and
+refuses more than one device in update mode. Each component can be selected
+independently; an absent Main view cannot block Bluetooth preflight and an absent
+Bluetooth view cannot block Main inspection. Views present together are bound to
+the same USB ancestor and generation. A shared Bluetooth
 protocol signature is not an NS39 model identifier. Native discovery must
-correlate the Main volume and BT command path and recheck uniqueness before
-any write. Both native write adapters refuse before firmware submission until
+correlate each component path to its physical attachment and recheck uniqueness
+before any write. A mounted descendant is only a Main-volume candidate: fresh
+GULI.TXT parsing is required, and writability is a separate write condition. Both native write adapters refuse before firmware submission until
 their hardware qualification gates are satisfied. Portable tests and mocked
 official-instruction traces do not establish actual-device flash acceptance.
 

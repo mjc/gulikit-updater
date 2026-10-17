@@ -42,7 +42,8 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                     (target, raw, version.to_string(), None, Vec::<String>::new())
                 }
                 Component::Bluetooth => {
-                    let mut port = Session::open(confirm_ns39)?.bluetooth()?;
+                    let mut port =
+                        Session::open(confirm_ns39, Component::Bluetooth)?.bluetooth()?;
                     let target = port.target().clone();
                     let qualified_lun = port.qualified_lun();
                     let raw = port.read_info();
@@ -69,7 +70,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let flag = Arc::clone(&cancelled);
             ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
                 .map_err(|e| e.to_string())?;
-            let mut session = Session::open(confirm_ns39)?;
+            let mut session = Session::open(confirm_ns39, component)?;
             let target = session.target.clone();
             let mut journal = session.create_record(&record)?;
             let header = json!({"event":"attempt_started","schema_version":1,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
@@ -145,7 +146,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let generation = prior["target"]["generation"]
                 .as_u64()
                 .ok_or("Missing attachment generation")?;
-            let mut session = Session::open(confirm_ns39)?;
+            let mut session = Session::open(confirm_ns39, component)?;
             let target = session.target.clone();
             let mut journal = session.create_record(&record)?;
             write_event(

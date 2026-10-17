@@ -6,6 +6,7 @@ use crate::volume::Volume;
 use gulikit_core::{
     bot::{self, BulkIo, Direction, validate_status},
     device::{Candidate, Discovery},
+    package::Component,
     update::{BluetoothPort, CompletionDecision, CompletionObservation, MainPort},
     version::MainVersion,
 };
@@ -64,7 +65,8 @@ pub struct Disk {
 pub struct NativeCandidate {
     pub ancestor: u64,
     pub generation: u64,
-    pub main_access: bool,
+    /// A mounted volume to inspect, not proof of valid GULI.TXT or writable media.
+    pub main_volume_candidate: bool,
     /// A correlated command path; successful F1 is separate protocol evidence.
     pub bluetooth_transport_candidate: bool,
     pub observed_profile: bool,
@@ -77,7 +79,7 @@ impl NativeCandidate {
         Candidate {
             ancestor: self.ancestor,
             generation: self.generation,
-            main_access: self.main_access,
+            main_access: self.main_volume_candidate,
             bluetooth_access: self.bluetooth_transport_candidate,
             observed_profile: self.observed_profile,
             conflicting_model: self.conflicting_model,
@@ -90,12 +92,12 @@ pub struct Snapshot {
     pub incomplete: Vec<String>,
 }
 impl Snapshot {
-    pub fn select(&self, confirmed: bool) -> Result<NativeCandidate, String> {
+    pub fn select(&self, confirmed: bool, component: Component) -> Result<NativeCandidate, String> {
         let selected = Discovery {
             candidates: self.candidates.iter().map(NativeCandidate::core).collect(),
             incomplete: self.incomplete.clone(),
         }
-        .select(confirmed)
+        .select(confirmed, component)
         .map_err(|e| e.to_string())?;
         self.candidates
             .iter()
@@ -165,6 +167,7 @@ impl Drop for Watch {
 /// Unknown future bootloader identities are outside this build's discovery coverage.
 pub struct Session {
     pub target: NativeCandidate,
+    component: Component,
     watch: Watch,
     lock: crate::lock::ProcessLock,
     service: u32,
@@ -220,16 +223,17 @@ impl Session {
             .map_err(|e| e.to_string())?,
         ))
     }
-    pub fn open(confirmed: bool) -> Result<Self, String> {
+    pub fn open(confirmed: bool, component: Component) -> Result<Self, String> {
         let lock = crate::lock::ProcessLock::acquire()?;
         let watch = Watch::new()?;
-        let target = discover()?.select(confirmed)?;
+        let target = discover()?.select(confirmed, component)?;
         let service = unsafe { gu_entry_hold(target.ancestor) };
         if service == 0 {
             return Err("Selected physical attachment disappeared".into());
         }
         let session = Self {
             target,
+            component,
             watch,
             lock,
             service,
@@ -242,7 +246,7 @@ impl Session {
         if !self.watch.unchanged() {
             return Err("USB topology changed; this session is invalidated. Rediscover and confirm the controller again.".into());
         }
-        let current = discover()?.select(true)?;
+        let current = discover()?.select(true, self.component)?;
         if current != self.target {
             return Err("Selected attachment changed".into());
         }
@@ -252,6 +256,9 @@ impl Session {
         Ok(())
     }
     pub fn main(self) -> Result<MainSession, String> {
+        if self.component != Component::Main {
+            return Err("Session selected a different component".into());
+        }
         use std::os::unix::fs::MetadataExt;
         self.check()?;
         let mount = self
@@ -263,8 +270,8 @@ impl Session {
             .target
             .disks
             .iter()
-            .find(|disk| disk.mount == *mount && disk.writable)
-            .ok_or("Selected mount is not a writable device volume")?;
+            .find(|disk| disk.mount == *mount)
+            .ok_or("Selected mount is not a correlated device volume")?;
         let device = std::fs::metadata(PathBuf::from("/dev").join(&disk.bsd))
             .map_err(|e| e.to_string())?
             .rdev();
@@ -276,6 +283,9 @@ impl Session {
         })
     }
     pub fn bluetooth(self) -> Result<BluetoothSession, String> {
+        if self.component != Component::Bluetooth {
+            return Err("Session selected a different component".into());
+        }
         self.check()?;
         let mut port = BluetoothSession {
             session: self,
@@ -343,15 +353,11 @@ impl Session {
             candidates: snapshot
                 .candidates
                 .iter()
-                .map(|c| {
-                    let mut c = c.core();
-                    c.main_access = c.ancestor == self.target.ancestor;
-                    c
-                })
+                .map(NativeCandidate::core)
                 .collect(),
             incomplete: snapshot.incomplete,
         }
-        .select(true)
+        .select(true, self.component)
         .map_err(|e| e.to_string())?;
         if selected.ancestor != self.target.ancestor
             || selected.generation != self.target.generation
@@ -796,7 +802,7 @@ impl Drop for BluetoothSession {
 }
 
 pub fn read_main(confirmed: bool) -> Result<(NativeCandidate, Vec<u8>, MainVersion), String> {
-    let mut port = Session::open(confirmed)?.main()?;
+    let mut port = Session::open(confirmed, Component::Main)?.main()?;
     let raw = port.read_version()?;
     let version = MainVersion::parse(&raw).map_err(|e| e.to_string())?;
     Ok((port.session.target.clone(), raw, version))

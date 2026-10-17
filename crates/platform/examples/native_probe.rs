@@ -7,7 +7,8 @@ fn main() -> Result<(), String> {
         serde_json::to_string_pretty(&discover()?).map_err(|e| e.to_string())?
     );
     if std::env::args().any(|arg| arg == "--confirm-ns39-read-only") {
-        let mut session = Session::open(true)?.bluetooth()?;
+        let mut session =
+            Session::open(true, gulikit_core::package::Component::Bluetooth)?.bluetooth()?;
         println!("Claimed: {}", session.enable_diagnostics()?);
         println!("GET_MAX_LUN: {:?}", session.max_lun());
         let inquiry = session.inquiry();

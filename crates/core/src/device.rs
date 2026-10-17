@@ -18,6 +18,7 @@ pub struct Candidate {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Discovery {
+    /// All recognized update candidates, before model or component filtering.
     pub candidates: Vec<Candidate>,
     pub incomplete: Vec<String>,
 }
@@ -34,12 +35,16 @@ pub enum DiscoveryError {
         "Confirm the physical NS39 label and Max controls; unknown or conflicting model evidence refuses writing."
     )]
     WrongOrConflictingModel,
-    #[error("Main and Bluetooth update access must belong to the same attachment.")]
+    #[error("The requested component has no correlated access path on this attachment.")]
     MissingAccess,
 }
 
 impl Discovery {
-    pub fn select(&self, user_confirmed_ns39: bool) -> Result<Candidate, DiscoveryError> {
+    pub fn select(
+        &self,
+        user_confirmed_ns39: bool,
+        component: Component,
+    ) -> Result<Candidate, DiscoveryError> {
         let ids: BTreeSet<_> = self.candidates.iter().map(|c| c.ancestor).collect();
         if ids.len() > 1 {
             return Err(DiscoveryError::MultipleDevices);
@@ -53,18 +58,17 @@ impl Discovery {
             return Err(DiscoveryError::DiscoveryIncomplete);
         }
         let first = self.candidates.first().ok_or(DiscoveryError::NoDevice)?;
-        if !user_confirmed_ns39
-            || self
-                .candidates
-                .iter()
-                .any(|c| c.conflicting_model || !c.observed_profile)
-        {
+        if !user_confirmed_ns39 || self.candidates.iter().any(|c| c.conflicting_model) {
             return Err(DiscoveryError::WrongOrConflictingModel);
         }
         let mut candidate = first.clone();
         candidate.main_access = self.candidates.iter().any(|c| c.main_access);
         candidate.bluetooth_access = self.candidates.iter().any(|c| c.bluetooth_access);
-        if !candidate.main_access || !candidate.bluetooth_access {
+        let available = match component {
+            Component::Main => candidate.main_access,
+            Component::Bluetooth => candidate.bluetooth_access,
+        };
+        if !available {
             return Err(DiscoveryError::MissingAccess);
         }
         Ok(candidate)
@@ -113,7 +117,7 @@ pub enum SelectionError {
     NoDevice,
     #[error("More than one device is in update mode. Disconnect the others and try again.")]
     MultipleDevices,
-    #[error("Main and Bluetooth update access must belong to the same controller.")]
+    #[error("The requested component has no correlated access path on this controller.")]
     MissingComponent,
     #[error("Controller model identity is unknown or conflicting.")]
     Unidentified,
@@ -134,6 +138,7 @@ impl UpdateTarget {
 
 pub fn select_ns39_update_target(
     observations: impl IntoIterator<Item = Observation>,
+    component: Component,
 ) -> Result<UpdateTarget, SelectionError> {
     let controllers = group_observations(observations);
     let mut controllers = controllers.into_iter();
@@ -141,10 +146,7 @@ pub fn select_ns39_update_target(
     if controllers.next().is_some() {
         return Err(SelectionError::MultipleDevices);
     }
-    if ![Component::Main, Component::Bluetooth]
-        .iter()
-        .all(|component| controller.components.contains(component))
-    {
+    if !controller.components.contains(&component) {
         return Err(SelectionError::MissingComponent);
     }
     if controller.identity
@@ -297,7 +299,7 @@ mod tests {
 
     #[test]
     fn selects_one_controller_with_both_component_accesses() {
-        let target = select_ns39_update_target(dual_access("one")).unwrap();
+        let target = select_ns39_update_target(dual_access("one"), Component::Main).unwrap();
         assert_eq!(target.controller().components.len(), 2);
     }
 
@@ -309,7 +311,7 @@ mod tests {
             Identity::Unknown,
         )]);
         assert_eq!(
-            select_ns39_update_target(observations).unwrap_err(),
+            select_ns39_update_target(observations, Component::Main).unwrap_err(),
             SelectionError::MultipleDevices
         );
     }
@@ -317,12 +319,13 @@ mod tests {
     #[test]
     fn refuses_missing_or_cross_device_component_access() {
         assert_eq!(
-            select_ns39_update_target([dual_access("one")[0].clone()]).unwrap_err(),
+            select_ns39_update_target([dual_access("one")[0].clone()], Component::Bluetooth)
+                .unwrap_err(),
             SelectionError::MissingComponent
         );
         let observations = [dual_access("one")[0].clone(), dual_access("two")[1].clone()];
         assert_eq!(
-            select_ns39_update_target(observations).unwrap_err(),
+            select_ns39_update_target(observations, Component::Main).unwrap_err(),
             SelectionError::MultipleDevices
         );
     }
@@ -334,7 +337,7 @@ mod tests {
             dual_access("one")[1].clone(),
         ];
         assert_eq!(
-            select_ns39_update_target(observations).unwrap_err(),
+            select_ns39_update_target(observations, Component::Main).unwrap_err(),
             SelectionError::Unidentified
         );
     }
@@ -357,7 +360,7 @@ mod tests {
             [second.clone(), first.clone(), exact.clone()],
         ] {
             assert_eq!(
-                select_ns39_update_target(observations).unwrap_err(),
+                select_ns39_update_target(observations, Component::Main).unwrap_err(),
                 SelectionError::Unidentified
             );
         }
