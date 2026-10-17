@@ -3,11 +3,17 @@ use std::collections::VecDeque;
 
 struct Fake {
     reads: VecDeque<Vec<u8>>,
+    address_queries: usize,
+    max_lun: Result<u8, String>,
     calls: Vec<Direction>,
     fail_at: Option<usize>,
     writes: Vec<Vec<u8>>,
 }
 impl BulkIo for Fake {
+    fn max_lun(&mut self) -> Result<u8, String> {
+        self.address_queries += 1;
+        self.max_lun.clone()
+    }
     fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String> {
         self.calls.push(direction);
         if self.fail_at == Some(self.calls.len()) {
@@ -26,6 +32,8 @@ impl BulkIo for Fake {
 fn io() -> Fake {
     Fake {
         reads: VecDeque::from([vec![0xa1; 20], b"USBS\x01\0\0\0\0\0\0\0\0".to_vec()]),
+        address_queries: 0,
+        max_lun: Ok(0),
         calls: vec![],
         fail_at: None,
         writes: vec![],
@@ -89,5 +97,29 @@ fn short_data_and_early_status_never_become_vendor_success() {
                 .command(&[0xf1; 10], Direction::In, &[], 20)
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn qualifies_each_attachment_before_any_bot_command_and_refuses_ambiguous_addressing() {
+    for advertised in [Err("GET_MAX_LUN failed".into()), Ok(1), Ok(16)] {
+        let mut fake = io();
+        fake.max_lun = advertised;
+        let mut session = Session::new(fake);
+        assert!(
+            session
+                .command(&[0xf1; 10], Direction::In, &[], 20)
+                .is_err()
+        );
+        assert_eq!(session.io_mut().address_queries, 1);
+        assert!(session.io_mut().calls.is_empty());
+        assert!(!session.firmware_may_have_been_submitted());
+    }
+    for _ in 0..2 {
+        let mut session = Session::new(io());
+        session
+            .command(&[0xf1; 10], Direction::In, &[], 20)
+            .unwrap();
+        assert_eq!(session.io_mut().address_queries, 1);
     }
 }

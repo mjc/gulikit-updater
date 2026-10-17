@@ -8,6 +8,7 @@ pub enum Direction {
 
 /// One serialized bulk stage. An error must retain OS status, actual count and raw bytes.
 pub trait BulkIo {
+    fn max_lun(&mut self) -> Result<u8, String>;
     fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String>;
 }
 
@@ -18,6 +19,7 @@ pub struct Session<T> {
     tag: u32,
     failed: bool,
     firmware_submitted: bool,
+    qualified_lun: Option<u8>,
 }
 impl<T: BulkIo> Session<T> {
     pub fn new(io: T) -> Self {
@@ -26,7 +28,33 @@ impl<T: BulkIo> Session<T> {
             tag: 0,
             failed: false,
             firmware_submitted: false,
+            qualified_lun: None,
         }
+    }
+    /// This implementation supports only an attachment advertising exactly LUN0.
+    pub fn qualify_addressing(&mut self) -> Result<u8, String> {
+        if self.failed {
+            return Err("BOT session already failed".into());
+        }
+        if let Some(lun) = self.qualified_lun {
+            return Ok(lun);
+        }
+        let result = self.io.max_lun().and_then(|maximum| {
+            if maximum == 0 { Ok(0) } else { Err(format!("Unsupported advertised maximum LUN {maximum}; only the qualified single-LUN profile is supported")) }
+        });
+        match result {
+            Ok(lun) => {
+                self.qualified_lun = Some(lun);
+                Ok(lun)
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+    pub fn qualified_lun(&self) -> Option<u8> {
+        self.qualified_lun
     }
     pub fn io_mut(&mut self) -> &mut T {
         &mut self.io
@@ -56,6 +84,7 @@ impl<T: BulkIo> Session<T> {
         if direction == Direction::Out && data.len() != length {
             return Err("OUT buffer length differs from the command".into());
         }
+        self.qualify_addressing()?;
         let expected = u32::try_from(length).map_err(|_| "BOT length exceeds u32")?;
         let tag = self.tag.checked_add(1).ok_or("BOT tag exhausted")?;
         let mut cbw = command_block(tag, direction, expected, cdb).map_err(|e| e.to_string())?;

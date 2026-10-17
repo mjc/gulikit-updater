@@ -114,6 +114,10 @@ impl Default for TransferRecord {
 /// Implementations must never retry a submitted vendor command or automatically reset
 /// once firmware may have been submitted. Read-only cleanup effects must be explicit.
 pub trait BluetoothPort {
+    /// Freshly qualified BOT LUN, when the adapter uses raw BOT.
+    fn qualified_lun(&self) -> Option<u8> {
+        None
+    }
     /// Refuse unsupported/unqualified writes before any submission is recorded.
     fn prepare_write(&mut self) -> Result<(), String>;
     fn check_session(&mut self) -> Result<(), String>;

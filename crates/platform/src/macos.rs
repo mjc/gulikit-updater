@@ -313,6 +313,11 @@ impl Session {
                 return Err(error_string(&error));
             }
             port.session.check_transport()?;
+            port.usb
+                .as_mut()
+                .ok_or("No USB claim")?
+                .qualify_addressing()?;
+            port.session.check_transport()?;
             Ok(())
         })();
         if let Err(error) = result {
@@ -496,6 +501,18 @@ fn transfer_result(result: i32, actual: usize, bytes: &[u8], error: &str) -> Res
     Ok(actual)
 }
 impl BulkIo for NativeUsb {
+    fn max_lun(&mut self) -> Result<u8, String> {
+        let usb = self.pointer()?;
+        let mut value = 0;
+        let mut error = [0i8; 1024];
+        let result =
+            unsafe { gu_usb_max_lun(usb.as_ptr(), &mut value, error.as_mut_ptr(), error.len()) };
+        if result != 0 {
+            return Err(error_string(&error));
+        }
+        Ok(value)
+    }
+
     fn transfer(&mut self, direction: Direction, bytes: &mut [u8]) -> Result<usize, String> {
         let usb = self.pointer()?;
         let input = direction == Direction::In;
@@ -592,18 +609,10 @@ impl BluetoothSession {
     }
     pub fn max_lun(&mut self) -> Result<u8, String> {
         self.check_session()?;
-        let usb = self.native()?.pointer()?;
-        let mut value = 0;
-        let mut error = [0i8; 1024];
-        let result =
-            unsafe { gu_usb_max_lun(usb.as_ptr(), &mut value, error.as_mut_ptr(), error.len()) };
-        if result != 0 {
-            return Err(error_string(&error));
-        }
-        if value > 15 {
-            return Err(format!("Invalid advertised maximum LUN {value}"));
-        }
-        Ok(value)
+        self.usb
+            .as_mut()
+            .ok_or("No USB claim")?
+            .qualify_addressing()
     }
     pub fn target(&self) -> &NativeCandidate {
         &self.session.target
@@ -678,6 +687,9 @@ impl BluetoothSession {
     }
 }
 impl BluetoothPort for BluetoothSession {
+    fn qualified_lun(&self) -> Option<u8> {
+        self.usb.as_ref().and_then(bot::Session::qualified_lun)
+    }
     fn prepare_write(&mut self) -> Result<(), String> {
         Err("Native Bluetooth writes remain gated until address, zero-tail F1 and ownership qualification succeed".into())
     }

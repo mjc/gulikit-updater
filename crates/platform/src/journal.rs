@@ -73,6 +73,9 @@ impl<'a, P> Recorded<'a, P> {
     }
 }
 impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
+    fn qualified_lun(&self) -> Option<u8> {
+        self.inner.qualified_lun()
+    }
     fn prepare_write(&mut self) -> Result<(), String> {
         self.inner.prepare_write()
     }
@@ -80,7 +83,7 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
         self.inner.check_session()
     }
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
-        self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"requested":if opcode==0xf0{data.len()}else{20}}))?;
+        self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"requested":if opcode==0xf0{data.len()}else{20}}))?;
         let result = self.inner.command(opcode, data);
         self.result("command_result",result,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
     }
