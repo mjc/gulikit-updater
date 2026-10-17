@@ -15,6 +15,14 @@ pub struct ProcessLock {
     file: File,
     path: PathBuf,
 }
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        // A concurrently spawned helper may briefly inherit this open file
+        // description before exec closes it. Ownership ends with this guard,
+        // without waiting for every inherited descriptor to close.
+        let _ = self.file.unlock();
+    }
+}
 impl ProcessLock {
     pub fn acquire() -> Result<Self, String> {
         Self::at(Path::new("/tmp/gulikit-updater.lock"))
@@ -77,6 +85,18 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::File::create(&path).unwrap();
         assert!(second.check().is_err());
+    }
+    #[test]
+    fn guard_drop_releases_ownership_even_if_a_helper_inherits_the_description() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("updater.lock");
+        let owner = ProcessLock::at(&path).unwrap();
+        let inherited = owner.file.try_clone().unwrap();
+        drop(owner);
+        let next = ProcessLock::at(&path).unwrap();
+        drop(inherited);
+        next.check().unwrap();
+        assert!(ProcessLock::at(&path).is_err());
     }
     #[test]
     fn refuses_symlinks_and_nonempty_files_without_writing_them() {
