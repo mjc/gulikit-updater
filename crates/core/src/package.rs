@@ -1,7 +1,7 @@
 //! Offline inspection of reviewed official firmware packages.
 
 use object::read::pe::PeFile32;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 use std::{fmt, str::FromStr};
@@ -9,7 +9,7 @@ use std::{fmt, str::FromStr};
 /// Upper bound checked before reading a package from an untrusted file.
 pub const MAX_ARCHIVE_SIZE: usize = 1_163_538;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Component {
     Main,
@@ -97,7 +97,7 @@ pub enum PackageError {
     EmbeddedMetadata,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PackageInfo {
     pub model: Model,
     pub component: Component,

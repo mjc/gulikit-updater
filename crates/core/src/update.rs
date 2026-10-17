@@ -47,7 +47,7 @@ impl CompletionObservation {
 }
 
 /// A fresh machine readback and separately recorded assisted association.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Verification {
     pub component: Component,
     pub previous_generation: u64,
@@ -173,11 +173,35 @@ pub trait BluetoothPort {
     fn finish(&mut self) -> Result<(), String>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub submitted: usize,
+    pub confirmed: usize,
+    pub total: usize,
+}
+fn publish_progress(record: &TransferRecord, total: usize, progress: &mut impl FnMut(Progress)) {
+    progress(Progress {
+        submitted: record.bytes_submitted,
+        confirmed: record.bytes_confirmed,
+        total,
+    });
+}
+
 pub fn update_bluetooth(
     port: &mut impl BluetoothPort,
     package: &VerifiedPackage,
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    update_bluetooth_with_progress(port, package, policy, cancelled, |_| {})
+}
+
+pub fn update_bluetooth_with_progress(
+    port: &mut impl BluetoothPort,
+    package: &VerifiedPackage,
+    policy: VersionPolicy,
+    cancelled: impl FnMut() -> bool,
+    progress: impl FnMut(Progress),
 ) -> TransferRecord {
     let Some(target) = package
         .bluetooth_version()
@@ -193,7 +217,7 @@ pub fn update_bluetooth(
         }
         return record;
     };
-    bluetooth_release(port, package.payload(), target, policy, cancelled)
+    bluetooth_observed(port, package.payload(), target, policy, cancelled, progress)
 }
 
 #[cfg(test)]
@@ -205,12 +229,23 @@ fn bluetooth(
 ) -> TransferRecord {
     bluetooth_release(port, payload, 507, policy, cancelled)
 }
+#[cfg(test)]
 fn bluetooth_release(
     port: &mut impl BluetoothPort,
     payload: &[u8],
     target: u16,
     policy: VersionPolicy,
+    cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    bluetooth_observed(port, payload, target, policy, cancelled, |_| {})
+}
+fn bluetooth_observed(
+    port: &mut impl BluetoothPort,
+    payload: &[u8],
+    target: u16,
+    policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
+    mut progress: impl FnMut(Progress),
 ) -> TransferRecord {
     let mut record = TransferRecord {
         version_policy: policy,
@@ -253,8 +288,11 @@ fn bluetooth_release(
                 );
             }
             port.check_session()?;
-            command(port, &mut record, 0xf0, block)?;
+            let result = command(port, &mut record, 0xf0, block);
+            publish_progress(&record, payload.len(), &mut progress);
+            result?;
             record.bytes_confirmed += block.len();
+            publish_progress(&record, payload.len(), &mut progress);
             if index == 0 || index + 1 == block_count {
                 if cancelled() {
                     return Err("Cancelled after firmware submission".into());
@@ -359,6 +397,16 @@ pub fn update_main(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
+    update_main_with_progress(port, package, policy, cancelled, |_| {})
+}
+
+pub fn update_main_with_progress(
+    port: &mut impl MainPort,
+    package: &VerifiedPackage,
+    policy: VersionPolicy,
+    cancelled: impl FnMut() -> bool,
+    progress: impl FnMut(Progress),
+) -> TransferRecord {
     if package.info().component != Component::Main {
         let mut record = TransferRecord {
             version_policy: policy,
@@ -370,14 +418,24 @@ pub fn update_main(
         }
         return record;
     }
-    main_transfer(port, package.payload(), policy, cancelled)
+    main_observed(port, package.payload(), policy, cancelled, progress)
 }
 
+#[cfg(test)]
 fn main_transfer(
     port: &mut impl MainPort,
     payload: &[u8],
     policy: VersionPolicy,
+    cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    main_observed(port, payload, policy, cancelled, |_| {})
+}
+fn main_observed(
+    port: &mut impl MainPort,
+    payload: &[u8],
+    policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
+    mut progress: impl FnMut(Progress),
 ) -> TransferRecord {
     let mut record = TransferRecord {
         version_policy: policy,
@@ -434,6 +492,7 @@ fn main_transfer(
                 }
                 Ok(_) => {
                     record.bytes_submitted += bytes.len();
+                    publish_progress(&record, payload.len(), &mut progress);
                     return Err("Invalid filesystem write count".into());
                 }
                 Err(error) => {
@@ -445,14 +504,17 @@ fn main_transfer(
                             .cleanup_errors
                             .push(format!("Host audit failure: {}", error.message));
                     }
+                    publish_progress(&record, payload.len(), &mut progress);
                     return Err(error.message);
                 }
             };
+            publish_progress(&record, payload.len(), &mut progress);
             if count == 0 {
                 return Err("Zero-progress filesystem write".into());
             }
             offset += count;
             record.bytes_confirmed += count;
+            publish_progress(&record, payload.len(), &mut progress);
         }
         port.flush()?;
         port.close()?;
@@ -562,6 +624,65 @@ mod tests {
             refuse_write: false,
             fail: None,
         }
+    }
+    #[test]
+    fn progress_reports_confirmed_short_writes_and_never_guesses_completion() {
+        let mut port = main_port();
+        let mut progress = Vec::new();
+        let result = main_observed(
+            &mut port,
+            &vec![0; 51500],
+            VersionPolicy::UpgradeOnly,
+            || false,
+            |p| progress.push(p),
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert!(
+            !progress.is_empty(),
+            "real transfers must publish byte progress"
+        );
+        assert_eq!(progress.last().unwrap().confirmed, 51500);
+        assert!(
+            progress
+                .iter()
+                .all(|p| p.confirmed <= p.submitted && p.confirmed <= p.total)
+        );
+        assert_eq!(
+            progress.iter().find(|p| p.confirmed > 0).unwrap().confirmed,
+            79
+        );
+    }
+    #[test]
+    fn failed_bluetooth_command_reports_submission_without_confirmation() {
+        let mut port = Fake {
+            version: 506,
+            fail: Some(4),
+            ..Fake::default()
+        };
+        let mut progress = Vec::new();
+        let record = bluetooth_observed(
+            &mut port,
+            &vec![0; 345088],
+            507,
+            VersionPolicy::UpgradeOnly,
+            || false,
+            |p| progress.push(p),
+        );
+        assert_eq!(record.outcome, Outcome::OutcomeUnknown);
+        assert_eq!(record.bytes_submitted, 1024);
+        assert_eq!(record.bytes_confirmed, 512);
+        assert_eq!(
+            progress.last().unwrap(),
+            &Progress {
+                submitted: 1024,
+                confirmed: 512,
+                total: 345088
+            }
+        );
+        assert!(port.cleanup);
     }
     #[test]
     fn main_handles_short_writes_flushes_open_file_and_waits_for_detach() {

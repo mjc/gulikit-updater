@@ -5,6 +5,7 @@
 pub mod macos;
 
 pub mod acquisition;
+pub mod discovery;
 pub mod journal;
 #[cfg(unix)]
 pub mod lock;

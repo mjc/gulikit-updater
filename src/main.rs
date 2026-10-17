@@ -215,51 +215,8 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
     }
 }
 
-#[derive(Debug)]
-struct AppError {
-    kind: &'static str,
-    code: u8,
-    message: String,
-    cleanup_errors: Vec<String>,
-}
-impl AppError {
-    fn new(kind: &'static str, code: u8, message: String) -> Self {
-        Self {
-            kind,
-            code,
-            message,
-            cleanup_errors: Vec::new(),
-        }
-    }
-    #[cfg(any(target_os = "macos", test))]
-    fn host_io(message: String) -> Self {
-        Self::new("host_record_io", 4, message)
-    }
-    #[cfg(any(target_os = "macos", test))]
-    fn with_cleanup(mut self, cleanup_errors: Vec<String>) -> Self {
-        if !cleanup_errors.is_empty() {
-            self.code = 8;
-        }
-        self.cleanup_errors = cleanup_errors;
-        self
-    }
-}
-impl From<String> for AppError {
-    fn from(message: String) -> Self {
-        Self::new("device_refused", 5, message)
-    }
-}
-impl From<&str> for AppError {
-    fn from(message: &str) -> Self {
-        message.to_owned().into()
-    }
-}
-#[cfg(any(target_os = "macos", test))]
-impl From<gulikit_platform::acquisition::AcquisitionError> for AppError {
-    fn from(error: gulikit_platform::acquisition::AcquisitionError) -> Self {
-        Self::from(error.error).with_cleanup(error.cleanup_errors)
-    }
-}
+use gulikit_updater::updater::ApplicationError as AppError;
+
 fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
     #[cfg(target_os = "macos")]
     if matches!(
