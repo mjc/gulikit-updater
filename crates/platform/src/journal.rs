@@ -73,6 +73,9 @@ impl<'a, P> Recorded<'a, P> {
     }
 }
 impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
+    fn lun_evidence(&self) -> Option<gulikit_core::bot::MaxLun> {
+        self.inner.lun_evidence()
+    }
     fn qualified_lun(&self) -> Option<u8> {
         self.inner.qualified_lun()
     }
@@ -83,7 +86,7 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
         self.inner.check_session()
     }
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
-        self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"requested":if opcode==0xf0{data.len()}else{20}}))?;
+        self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"lun_evidence":self.inner.lun_evidence(),"requested":if opcode==0xf0{data.len()}else{20}}))?;
         let result = self.inner.command(opcode, data);
         self.result("command_result",result,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
     }

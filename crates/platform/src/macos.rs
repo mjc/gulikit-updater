@@ -4,7 +4,7 @@
 
 use crate::{acquisition::AcquisitionError, volume::Volume};
 use gulikit_core::{
-    bot::{self, BulkIo, Direction, validate_status},
+    bot::{self, BulkIo, Direction, MaxLun, validate_status},
     device::{Candidate, Discovery},
     package::Component,
     update::{BluetoothPort, CompletionDecision, CompletionObservation, MainPort},
@@ -60,6 +60,8 @@ unsafe extern "C" {
         capacity: usize,
     ) -> i32;
     fn gu_usb_close(value: *mut c_void, surrender: i32);
+    #[cfg(test)]
+    fn gu_max_lun_result(succeeded: i32, actual: usize, code: i32) -> i32;
     fn gu_usb_max_lun(value: *mut c_void, lun: *mut u8, error: *mut c_char, capacity: usize)
     -> i32;
     fn gu_entry_hold(id: u64) -> u32;
@@ -511,16 +513,17 @@ fn transfer_result(result: i32, actual: usize, bytes: &[u8], error: &str) -> Res
     Ok(actual)
 }
 impl BulkIo for NativeUsb {
-    fn max_lun(&mut self) -> Result<u8, String> {
+    fn max_lun(&mut self) -> Result<MaxLun, String> {
         let usb = self.pointer()?;
         let mut value = 0;
         let mut error = [0i8; 1024];
         let result =
             unsafe { gu_usb_max_lun(usb.as_ptr(), &mut value, error.as_mut_ptr(), error.len()) };
-        if result != 0 {
-            return Err(error_string(&error));
+        match result {
+            0 => Ok(MaxLun::Reported(value)),
+            1 => Ok(MaxLun::SingleLunStall),
+            _ => Err(error_string(&error)),
         }
-        Ok(value)
     }
 
     fn transfer(
@@ -749,6 +752,9 @@ impl BluetoothSession {
     }
 }
 impl BluetoothPort for BluetoothSession {
+    fn lun_evidence(&self) -> Option<MaxLun> {
+        self.usb.as_ref().and_then(bot::Session::lun_evidence)
+    }
     fn qualified_lun(&self) -> Option<u8> {
         self.usb.as_ref().and_then(bot::Session::qualified_lun)
     }
@@ -855,6 +861,24 @@ mod tests {
     use super::{
         NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
     };
+    #[test]
+    fn max_lun_accepts_only_a_zero_byte_stall_as_the_single_lun_fallback() {
+        const STALL: i32 = 0xe000404f_u32 as i32;
+        // SAFETY: pure bridge decoder takes values only and performs no I/O.
+        unsafe {
+            assert_eq!(super::gu_max_lun_result(0, 0, STALL), 1);
+            assert_eq!(super::gu_max_lun_result(1, 1, 0), 0);
+            for (success, actual, code) in [
+                (0, 1, STALL),
+                (0, 0, 0xe00002d6_u32 as i32),
+                (0, 0, 0),
+                (1, 0, 0),
+                (1, 2, 0),
+            ] {
+                assert_eq!(super::gu_max_lun_result(success, actual, code), -1);
+            }
+        }
+    }
     #[test]
     fn main_usb_storage_is_not_a_bluetooth_update_path() {
         // SAFETY: synchronous pure bridge predicate, no IOKit or USB operations.

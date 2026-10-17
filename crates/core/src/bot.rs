@@ -8,9 +8,26 @@ pub enum Direction {
     Out,
 }
 
+/// Evidence obtained by the standard GET_MAX_LUN request on this attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "maximum", rename_all = "snake_case")]
+pub enum MaxLun {
+    Reported(u8),
+    /// BOT 1.0 section 3.2 permits a single-LUN device to STALL this request.
+    SingleLunStall,
+}
+impl MaxLun {
+    fn maximum(self) -> u8 {
+        match self {
+            Self::Reported(value) => value,
+            Self::SingleLunStall => 0,
+        }
+    }
+}
+
 /// One serialized bulk stage. An error must retain OS status, actual count and raw bytes.
 pub trait BulkIo {
-    fn max_lun(&mut self) -> Result<u8, String>;
+    fn max_lun(&mut self) -> Result<MaxLun, String>;
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -30,6 +47,7 @@ pub struct Session<T> {
     failed: bool,
     firmware_submitted: bool,
     qualified_lun: Option<u8>,
+    lun_evidence: Option<MaxLun>,
     failed_f1_status: Option<[u8; 13]>,
     sense_used: bool,
 }
@@ -41,6 +59,7 @@ impl<T: BulkIo> Session<T> {
             failed: false,
             firmware_submitted: false,
             qualified_lun: None,
+            lun_evidence: None,
             failed_f1_status: None,
             sense_used: false,
         }
@@ -53,19 +72,24 @@ impl<T: BulkIo> Session<T> {
         if let Some(lun) = self.qualified_lun {
             return Ok(lun);
         }
-        let result = self.io.max_lun().and_then(|maximum| {
-            if maximum == 0 { Ok(0) } else { Err(format!("Unsupported advertised maximum LUN {maximum}; only the qualified single-LUN profile is supported")) }
+        let result = self.io.max_lun().and_then(|evidence| {
+            let maximum = evidence.maximum();
+            if maximum == 0 { Ok(evidence) } else { Err(format!("Unsupported advertised maximum LUN {maximum}; only the qualified single-LUN profile is supported")) }
         });
         match result {
-            Ok(lun) => {
-                self.qualified_lun = Some(lun);
-                Ok(lun)
+            Ok(evidence) => {
+                self.qualified_lun = Some(0);
+                self.lun_evidence = Some(evidence);
+                Ok(0)
             }
             Err(error) => {
                 self.failed = true;
                 Err(error)
             }
         }
+    }
+    pub fn lun_evidence(&self) -> Option<MaxLun> {
+        self.lun_evidence
     }
     pub fn qualified_lun(&self) -> Option<u8> {
         self.qualified_lun

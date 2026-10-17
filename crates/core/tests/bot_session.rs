@@ -1,4 +1,4 @@
-use gulikit_core::bot::{BulkIo, Direction, Session};
+use gulikit_core::bot::{BulkIo, Direction, MaxLun, Session};
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -10,7 +10,7 @@ struct Fake {
     costs: VecDeque<Duration>,
     allowances: Vec<Duration>,
     address_queries: usize,
-    max_lun: Result<u8, String>,
+    max_lun: Result<MaxLun, String>,
     calls: Vec<Direction>,
     fail_at: Option<usize>,
     short_cbw: bool,
@@ -18,7 +18,7 @@ struct Fake {
     writes: Vec<Vec<u8>>,
 }
 impl BulkIo for Fake {
-    fn max_lun(&mut self) -> Result<u8, String> {
+    fn max_lun(&mut self) -> Result<MaxLun, String> {
         self.address_queries += 1;
         self.max_lun.clone()
     }
@@ -65,7 +65,7 @@ fn io() -> Fake {
         costs: VecDeque::new(),
         allowances: vec![],
         address_queries: 0,
-        max_lun: Ok(0),
+        max_lun: Ok(MaxLun::Reported(0)),
         calls: vec![],
         fail_at: None,
         short_cbw: false,
@@ -136,7 +136,11 @@ fn short_data_and_early_status_never_become_vendor_success() {
 
 #[test]
 fn qualifies_each_attachment_before_any_bot_command_and_refuses_ambiguous_addressing() {
-    for advertised in [Err("GET_MAX_LUN failed".into()), Ok(1), Ok(16)] {
+    for advertised in [
+        Err("GET_MAX_LUN failed".into()),
+        Ok(MaxLun::Reported(1)),
+        Ok(MaxLun::Reported(16)),
+    ] {
         let mut fake = io();
         fake.max_lun = advertised;
         let mut session = Session::new(fake);
@@ -363,4 +367,16 @@ fn short_complete_sense_is_validated_by_its_own_status_and_does_not_resume_firmw
     assert!(session.diagnostic_request_sense().is_err());
     assert_eq!(session.io_mut().calls.len(), count);
     assert!(session.firmware_may_have_been_submitted());
+}
+
+#[test]
+fn standard_single_lun_stall_is_qualified_and_retained_as_distinct_evidence() {
+    let mut fake = io();
+    fake.max_lun = Ok(MaxLun::SingleLunStall);
+    let mut session = Session::new(fake);
+    assert_eq!(session.qualify_addressing().unwrap(), 0);
+    assert_eq!(session.lun_evidence(), Some(MaxLun::SingleLunStall));
+    session.command(&f1(), Direction::In, &[], 20).unwrap();
+    assert_eq!(session.io_mut().address_queries, 1);
+    assert_eq!(session.io_mut().writes[0][13], 0);
 }

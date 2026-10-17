@@ -258,14 +258,19 @@ void gu_usb_close(void *context,int surrender) {
         [transport.device destroyWithOptions:surrender ? 1U : 0U];
     }
 }
+int gu_max_lun_result(int succeeded,size_t actual,int32_t code) {
+    if(succeeded && actual==1)return 0;
+    return !succeeded && actual==0 && code==(int32_t)kIOUSBPipeStalled ? 1 : -1;
+}
 int gu_usb_max_lun(void *context,uint8_t *value,char *message,size_t capacity) {
     @autoreleasepool {
         GuTransport *transport=(__bridge GuTransport *)context;
         IOUSBDeviceRequest request={.bmRequestType=0xa1,.bRequest=0xfe,.wValue=0,.wIndex=transport.interface.interfaceDescriptor->bInterfaceNumber,.wLength=1};
         NSMutableData *data=[NSMutableData dataWithLength:1];NSUInteger actual=0;NSError *error=nil;
         BOOL result=[transport.interface sendDeviceRequest:request data:data bytesTransferred:&actual completionTimeout:5 error:&error];
-        if(!result || actual!=1){error_text(message,capacity,error.description ?: @"Short GET_MAX_LUN");return -1;}
-        *value=((const uint8_t *)data.bytes)[0];return 0;
+        int decoded=gu_max_lun_result(result,actual,[error.domain isEqualToString:IOUSBHostErrorDomain] ? (int32_t)error.code : 0);
+        if(decoded<0){error_text(message,capacity,error.description ?: @"Short GET_MAX_LUN");return -1;}
+        *value=decoded==1 ? 0 : ((const uint8_t *)data.bytes)[0];return decoded;
     }
 }
 uint32_t gu_entry_hold(uint64_t id){return IOServiceGetMatchingService(kIOMainPortDefault,IORegistryEntryIDMatching(id));}
