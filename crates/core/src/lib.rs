@@ -4,4 +4,5 @@
 pub mod bot;
 pub mod device;
 pub mod package;
+pub mod update;
 pub mod version;

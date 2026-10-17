@@ -1,0 +1,307 @@
+//! Serialized component transactions, shared by every host and presentation layer.
+
+use crate::{
+    package::{Component, VerifiedPackage},
+    version::{VersionDecision, bluetooth_info},
+};
+use serde::Serialize;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Refused,
+    AlreadyCurrent,
+    NewerThanSupported,
+    CancelledBeforeWrite,
+    OutcomeUnknown,
+    TransferCompletedAwaitingVerification,
+    TransferSubmittedPendingCompletion,
+    InstalledVerified,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommandRecord {
+    pub index: usize,
+    pub opcode: u8,
+    pub requested: usize,
+    pub confirmed: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferRecord {
+    pub outcome: Outcome,
+    pub prewrite_version: Option<String>,
+    pub bytes_submitted: usize,
+    pub bytes_confirmed: usize,
+    pub commands: Vec<CommandRecord>,
+    pub error: Option<String>,
+    pub cleanup_errors: Vec<String>,
+}
+impl Default for TransferRecord {
+    fn default() -> Self {
+        Self {
+            outcome: Outcome::Refused,
+            prewrite_version: None,
+            bytes_submitted: 0,
+            bytes_confirmed: 0,
+            commands: Vec::new(),
+            error: None,
+            cleanup_errors: Vec::new(),
+        }
+    }
+}
+
+/// An exclusive, quiesced transport bound to one attachment and a live topology watcher.
+/// Each command must validate OS success, exact data length and passed transport status.
+/// Implementations must never retry a submitted vendor command or reset after failure.
+pub trait BluetoothPort {
+    fn check_session(&mut self) -> Result<(), String>;
+    fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String>;
+    /// Release all claims and restore storage access on every exit.
+    fn finish(&mut self) -> Result<(), String>;
+}
+
+pub fn update_bluetooth(
+    port: &mut impl BluetoothPort,
+    package: &VerifiedPackage,
+    cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    if package.info().component != Component::Bluetooth {
+        let mut record = TransferRecord {
+            error: Some("Bluetooth update requires a verified Bluetooth package".into()),
+            ..TransferRecord::default()
+        };
+        if let Err(error) = port.finish() {
+            record.cleanup_errors.push(error);
+        }
+        return record;
+    }
+    bluetooth(port, package.payload(), cancelled)
+}
+
+fn bluetooth(
+    port: &mut impl BluetoothPort,
+    payload: &[u8],
+    mut cancelled: impl FnMut() -> bool,
+) -> TransferRecord {
+    let mut record = TransferRecord::default();
+    let mut submitted = false;
+    let result = (|| -> Result<(), String> {
+        if cancelled() {
+            record.outcome = Outcome::CancelledBeforeWrite;
+            return Ok(());
+        }
+        port.check_session()?;
+        let response = command(port, &mut record, 0xf1, &[])?;
+        let version = bluetooth_info(&response).map_err(|e| e.to_string())?;
+        record.prewrite_version = Some(version.to_string());
+        match version.decision() {
+            VersionDecision::AlreadyCurrent => {
+                record.outcome = Outcome::AlreadyCurrent;
+                return Ok(());
+            }
+            VersionDecision::NewerThanSupported => {
+                record.outcome = Outcome::NewerThanSupported;
+                return Ok(());
+            }
+            VersionDecision::Eligible => {}
+        }
+        if payload.len() != 345088 {
+            return Err("Incorrect Bluetooth payload size".into());
+        }
+        for (index, block) in payload.as_chunks::<512>().0.iter().enumerate() {
+            if cancelled() {
+                if !submitted {
+                    record.outcome = Outcome::CancelledBeforeWrite;
+                    return Ok(());
+                }
+                return Err(
+                    "Cancelled after firmware submission; no rollback or resume is available"
+                        .into(),
+                );
+            }
+            port.check_session()?;
+            submitted = true;
+            record.bytes_submitted += block.len();
+            command(port, &mut record, 0xf0, block)?;
+            record.bytes_confirmed += block.len();
+            if index == 0 || index == 673 {
+                if cancelled() {
+                    return Err("Cancelled after firmware submission".into());
+                }
+                port.check_session()?;
+                let status = command(port, &mut record, 0xf2, &[])?;
+                if status[0] != 0 {
+                    return Err(format!("DeviceStatusError({})", status[0]));
+                }
+            }
+        }
+        port.check_session()?;
+        record.outcome = Outcome::TransferCompletedAwaitingVerification;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        record.error = Some(error);
+        record.outcome = if submitted {
+            Outcome::OutcomeUnknown
+        } else {
+            Outcome::Refused
+        };
+    }
+    if let Err(error) = port.finish() {
+        record.cleanup_errors.push(error);
+    }
+    record
+}
+
+fn command(
+    port: &mut impl BluetoothPort,
+    record: &mut TransferRecord,
+    opcode: u8,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    let requested = if opcode == 0xf0 { 512 } else { 20 };
+    let result = port.command(opcode, data).and_then(|response| {
+        if response.len() != if opcode == 0xf0 { 0 } else { 20 } {
+            return Err(format!(
+                "Short/invalid vendor response: {} bytes",
+                response.len()
+            ));
+        }
+        Ok(response)
+    });
+    record.commands.push(CommandRecord {
+        index: record.commands.len(),
+        opcode,
+        requested,
+        confirmed: if result.is_ok() { requested } else { 0 },
+        error: result.as_ref().err().cloned(),
+    });
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::version::BT_SIGNATURE;
+
+    #[derive(Default)]
+    struct Fake {
+        calls: Vec<u8>,
+        bytes: Vec<u8>,
+        fail: Option<usize>,
+        invalidate: Option<usize>,
+        version: u16,
+        cleanup: bool,
+    }
+    impl BluetoothPort for Fake {
+        fn check_session(&mut self) -> Result<(), String> {
+            if self.invalidate == Some(self.calls.len()) {
+                Err("extra device arrived".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
+            self.calls.push(opcode);
+            if self.fail == Some(self.calls.len()) {
+                return Err("timeout after submission".into());
+            }
+            match opcode {
+                0xf1 => {
+                    let mut bytes = vec![0; 20];
+                    bytes[..16].copy_from_slice(&BT_SIGNATURE);
+                    bytes[16..18].copy_from_slice(&self.version.to_le_bytes());
+                    Ok(bytes)
+                }
+                0xf0 => {
+                    self.bytes.extend_from_slice(data);
+                    Ok(Vec::new())
+                }
+                0xf2 => Ok(vec![0; 20]),
+                _ => unreachable!(),
+            }
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            self.cleanup = true;
+            Ok(())
+        }
+    }
+    #[test]
+    fn exact_bluetooth_transcript_and_payload_no_installed_success() {
+        let payload: Vec<_> = (0..345088).map(|n| (n % 251) as u8).collect();
+        let mut port = Fake {
+            version: 506,
+            ..Fake::default()
+        };
+        let record = bluetooth(&mut port, &payload, || false);
+        assert_eq!(
+            record.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(port.calls.len(), 677);
+        assert_eq!(&port.calls[..3], &[0xf1, 0xf0, 0xf2]);
+        assert!(port.calls[3..676].iter().all(|b| *b == 0xf0));
+        assert_eq!(port.calls[676], 0xf2);
+        assert_eq!(port.bytes, payload);
+        assert_eq!(record.bytes_confirmed, 345088);
+        assert!(port.cleanup);
+    }
+    #[test]
+    fn equal_newer_and_failed_f1_write_nothing() {
+        for (version, fail, outcome) in [
+            (507, None, Outcome::AlreadyCurrent),
+            (508, None, Outcome::NewerThanSupported),
+            (506, Some(1), Outcome::Refused),
+        ] {
+            let mut port = Fake {
+                version,
+                fail,
+                ..Fake::default()
+            };
+            assert_eq!(
+                bluetooth(&mut port, &vec![0; 345088], || false).outcome,
+                outcome
+            );
+            assert!(port.bytes.is_empty());
+            assert_eq!(port.calls, [0xf1]);
+            assert!(port.cleanup);
+        }
+    }
+    #[test]
+    fn every_failed_command_stops_without_retry_and_releases() {
+        for index in 2..=677 {
+            let mut port = Fake {
+                version: 506,
+                fail: Some(index),
+                ..Fake::default()
+            };
+            let record = bluetooth(&mut port, &vec![0; 345088], || false);
+            assert_eq!(record.outcome, Outcome::OutcomeUnknown, "command {index}");
+            assert_eq!(port.calls.len(), index);
+            assert!(port.cleanup);
+        }
+    }
+    #[test]
+    fn topology_change_and_cancellation_stop_next_submission() {
+        let mut port = Fake {
+            version: 506,
+            invalidate: Some(3),
+            ..Fake::default()
+        };
+        let record = bluetooth(&mut port, &vec![0; 345088], || false);
+        assert_eq!(record.outcome, Outcome::OutcomeUnknown);
+        assert_eq!(port.calls, [0xf1, 0xf0, 0xf2]);
+        let mut port = Fake {
+            version: 506,
+            ..Fake::default()
+        };
+        assert_eq!(
+            bluetooth(&mut port, &vec![0; 345088], || true).outcome,
+            Outcome::CancelledBeforeWrite
+        );
+        assert!(port.calls.is_empty());
+        assert!(port.cleanup);
+    }
+}
