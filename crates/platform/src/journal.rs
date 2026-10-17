@@ -24,7 +24,12 @@ pub fn read_attempt(path: &std::path::Path) -> Result<Vec<u8>, String> {
     if !metadata.is_file() {
         return Err("Attempt record must be a regular file".into());
     }
-    const LIMIT: u64 = 1_048_576;
+    // The largest curated Bluetooth release has 706 blocks. Recording a
+    // recovered CSW stall on all 709 commands, with a full native error buffer
+    // expanded by JSON escaping, needs about 4.9 MB including its final receipt.
+    // Main can report up to 51,500 positive one-byte writes; allow its larger
+    // submission/result journal too, while keeping reads explicitly bounded.
+    const LIMIT: u64 = 16 * 1024 * 1024;
     if metadata.len() > LIMIT {
         return Err("Attempt record exceeds its size bound".into());
     }
