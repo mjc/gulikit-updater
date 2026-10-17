@@ -261,6 +261,16 @@ impl From<gulikit_platform::acquisition::AcquisitionError> for AppError {
     }
 }
 fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
+    #[cfg(target_os = "macos")]
+    if matches!(
+        &command,
+        Command::Update {
+            component: Component::Main,
+            ..
+        }
+    ) {
+        return main_supervision::update(command);
+    }
     // Package rejection precedes device access and attempt-file creation on every OS.
     let package = if let Command::Update {
         path,
@@ -280,16 +290,6 @@ fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
     } else {
         None
     };
-    #[cfg(target_os = "macos")]
-    if matches!(
-        &command,
-        Command::Update {
-            component: Component::Main,
-            ..
-        }
-    ) {
-        return main_supervision::update(command);
-    }
     native::execute(command, package)
 }
 fn outcome_code(value: &serde_json::Value) -> u8 {

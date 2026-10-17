@@ -10,7 +10,7 @@ use std::{
     io::{Read, Write},
     os::{
         fd::{AsFd, OwnedFd},
-        unix::net::UnixStream,
+        unix::{net::UnixStream, process::CommandExt},
     },
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -151,10 +151,19 @@ pub fn guardian(parent: Channel, worker_command: Command, budget: Duration) -> R
     guardian_with_lease(parent, worker_command, budget, lease)
 }
 fn guardian_with_lease(
+    parent: Channel,
+    worker_command: Command,
+    budget: Duration,
+    lease: ProcessLock,
+) -> Result<(), String> {
+    guardian_with_clock(parent, worker_command, budget, lease, Instant::now)
+}
+fn guardian_with_clock(
     mut parent: Channel,
     mut worker_command: Command,
     budget: Duration,
     lease: ProcessLock,
+    now: impl Fn() -> Instant,
 ) -> Result<(), String> {
     let request = match parent.wait(Duration::from_secs(10))? {
         Message::Request(request) => request,
@@ -167,13 +176,16 @@ fn guardian_with_lease(
         .stderr(Stdio::from(lease.worker_descriptor()?))
         .spawn()
         .map_err(|error| error.to_string())?;
+    // Command retains configured Stdio handles for reuse. Close its peer copy
+    // so worker EOF is observable when the actual child exits.
+    drop(worker_command);
     let mut owned = LeasedChild {
         child,
         _lease: lease,
     };
     let mut worker = Channel::new(local)?;
     worker.send(&Message::Request(request))?;
-    let deadline = Instant::now() + budget;
+    let deadline = now() + budget;
     let mut ready = false;
     let mut started = false;
     let mut result = None;
@@ -195,7 +207,7 @@ fn guardian_with_lease(
                         nix::sys::signal::Signal::SIGINT,
                     )
                     .map_err(|error| error.to_string())?;
-                    cancellation_deadline = Some(Instant::now() + Duration::from_secs(5));
+                    cancellation_deadline = Some(now() + Duration::from_secs(5));
                 }
             }
             None => {}
@@ -207,9 +219,8 @@ fn guardian_with_lease(
                     ready = true;
                     parent.send(&Message::Ready)?;
                 }
-                Ok(Some(message @ (Message::Result(_) | Message::Failed { .. }))) => {
-                    result = Some(message)
-                }
+                Ok(Some(message @ Message::Result(_))) if started => result = Some(message),
+                Ok(Some(message @ Message::Failed { .. })) => result = Some(message),
                 Ok(None) => {}
                 Ok(Some(_)) => return Err("Unexpected Main I/O worker message".into()),
                 Err(error) => {
@@ -231,10 +242,13 @@ fn guardian_with_lease(
             .is_some()
         {
             if result.is_none()
-                && let Ok(Some(message @ (Message::Result(_) | Message::Failed { .. }))) =
-                    worker.poll()
+                && let Ok(Some(message)) = worker.poll()
             {
-                result = Some(message);
+                match message {
+                    Message::Result(_) if started => result = Some(message),
+                    Message::Failed { .. } => result = Some(message),
+                    _ => return Err("Main worker exited in an unexpected protocol phase".into()),
+                }
             }
             parent.send(&result.unwrap_or(Message::Unknown {
                 reason: "Main worker exited without a final result".into(),
@@ -242,9 +256,7 @@ fn guardian_with_lease(
             }))?;
             return Ok(());
         }
-        if Instant::now() >= deadline
-            || cancellation_deadline.is_some_and(|limit| Instant::now() >= limit)
-        {
+        if now() >= deadline || cancellation_deadline.is_some_and(|limit| now() >= limit) {
             parent.send(&Message::Unknown { reason: "Main I/O deadline or cancellation grace expired; guardian retains ownership until the worker is reaped".into(), worker_stopped: false })?;
             return Ok(()); // Drop kills and reaps before unlocking, without delaying the CLI report.
         }
@@ -258,11 +270,23 @@ pub fn run(
     budget: Duration,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<Message, String> {
+    // Terminal signals reach the reporting process. It forwards cancellation to
+    // the owned I/O child; the guardian must survive to retain its lease.
+    guardian_command.process_group(0);
     let (local, remote) = UnixStream::pair().map_err(|error| error.to_string())?;
     let mut child = guardian_command
         .stdin(Stdio::from(OwnedFd::from(remote)))
         .stdout(Stdio::null())
         .spawn()
+        .map_err(|error| error.to_string())?;
+    // Otherwise this process would retain the guardian's socket endpoint and
+    // hide guardian EOF until the outer deadline.
+    drop(guardian_command);
+    std::thread::Builder::new()
+        .name("main-guardian-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
         .map_err(|error| error.to_string())?;
     let mut channel = Channel::new(local)?;
     channel.send(&Message::Request(request))?;
@@ -271,26 +295,38 @@ pub fn run(
     let mut cancel_sent = false;
     loop {
         if cancelled() && !cancel_sent {
-            channel.send(&Message::Cancel)?;
+            if let Err(error) = channel.send(&Message::Cancel) {
+                return Ok(reporting_failure(started, error));
+            }
             cancel_sent = true;
         }
         match channel.poll() {
             Ok(Some(Message::Ready)) if !started && !cancel_sent => {
-                channel.send(&Message::Go)?;
+                if let Err(error) = channel.send(&Message::Go) {
+                    return Ok(reporting_failure(false, error));
+                }
                 started = true;
+            }
+            Ok(Some(Message::Unknown { reason, .. })) if !started => {
+                return Ok(reporting_failure(false, reason));
+            }
+            Ok(Some(Message::Result(_))) if !started => {
+                return Ok(reporting_failure(
+                    false,
+                    "Main worker returned a result before GO".into(),
+                ));
             }
             Ok(Some(
                 message @ (Message::Result(_) | Message::Failed { .. } | Message::Unknown { .. }),
             )) => return Ok(message),
             Ok(None) => {}
-            Ok(Some(_)) => return Err("Unexpected Main guardian response".into()),
-            Err(error) if started => {
-                return Ok(Message::Unknown {
-                    reason: error,
-                    worker_stopped: false,
-                });
+            Ok(Some(_)) => {
+                return Ok(reporting_failure(
+                    started,
+                    "Unexpected Main guardian response".into(),
+                ));
             }
-            Err(error) => return Err(error),
+            Err(error) => return Ok(reporting_failure(started, error)),
         }
         if Instant::now() >= deadline {
             return Ok(if started {
@@ -299,8 +335,22 @@ pub fn run(
                 Message::Failed { kind: "main_worker_startup".into(), code: 5, message: "Main worker did not start before its deadline; no GO authorization was sent".into() }
             });
         }
-        let _ = child.try_wait();
         std::thread::sleep(TICK);
+    }
+}
+
+fn reporting_failure(started: bool, reason: String) -> Message {
+    if started {
+        Message::Unknown {
+            reason,
+            worker_stopped: false,
+        }
+    } else {
+        Message::Failed {
+            kind: "main_worker_startup".into(),
+            code: 5,
+            message: format!("{reason}; no GO authorization was sent"),
+        }
     }
 }
 
@@ -318,6 +368,12 @@ mod tests {
             request["lock"].as_str().unwrap(),
         ))
         .unwrap();
+        if request["early_result"] == true {
+            channel
+                .send(&Message::Result(serde_json::json!({"completed":true})))
+                .unwrap();
+            return;
+        }
         channel.send(&Message::Ready).unwrap();
         assert!(matches!(
             channel.wait(Duration::from_secs(2)).unwrap(),
@@ -325,11 +381,85 @@ mod tests {
         ));
         drop(lock); // Worker closes its duplicate; the guardian still owns the lease.
         channel
-            .send(&Message::Result(serde_json::json!({"completed":true})))
+            .send(&Message::Result(serde_json::json!({"completed":true,"process_group":nix::unistd::getpgrp().as_raw()})))
             .unwrap();
         if request["linger"] == true {
+            if let Some(marker) = request["result_marker"].as_str() {
+                std::fs::write(marker, b"result sent").unwrap();
+            }
             std::thread::sleep(Duration::from_secs(60));
         }
+    }
+    #[test]
+    #[ignore = "subprocess guardian fixture; invoked by reporter tests"]
+    fn guardian_fixture() {
+        let path = std::path::PathBuf::from(std::env::var_os("GULIKIT_TEST_LEASE").unwrap());
+        let lease = ProcessLock::at(&path).unwrap();
+        guardian_with_lease(
+            Channel::from_stdin().unwrap(),
+            fixture_command(),
+            Duration::from_secs(2),
+            lease,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn a_result_before_go_cannot_claim_a_completed_transaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lease");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "main_worker::tests::guardian_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GULIKIT_TEST_LEASE", &path);
+        let response = run(
+            command,
+            serde_json::json!({"lock":path,"early_result":true}),
+            Duration::from_secs(3),
+            || false,
+        )
+        .unwrap();
+        let Message::Failed { code, message, .. } = response else {
+            panic!("{response:?}");
+        };
+        assert_eq!(code, 5);
+        assert!(
+            !message.contains("deadline"),
+            "A closed guardian must be observed immediately: {message}"
+        );
+    }
+    #[test]
+    fn terminal_interruption_is_forwarded_by_the_reporter_instead_of_killing_the_guardian() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lease");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "main_worker::tests::guardian_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GULIKIT_TEST_LEASE", &path);
+        let response = run(
+            command,
+            serde_json::json!({"lock":path,"linger":false}),
+            Duration::from_secs(3),
+            || false,
+        )
+        .unwrap();
+        let Message::Result(result) = response else {
+            panic!("{response:?}");
+        };
+        assert_ne!(
+            result["process_group"].as_i64().unwrap(),
+            i64::from(nix::unistd::getpgrp().as_raw())
+        );
+        assert_eq!(result["completed"], true);
     }
     fn fixture_command() -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
@@ -348,18 +478,28 @@ mod tests {
             let path = directory.path().join("lease");
             let lease = ProcessLock::at(&path).unwrap();
             let (local, remote) = UnixStream::pair().unwrap();
+            let marker = directory.path().join("result-sent");
+            let observed_marker = marker.clone();
+            let start = Instant::now();
             let guardian = std::thread::spawn(move || {
-                guardian_with_lease(
+                guardian_with_clock(
                     Channel::new(remote).unwrap(),
                     fixture_command(),
-                    Duration::from_millis(250),
+                    Duration::from_secs(1),
                     lease,
+                    move || {
+                        if observed_marker.is_file() {
+                            start + Duration::from_secs(2)
+                        } else {
+                            start
+                        }
+                    },
                 )
             });
             let mut parent = Channel::new(local).unwrap();
             parent
                 .send(&Message::Request(
-                    serde_json::json!({"lock":path,"linger":linger}),
+                    serde_json::json!({"lock":path,"linger":linger,"result_marker":marker}),
                 ))
                 .unwrap();
             assert!(matches!(
@@ -411,6 +551,22 @@ mod tests {
         drop(parent); // No GO, so the worker cannot begin device operations.
         assert!(guardian.join().unwrap().is_err());
         ProcessLock::at(&path).unwrap();
+    }
+    #[test]
+    fn reporting_failures_preserve_uncertainty_only_after_go() {
+        for reason in ["cancel send failed", "protocol failure", "channel closed"] {
+            assert!(matches!(
+                reporting_failure(true, reason.into()),
+                Message::Unknown {
+                    worker_stopped: false,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                reporting_failure(false, reason.into()),
+                Message::Failed { code: 5, .. }
+            ));
+        }
     }
     #[test]
     fn channel_rejects_oversized_frames_and_incomplete_eof() {

@@ -7,7 +7,8 @@ fresh F1 identity/version readback on an exclusively held, qualified LUN0 sessio
 The NS39 has passed real read-only Bluetooth qualification and reports 3.23;
 actual transfer and post-restart 5.07 verification are still pending. Main version
 inspection works and reports 5.9, correctly returning `already_current` with zero
-firmware writes. Main writes remain gated pending bounded filesystem supervision.
+firmware writes. Eligible Main updates use supervised filesystem I/O; actual
+Main transfer acceptance is still pending.
 
 ## Development
 
@@ -77,8 +78,10 @@ The file remains for inspection; another attempt cannot silently overwrite it.
 An incomplete record preserves an interrupted attempt; it does not prove a
 transfer completed. Equal and unknown installed versions write nothing. A newer installed version
 refuses by default; `update --allow-downgrade` explicitly permits installing the
-selected older reviewed release. The record retains that version policy. This
-option changes version direction only: package hashes, physical model confirmation,
+selected older reviewed release. The record retains that version policy. A downgrade requires a separately reviewed
+older release in the catalog; the current catalog contains no Bluetooth rollback
+package for the observed 3.23 installation, and device acceptance of rollback is
+unproven. This option changes version direction only: package hashes, physical model confirmation,
 fresh component readback, session ownership and native qualification still apply.
 There is no general force or equal-version reinstall option. Main copying and raw Bluetooth
 traffic are serialized. A topology change invalidates the active session.
@@ -113,7 +116,10 @@ cargo test -p gulikit-core --test vendor_packages -- --ignored
 
 These tests check exact payload selection/extraction and altered-archive
 rejection. They never connect to USB. CI runs the portable behavioral suite;
-the archive tests require separately supplied vendor downloads.
+the archive tests require separately supplied vendor downloads. Two ignored child
+entrypoints are subprocess fixtures invoked by the ordinary supervision tests.
+Those tests exercise actual child exit, parent disconnect, process-group isolation,
+bounded reporting, protocol phases and lease retention without controller access.
 
 ## Source boundaries
 
@@ -147,8 +153,12 @@ before any write. A mounted descendant is only a Main-volume candidate: fresh
 GULI.TXT parsing is required, and writability is a separate write condition. The Bluetooth adapter clears prior F1 qualification before every refresh attempt,
 including failures during session preflight. Firmware commands require current
 readback, qualified addressing and unchanged exclusive ownership. A failed BOT
-session remains failed. Main writes still refuse until filesystem supervision is
-qualified. Portable tests and mocked
+session remains failed. Main writes require the supervised I/O worker and a
+freshly checked writable volume, selected root, attachment and process lease.
+The Main transaction has a 180-second supervision budget, including its bounded
+120-second completion wait. If I/O blocks or shutdown cannot be confirmed, the
+CLI reports uncertainty while ownership remains held until the worker exits.
+This filesystem shutdown policy is never applied to a Bluetooth USB capture. Portable tests and mocked
 official-instruction traces do not establish actual-device flash acceptance.
 
 The [CLI execution plan](https://lific.mjc.lol/GULI/plans/141) and
