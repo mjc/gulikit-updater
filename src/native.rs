@@ -377,6 +377,16 @@ mod tests {
             );
         }
     }
+    #[cfg(windows)]
+    #[test]
+    fn verification_path_preserves_non_unicode_windows_units_without_panicking() {
+        use std::os::windows::ffi::OsStringExt;
+        let units = [0x61, 0xd800, 0x62];
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&units));
+        let value = record_path(&path);
+        let roundtrip: Vec<u16> = serde_json::from_value(value["windows_wide"].clone()).unwrap();
+        assert_eq!(roundtrip, units);
+    }
     #[cfg(unix)]
     #[test]
     fn verification_path_preserves_non_utf8_bytes_without_panicking() {
