@@ -81,6 +81,7 @@ impl BluetoothPort for RecoveredCommands {
             }],
             stall_clear: Some(StallClear::Passed),
             stall_clear_elapsed: Some(Duration::new(4, 999_999_999)),
+            f2_zero_residue_quirk: false,
         });
         Ok(response)
     }

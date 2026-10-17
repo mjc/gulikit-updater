@@ -18,6 +18,10 @@ The observed NS39 has passed read-only Bluetooth identity/version qualification.
 The first 3.24 hardware attempt confirmed one 512-byte block, then stopped on a
 stalled command-status read. Its outcome is unknown; complete flashing and
 installed-version verification have not passed on hardware.
+A second attempt cleared that halt and received a passed status wrapper, but
+stopped because the controller returned one F2 byte with zero residue. The
+adapter now recognizes that exact response as a component-specific quirk;
+complete flashing remains a separate hardware check.
 Firmware transfer completion requires every block and both status checks;
 installation requires a fresh independent read after restarting. Hardware
 acceptance evidence and remaining work live in the linked CLI plan and product
@@ -91,7 +95,11 @@ automatic reset is used after submission. Other OSes currently support package c
 BOT transport requests a 20-byte F2 reply and accepts 1–20 received bytes only
 with a matching, successful command-status wrapper and exact residue; byte zero
 must report success. F1 still requires all 20 bytes and each F0 requires all 512
-bytes. If the first command-status read stalls with zero bytes received, the
+bytes. The observed NS39 exception accepts exactly one F2 byte `00` with an
+otherwise valid passed wrapper reporting zero residue. Its actual count stays
+one; the raw wrapper and an explicit quirk flag are saved without changing them.
+Other lengths and commands retain the usual residue check.
+If the first command-status read stalls with zero bytes received, the
 adapter clears the Bulk-IN halt and reads that same status once more. It sends
 no new command or firmware block. A repeated stall, partial status, timeout or
 invalid wrapper stops the session. The attempt record retains actual counts,

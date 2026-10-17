@@ -469,6 +469,47 @@ fn f2() -> [u8; 10] {
     [0xf2, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 }
 #[test]
+fn observed_ns39_f2_one_byte_success_accepts_zero_residue_without_changing_evidence() {
+    // The second real 3.24 attempt: F1 tag1, F0 tag2, F2 tag3.
+    let mut fake = io();
+    let mut identity = gulikit_core::version::BT_SIGNATURE.to_vec();
+    identity.extend([0x43, 0x01, 0, 0]);
+    fake.reads = VecDeque::from([
+        identity,
+        status(1, 0, 0),
+        status(2, 0, 0),
+        vec![0],
+        status(3, 0, 0),
+    ]);
+    fake.stalls = vec![9];
+    let mut session = Session::new(fake);
+    session.command(&f1(), Direction::In, &[], 20).unwrap();
+    session
+        .command(
+            &[0xf0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            Direction::Out,
+            &[0xa5; 512],
+            512,
+        )
+        .unwrap();
+    assert_eq!(session.command(&f2(), Direction::In, &[], 20).unwrap(), [0]);
+    let evidence = session.take_evidence().unwrap();
+    assert_eq!(evidence.tag, 3);
+    assert_eq!(evidence.data_actual, Some(1));
+    assert_eq!(evidence.data_in, Some(vec![0]));
+    assert_eq!(evidence.csw_raw, status(3, 0, 0));
+    assert_eq!(evidence.csw_reads, 2);
+    assert!(evidence.f2_zero_residue_quirk);
+    let recorded = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(recorded["data_actual"], 1);
+    assert_eq!(recorded["data_in"], serde_json::json!([0]));
+    assert_eq!(recorded["f2_zero_residue_quirk"], true);
+    assert!(!session.failed());
+    assert!(session.firmware_may_have_been_submitted());
+    assert_eq!(session.io_mut().clears, 1);
+    assert_eq!(session.io_mut().writes.len(), 4); // Three CBWs + one payload, no replay.
+}
+#[test]
 fn csw_recovery_retains_short_f2_data_and_refuses_empty_or_inconsistent_status() {
     let mut session = after_first_f0(vec![0], status(2, 19, 0));
     assert_eq!(session.command(&f2(), Direction::In, &[], 20).unwrap(), [0]);
@@ -479,7 +520,16 @@ fn csw_recovery_retains_short_f2_data_and_refuses_empty_or_inconsistent_status()
     assert_eq!(evidence.csw_reads, 2);
     for (data, csw) in [
         (vec![], status(2, 20, 0)),
-        (vec![0], status(2, 0, 0)),
+        (vec![0], status(2, 18, 0)),
+        (vec![0, 0], status(2, 0, 0)),
+        (vec![1], status(2, 0, 0)),
+        (vec![], status(2, 0, 0)),
+        (vec![0], status(3, 0, 0)),
+        (vec![0], status(2, 0, 1)),
+        (vec![0], status(2, 0, 2)),
+        (vec![0], status(2, 21, 0)),
+        (vec![0], status(2, 0, 4)),
+        (vec![0], status(2, 0, 0)[..12].to_vec()),
         (vec![0], status(3, 19, 0)),
         (vec![0], status(2, 19, 1)),
         (vec![0], status(2, 19, 2)),

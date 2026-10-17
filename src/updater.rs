@@ -211,7 +211,11 @@ pub fn execute(
         return Err("Desktop firmware writes are not available until a verified rollback path and desktop update supervision are ready.".into());
     }
     let context = match &request {
-        Request::Verify { attempt, .. } => Some(attempt.clone()),
+        Request::Verify {
+            attempt,
+            confirm_same_controller,
+            ..
+        } => Some((attempt.clone(), *confirm_same_controller)),
         _ => None,
     };
     let component = match &request {
@@ -247,7 +251,7 @@ pub fn execute(
             identity_provenance: "user-confirmed NS39; observed update profile",
         }));
     }
-    let source_attempt = context.ok_or("Unexpected application operation result")?;
+    let (source_attempt, confirmed) = context.ok_or("Unexpected application operation result")?;
     Ok(Reply::Readback(Readback {
         event: "verification_result",
         schema_version: 1,
@@ -256,7 +260,7 @@ pub fn execute(
         raw_version_bytes: field(&mut value, "raw_version_bytes")?,
         qualified_bot_lun: field(&mut value, "qualified_bot_lun")?,
         target: field(&mut value, "target")?,
-        same_unit_association: "user-confirmed; attachment generation bound; no machine-proven unique serial identity",
+        same_unit_association: same_unit_association(confirmed),
         transfer: field(&mut value, "transfer")?,
     }))
 }
@@ -305,6 +309,14 @@ pub fn check_attachment(
         Err("Controller attachment changed since inspection. Inspect and confirm it again.".into())
     } else {
         Ok(())
+    }
+}
+
+fn same_unit_association(confirmed: bool) -> &'static str {
+    if confirmed {
+        "user-confirmed; attachment generation bound; no machine-proven unique serial identity"
+    } else {
+        "not confirmed; independent observation only; no machine-proven unique serial identity"
     }
 }
 
@@ -391,6 +403,31 @@ mod tests {
             let units: Vec<u16> =
                 serde_json::from_value(value["source_attempt"]["windows_wide"].clone()).unwrap();
             assert_eq!(units, path.as_os_str().encode_wide().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn same_controller_provenance_matches_the_explicit_attestation() {
+        for confirmed in [false, true] {
+            let observation = Verification {
+                component: Component::Bluetooth,
+                previous_generation: 1,
+                generation: 2,
+                same_unit_confirmed: confirmed,
+                model_confirmed: true,
+                version: "3.24".into(),
+                expected_version: "3.24".into(),
+            };
+            let outcome = gulikit_core::update::verify_restart(
+                Outcome::TransferCompletedAwaitingVerification,
+                &observation,
+            );
+            assert_eq!(outcome == Outcome::InstalledVerified, confirmed);
+            let provenance = same_unit_association(confirmed);
+            assert_eq!(provenance.starts_with("user-confirmed;"), confirmed);
+            if !confirmed {
+                assert!(provenance.starts_with("not confirmed;"));
+            }
         }
     }
 

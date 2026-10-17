@@ -158,7 +158,7 @@ pub(super) fn execute(
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
             write_event(
                 &mut journal,
-                &json!({"event":"verification_started","schema_version":1,"source_attempt":record_path(&attempt),"prior_result":prior,"target":target,"same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity"}),
+                &json!({"event":"verification_started","schema_version":1,"source_attempt":record_path(&attempt),"prior_result":prior,"target":target,"same_unit_association":super::same_unit_association(confirm_same_controller)}),
             ).map_err(AppError::host_io)?;
             let (readback, cleanup, qualified_lun) = match component {
                 Component::Main => match session.main() {
@@ -226,7 +226,7 @@ pub(super) fn execute(
                     "event":"verification_result", "schema_version":1,
                     "source_attempt":record_path(&attempt), "verification":observation,
                     "raw_version_bytes":readback.ok(), "qualified_bot_lun":qualified_lun, "target":target,
-                    "same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity",
+                    "same_unit_association":super::same_unit_association(confirm_same_controller),
                     "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
                 }),
             ))

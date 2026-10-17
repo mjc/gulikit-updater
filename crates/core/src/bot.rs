@@ -85,6 +85,9 @@ pub struct CommandEvidence {
     pub csw_errors: Vec<TransferError>,
     pub stall_clear: Option<StallClear>,
     pub stall_clear_elapsed: Option<Duration>,
+    /// Observed NS39 F2: one success byte with a passed zero-residue CSW.
+    /// Actual DATA and raw CSW fields remain unchanged when this is accepted.
+    pub f2_zero_residue_quirk: bool,
 }
 
 /// One serialized bulk stage. An error must retain OS status, actual count and raw bytes.
@@ -299,6 +302,7 @@ impl<T: BulkIo> Session<T> {
             csw_errors: Vec::new(),
             stall_clear: None,
             stall_clear_elapsed: None,
+            f2_zero_residue_quirk: false,
         });
         if cdb[0] == 0xf0 {
             self.firmware_submitted = true;
@@ -435,14 +439,29 @@ impl<T: BulkIo> Session<T> {
             if status_actual > status.len() {
                 return Err("Invalid CSW transfer length".into());
             }
-            validate_status(&status[..status_actual], tag, expected, actual as u32).map_err(
-                |e| {
-                    format!(
-                        "{e}; CSW={:02x?}; data_actual={actual} data={bytes:02x?}",
-                        &status[..status_actual]
-                    )
-                },
-            )?;
+            // This exact NS39 F2 response was observed on hardware after the
+            // original CSW halt was cleared. Its data count is one, despite the
+            // passed wrapper reporting zero residue. Keep both facts in the
+            // record; do not relax residue checks for other lengths/commands.
+            let f2_zero_residue_quirk = matches!(policy, DataPolicy::F2Status)
+                && bytes == [0]
+                && status_actual == 13
+                && status[..4] == *b"USBS"
+                && status[4..8] == tag.to_le_bytes()
+                && status[8..13] == [0; 5];
+            if let Some(evidence) = self.evidence.as_mut() {
+                evidence.f2_zero_residue_quirk = f2_zero_residue_quirk;
+            }
+            if !f2_zero_residue_quirk {
+                validate_status(&status[..status_actual], tag, expected, actual as u32).map_err(
+                    |e| {
+                        format!(
+                            "{e}; CSW={:02x?}; data_actual={actual} data={bytes:02x?}",
+                            &status[..status_actual]
+                        )
+                    },
+                )?;
+            }
             let accepted = match policy {
                 DataPolicy::Exact => actual == length,
                 DataPolicy::F2Status => (1..=20).contains(&actual),
