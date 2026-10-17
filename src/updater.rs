@@ -312,7 +312,7 @@ pub fn operator_action(component: Component, outcome: Outcome) -> &'static str {
             }
         },
         Outcome::OutcomeUnknown => {
-            "Keep the cable connected. No retry or resume will be attempted. Use the documented recovery procedure if needed, then obtain a fresh independent version observation."
+            "Keep the cable connected and leave the controller unchanged. Do not restart, reset, retry or resume a partial update. Preserve this record and wait for a recovery procedure qualified for this interrupted state."
         }
         Outcome::DestinationCreatedWithoutPayload => {
             "No firmware payload bytes were submitted, but the destination file was created. It remains on the controller and requires inspection before another attempt; the updater does not delete or overwrite it."
@@ -369,5 +369,24 @@ mod tests {
         assert_eq!(error.code, 8);
         assert_eq!(error.message, "interface open failed");
         assert_eq!(error.cleanup_errors, ["remount failed"]);
+    }
+    #[test]
+    fn partial_bluetooth_failure_never_recommends_restart_from_surrender() {
+        let partial = TransferRecord {
+            outcome: Outcome::OutcomeUnknown,
+            bytes_submitted: 512,
+            bytes_confirmed: 512,
+            error: Some("F2 status transport failed".into()),
+            cleanup_errors: vec![gulikit_platform::acquisition::SURRENDER_PENDING_NOTICE.into()],
+            ..TransferRecord::default()
+        };
+        let advice = operator_action(Component::Bluetooth, partial.outcome);
+        assert!(advice.contains("Do not restart"), "{advice}");
+        assert!(
+            advice.contains("leave the controller unchanged"),
+            "{advice}"
+        );
+        assert!(!partial.cleanup_errors[0].contains("Restart normally"));
+        assert!(!advice.contains("Power off and on normally"));
     }
 }

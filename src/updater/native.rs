@@ -127,28 +127,7 @@ pub(super) fn execute(
                     },
                 },
             };
-            let action = match result.outcome {
-                Outcome::TransferCompletedAwaitingVerification
-                | Outcome::TransferSubmittedPendingCompletion => {
-                    if component == Component::Main {
-                        "The controller completes Main installation and restarts automatically. Once it has restarted, re-enter update mode if needed and use verify with this attempt plus a new host record. Confirm the same physical controller; transfer completion alone does not verify installation."
-                    } else {
-                        "Power off and on normally, re-enter update mode, then use verify with this attempt plus a new host record and confirm the same physical controller. Transfer completion does not verify installation."
-                    }
-                }
-                Outcome::OutcomeUnknown => {
-                    "Keep the cable connected. No retry or resume will be attempted. Use the documented recovery procedure if needed, then obtain a fresh independent version observation."
-                }
-                Outcome::DestinationCreatedWithoutPayload => {
-                    "No firmware payload bytes were submitted, but the destination file was created. It remains on the controller and requires inspection before another attempt; the updater does not delete or overwrite it."
-                }
-                Outcome::AlreadyCurrent => {
-                    "This component is already current. No firmware bytes were sent."
-                }
-                _ => {
-                    "No firmware transfer was completed. Address the recorded refusal before starting a new session."
-                }
-            };
+            let action = super::operator_action(component, result.outcome);
             let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"transfer":result,"operator_action":action});
             Ok(finalize_record(&mut journal, value))
         }

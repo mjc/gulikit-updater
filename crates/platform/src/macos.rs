@@ -849,7 +849,7 @@ impl BluetoothPort for BluetoothSession {
             }
             usb.into_inner().close(preserve);
             if preserve {
-                return Err("Host claim surrendered without reset after possible F0; storage driver restoration remains pending. Restart normally before fresh discovery/verification.".into());
+                return Err(crate::acquisition::SURRENDER_PENDING_NOTICE.into());
             }
         }
         let mut errors = Vec::new();

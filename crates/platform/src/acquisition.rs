@@ -1,5 +1,7 @@
 //! Acquisition failures retain restoration work separately from the primary refusal.
 
+pub const SURRENDER_PENDING_NOTICE: &str = "Host claim surrendered without reset after possible F0; storage driver restoration remains pending. Surrender alone does not establish that restarting or recovery is safe.";
+
 #[derive(Debug, thiserror::Error)]
 #[error("{error}; cleanup={cleanup_errors:?}")]
 pub struct AcquisitionError {
