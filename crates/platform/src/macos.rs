@@ -412,7 +412,9 @@ impl MainPort for MainSession {
     }
     fn read_version(&mut self) -> Result<Vec<u8>, String> {
         self.session.check()?;
-        self.volume.read_version()
+        let raw = self.volume.read_version()?;
+        self.check_session()?;
+        Ok(raw)
     }
     fn check_session(&mut self) -> Result<(), String> {
         self.session.check()?;
@@ -527,7 +529,8 @@ impl BulkIo for NativeUsb {
                 error.len(),
             )
         };
-        self.zero_input_timeout = result != 0 && timed_out != 0 && input && actual == 0;
+        self.zero_input_timeout =
+            result != 0 && timed_out != 0 && input && actual == 0 && bytes.len() == 20;
         if self.diagnostic {
             eprintln!(
                 "USB tag={} direction={} requested={} actual={} elapsed_ms={} os_result={} raw={:02x?} error={}",
