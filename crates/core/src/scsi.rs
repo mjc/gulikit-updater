@@ -16,6 +16,8 @@ pub struct Sense {
     pub ascq: u8,
     pub actual_length: usize,
     pub declared_length: usize,
+    /// Allocation may omit the tail while the reported header fields are complete.
+    pub truncated: bool,
 }
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SenseError {
@@ -32,12 +34,10 @@ pub fn decode_sense(bytes: &[u8]) -> Result<Sense, SenseError> {
     }
     let code = bytes[0] & 0x7f;
     let declared = 8 + usize::from(bytes[7]);
-    if declared > bytes.len() {
-        return Err(SenseError::Length);
-    }
+    let usable = declared.min(bytes.len());
     let (format, key, asc, ascq) = match code {
         0x70 | 0x71 => {
-            if declared < 14 {
+            if usable < 14 {
                 return Err(SenseError::Length);
             }
             (SenseFormat::Fixed, bytes[2] & 0x0f, bytes[12], bytes[13])
@@ -53,5 +53,6 @@ pub fn decode_sense(bytes: &[u8]) -> Result<Sense, SenseError> {
         ascq,
         actual_length: bytes.len(),
         declared_length: declared,
+        truncated: declared > bytes.len(),
     })
 }

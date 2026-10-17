@@ -624,6 +624,7 @@ impl BluetoothSession {
             .ok_or_else(|| "No exclusive USB claim".into())
     }
     pub fn enable_diagnostics(&mut self) -> Result<String, String> {
+        self.check_session()?;
         let io = self.native()?;
         io.diagnostic = true;
         let usb = io.pointer()?;

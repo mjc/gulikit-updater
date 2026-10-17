@@ -29,9 +29,24 @@ fn sense_formats_and_declared_bounds_do_not_invent_fields() {
         assert_eq!((sense.key, sense.asc, sense.ascq), (5, 0x24, 1));
         assert_eq!(sense.deferred, response == 0x73);
         raw[7] = 1;
+        let partial = decode_sense(&raw).unwrap();
+        assert!(partial.truncated);
+        assert_eq!((partial.key, partial.asc, partial.ascq), (5, 0x24, 1));
+    }
+    for raw in [vec![], vec![0; 18], vec![0x70; 7], vec![0x74; 18]] {
         assert!(decode_sense(&raw).is_err());
     }
-    for raw in [vec![], vec![0; 18], vec![0x70; 7], vec![0x72; 19]] {
-        assert!(decode_sense(&raw).is_err());
-    }
+}
+
+#[test]
+fn allocation_truncation_preserves_complete_diagnostic_fields_with_explicit_metadata() {
+    let mut raw = [0; 18];
+    raw[0] = 0x70;
+    raw[2] = 5;
+    raw[7] = 24;
+    raw[12] = 0x24;
+    let sense = decode_sense(&raw).unwrap();
+    assert_eq!((sense.key, sense.asc, sense.ascq), (5, 0x24, 0));
+    assert_eq!((sense.actual_length, sense.declared_length), (18, 32));
+    assert!(sense.truncated);
 }

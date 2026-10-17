@@ -280,6 +280,8 @@ char *gu_usb_description(void *context){
     @autoreleasepool {
         GuTransport *transport=(__bridge GuTransport *)context;
         const IOUSBConfigurationDescriptor *config=transport.interface.configurationDescriptor;
+        const IOUSBInterfaceDescriptor *interface=transport.interface.interfaceDescriptor;
+        if(!config || !interface) return strdup("USB descriptors unavailable during diagnostic description");
         unsigned total=OSSwapLittleToHostInt16(config->wTotalLength);
         // The owned object's public descriptor storage is already used during
         // endpoint validation. Bound diagnostic output; perform no USB request.
@@ -288,6 +290,6 @@ char *gu_usb_description(void *context){
             const uint8_t *bytes=(const uint8_t *)config;
             for(unsigned i=0;i<total;i++) [raw appendFormat:@"%02x",bytes[i]];
         } else [raw appendString:@"omitted: descriptor length outside diagnostic bound"];
-        return strdup([NSString stringWithFormat:@"configuration=%u interface=%u alternate=%u bulk_in=0x%02x bulk_out=0x%02x configuration_total=%u raw_configuration=%@",config->bConfigurationValue,transport.interface.interfaceDescriptor->bInterfaceNumber,transport.interface.interfaceDescriptor->bAlternateSetting,transport.inputAddress,transport.outputAddress,total,raw].UTF8String);
+        return strdup([NSString stringWithFormat:@"configuration=%u interface=%u alternate=%u bulk_in=0x%02x bulk_out=0x%02x configuration_total=%u raw_configuration=%@",config->bConfigurationValue,interface->bInterfaceNumber,interface->bAlternateSetting,transport.inputAddress,transport.outputAddress,total,raw].UTF8String);
     }
 }
