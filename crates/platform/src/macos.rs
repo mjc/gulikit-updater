@@ -2,7 +2,7 @@
 //! all firmware, version, BOT and transaction decisions remain in the shared core.
 #![allow(unsafe_code)]
 
-use crate::volume::Volume;
+use crate::{acquisition::AcquisitionError, volume::Volume};
 use gulikit_core::{
     bot::{self, BulkIo, Direction, validate_status},
     device::{Candidate, Discovery},
@@ -332,7 +332,7 @@ impl Session {
             volume,
         })
     }
-    pub fn bluetooth(self) -> Result<BluetoothSession, String> {
+    pub fn bluetooth(self) -> Result<BluetoothSession, AcquisitionError> {
         if self.component != Component::Bluetooth {
             return Err("Session selected a different component".into());
         }
@@ -385,10 +385,7 @@ impl Session {
         })();
         if let Err(error) = result {
             let cleanup = port.finish();
-            return Err(match cleanup {
-                Ok(()) => error,
-                Err(cleanup) => format!("{error}; cleanup requires attention: {cleanup}"),
-            });
+            return Err(AcquisitionError::after_cleanup(error, cleanup));
         }
         Ok(port)
     }

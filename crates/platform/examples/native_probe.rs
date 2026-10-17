@@ -12,7 +12,7 @@ fn main() -> Result<(), String> {
             "Selected attachment before claim: {}",
             serde_json::to_string_pretty(&selected.target).map_err(|e| e.to_string())?
         );
-        let mut session = selected.bluetooth()?;
+        let mut session = selected.bluetooth().map_err(|error| error.to_string())?;
         println!("Claimed: {}", session.enable_diagnostics()?);
         println!("GET_MAX_LUN: {:?}", session.max_lun());
         let inquiry = session.inquiry();

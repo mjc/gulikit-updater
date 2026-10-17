@@ -158,7 +158,7 @@ fn verification_refuses_symlinks_and_fifos_before_device_access() {
             .arg(directory.path().join("verification.jsonl"))
             .args(["--confirm-ns39", "--confirm-same-controller", "--json"])
             .assert()
-            .code(5);
+            .code(4);
         let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
         assert!(error.to_string().contains("regular file"), "{error}");
     }

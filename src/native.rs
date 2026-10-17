@@ -1,9 +1,9 @@
-use super::Command;
+use super::{AppError, Command};
 use gulikit_core::package::VerifiedPackage;
 use serde_json::Value;
 
 #[cfg(not(target_os = "macos"))]
-pub fn execute(_command: Command, _package: Option<VerifiedPackage>) -> Result<Value, String> {
+pub fn execute(_command: Command, _package: Option<VerifiedPackage>) -> Result<Value, AppError> {
     Err(
         "Native device access currently supports macOS only; package inspection works on this OS"
             .into(),
@@ -11,7 +11,7 @@ pub fn execute(_command: Command, _package: Option<VerifiedPackage>) -> Result<V
 }
 
 #[cfg(target_os = "macos")]
-pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Value, String> {
+pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Value, AppError> {
     use gulikit_core::{
         package::Component,
         update::{
@@ -48,9 +48,14 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                     let qualified_lun = port.qualified_lun();
                     let raw = port.read_info();
                     let cleanup_errors: Vec<_> = port.finish().err().into_iter().collect();
-                    let raw = raw.map_err(|e| format!("{e}; cleanup={cleanup_errors:?}"))?;
+                    let raw = raw.map_err(|error| {
+                        AppError::from(error).with_cleanup(cleanup_errors.clone())
+                    })?;
                     let version = bluetooth_info(&raw)
-                        .map_err(|e| format!("{e}; raw={raw:02x?}; cleanup={cleanup_errors:?}"))?
+                        .map_err(|e| {
+                            AppError::from(format!("{e}; raw={raw:02x?}"))
+                                .with_cleanup(cleanup_errors.clone())
+                        })?
                         .to_string();
                     (target, raw, version, qualified_lun, cleanup_errors)
                 }
@@ -78,9 +83,9 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 .map_err(|e| e.to_string())?;
             let mut session = Session::open(confirm_ns39, component)?;
             let target = session.target.clone();
-            let mut journal = session.create_record(&record)?;
+            let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
             let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
-            write_event(&mut journal, &header)?;
+            write_event(&mut journal, &header).map_err(AppError::host_io)?;
             let result = match component {
                 Component::Main => match session.main() {
                     Ok(port) => update_main(
@@ -104,7 +109,8 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                     ),
                     Err(error) => TransferRecord {
                         version_policy: policy,
-                        error: Some(error),
+                        error: Some(error.error),
+                        cleanup_errors: error.cleanup_errors,
                         ..TransferRecord::default()
                     },
                 },
@@ -141,7 +147,8 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             confirm_same_controller,
             ..
         } => {
-            let bytes = gulikit_platform::journal::read_attempt(&attempt)?;
+            let bytes =
+                gulikit_platform::journal::read_attempt(&attempt).map_err(AppError::host_io)?;
             let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
             let records: Vec<Value> = text
                 .lines()
@@ -157,11 +164,11 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 .ok_or("Missing attachment generation")?;
             let mut session = Session::open(confirm_ns39, component)?;
             let target = session.target.clone();
-            let mut journal = session.create_record(&record)?;
+            let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
             write_event(
                 &mut journal,
                 &json!({"event":"verification_started","schema_version":1,"source_attempt":record_path(&attempt),"prior_result":prior,"target":target,"same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity"}),
-            )?;
+            ).map_err(AppError::host_io)?;
             let (readback, cleanup, qualified_lun) = match component {
                 Component::Main => match session.main() {
                     Ok(mut port) => {
@@ -178,7 +185,15 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                         let cleanup = port.finish();
                         (raw, cleanup, qualified_lun)
                     }
-                    Err(error) => (Err(error), Ok(()), None),
+                    Err(error) => (
+                        Err(error.error),
+                        if error.cleanup_errors.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(error.cleanup_errors.join("; "))
+                        },
+                        None,
+                    ),
                 },
             };
             let version = readback

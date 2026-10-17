@@ -128,16 +128,16 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
                     }
                     Ok(ExitCode::from(code))
                 }
-                Err((kind, code, message)) => {
+                Err(error) => {
                     if json {
                         write_json(
                             err,
-                            serde_json::json!({"error":{"kind":kind,"message":message}}),
+                            serde_json::json!({"error":{"kind":error.kind,"message":error.message,"cleanup_errors":error.cleanup_errors}}),
                         )?;
                     } else {
-                        writeln!(err, "{message}")?;
+                        writeln!(err, "{}; cleanup={:?}", error.message, error.cleanup_errors)?;
                     }
-                    Ok(ExitCode::from(code))
+                    Ok(ExitCode::from(error.code))
                 }
             }
         }
@@ -207,7 +207,51 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
     }
 }
 
-type AppError = (&'static str, u8, String);
+#[derive(Debug)]
+struct AppError {
+    kind: &'static str,
+    code: u8,
+    message: String,
+    cleanup_errors: Vec<String>,
+}
+impl AppError {
+    fn new(kind: &'static str, code: u8, message: String) -> Self {
+        Self {
+            kind,
+            code,
+            message,
+            cleanup_errors: Vec::new(),
+        }
+    }
+    #[cfg(any(target_os = "macos", test))]
+    fn host_io(message: String) -> Self {
+        Self::new("host_record_io", 4, message)
+    }
+    #[cfg(any(target_os = "macos", test))]
+    fn with_cleanup(mut self, cleanup_errors: Vec<String>) -> Self {
+        if !cleanup_errors.is_empty() {
+            self.code = 8;
+        }
+        self.cleanup_errors = cleanup_errors;
+        self
+    }
+}
+impl From<String> for AppError {
+    fn from(message: String) -> Self {
+        Self::new("device_refused", 5, message)
+    }
+}
+impl From<&str> for AppError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+#[cfg(any(target_os = "macos", test))]
+impl From<gulikit_platform::acquisition::AcquisitionError> for AppError {
+    fn from(error: gulikit_platform::acquisition::AcquisitionError) -> Self {
+        Self::from(error.error).with_cleanup(error.cleanup_errors)
+    }
+}
 fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
     // Package rejection precedes device access and attempt-file creation on every OS.
     let package = if let Command::Update {
@@ -223,12 +267,12 @@ fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
             } else {
                 ("package_io", 4)
             };
-            (kind, code, e.to_string())
+            AppError::new(kind, code, e.to_string())
         })?)
     } else {
         None
     };
-    native::execute(command, package).map_err(|e| ("device_refused", 5, e))
+    native::execute(command, package)
 }
 fn outcome_code(value: &serde_json::Value) -> u8 {
     if value.pointer("/transfer/outcome").and_then(|v| v.as_str()) == Some("outcome_unknown") {
@@ -283,6 +327,20 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_failure_codes_distinguish_host_io_and_restoration_attention() {
+        let io = AppError::host_io("cannot create record".into());
+        assert_eq!(io.kind, "host_record_io");
+        assert_eq!(io.code, 4);
+        let acquisition = gulikit_platform::acquisition::AcquisitionError::after_cleanup(
+            "USB open failed".into(),
+            Err("remount failed".into()),
+        );
+        let failure = AppError::from(acquisition);
+        assert_eq!(failure.code, 8);
+        assert_eq!(failure.message, "USB open failed");
+        assert_eq!(failure.cleanup_errors, ["remount failed"]);
+    }
     #[test]
     fn cleanup_failure_cannot_have_a_success_exit_status() {
         let value = serde_json::json!({"transfer":{"outcome":"already_current","cleanup_errors":["remount failed"]}});

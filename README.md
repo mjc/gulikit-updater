@@ -40,7 +40,7 @@ verification records go to stdout. An attempt can report refusal, uncertainty or
 cleanup failure and still produce its structured record there. Errors before a
 result can be recorded go to stderr with an empty stdout. Exit codes are 0 for
 successful inspection, an already-current component, or verified installation;
-2 for command-line usage; 3 for rejected firmware; 4 for package/output I/O;
+2 for command-line usage; 3 for rejected firmware; 4 for package, host-record, or output I/O;
 5 for device/preflight refusal; 7 for a transfer awaiting completion or restart
 verification; 8 for cleanup or host audit persistence that requires attention;
 and 9 for an uncertain outcome after firmware submission.
