@@ -14,14 +14,26 @@ pub enum VersionDecision {
     NewerThanSupported,
 }
 
+/// Explicit version-direction permission; it never authorizes an unverified device or package.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionPolicy {
+    #[default]
+    UpgradeOnly,
+    AllowDowngrade,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("Unknown or incompatible installed firmware version; writing refused.")]
 pub struct UnknownVersion;
 
-fn decision<T: Ord>(current: T, target: T) -> VersionDecision {
+fn decision<T: Ord>(current: T, target: T, policy: VersionPolicy) -> VersionDecision {
     match current.cmp(&target) {
         std::cmp::Ordering::Less => VersionDecision::Eligible,
         std::cmp::Ordering::Equal => VersionDecision::AlreadyCurrent,
+        std::cmp::Ordering::Greater if policy == VersionPolicy::AllowDowngrade => {
+            VersionDecision::Eligible
+        }
         std::cmp::Ordering::Greater => VersionDecision::NewerThanSupported,
     }
 }
@@ -77,7 +89,10 @@ impl MainVersion {
         })
     }
     pub fn decision(&self) -> VersionDecision {
-        decision((self.major, self.minor), (5, 9))
+        self.decision_with_policy(VersionPolicy::UpgradeOnly)
+    }
+    pub fn decision_with_policy(&self, policy: VersionPolicy) -> VersionDecision {
+        decision((self.major, self.minor), (5, 9), policy)
     }
 }
 impl fmt::Display for MainVersion {
@@ -90,7 +105,10 @@ impl fmt::Display for MainVersion {
 pub struct BluetoothVersion(u16);
 impl BluetoothVersion {
     pub fn decision(self) -> VersionDecision {
-        decision(self.0, 507)
+        self.decision_with_policy(VersionPolicy::UpgradeOnly)
+    }
+    pub fn decision_with_policy(self, policy: VersionPolicy) -> VersionDecision {
+        decision(self.0, 507, policy)
     }
 }
 impl fmt::Display for BluetoothVersion {

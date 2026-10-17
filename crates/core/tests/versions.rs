@@ -57,3 +57,37 @@ fn bluetooth_requires_complete_compatible_fresh_data() {
     bytes[0] ^= 1;
     assert!(bluetooth_info(&bytes).is_err());
 }
+
+#[test]
+fn explicit_downgrade_changes_only_direction_and_never_reinstalls_equal_versions() {
+    use gulikit_core::version::{BT_SIGNATURE, VersionPolicy};
+    let newer = MainVersion::parse(b"www.gulikit.com\nversion 5.10").unwrap();
+    assert_eq!(newer.decision(), VersionDecision::NewerThanSupported);
+    assert_eq!(
+        newer.decision_with_policy(VersionPolicy::AllowDowngrade),
+        VersionDecision::Eligible
+    );
+    let equal = MainVersion::parse(b"www.gulikit.com\nversion 5.9").unwrap();
+    assert_eq!(
+        equal.decision_with_policy(VersionPolicy::AllowDowngrade),
+        VersionDecision::AlreadyCurrent
+    );
+    let mut raw = [0; 20];
+    raw[..16].copy_from_slice(&BT_SIGNATURE);
+    raw[16..18].copy_from_slice(&508u16.to_le_bytes());
+    let newer = bluetooth_info(&raw).unwrap();
+    assert_eq!(newer.decision(), VersionDecision::NewerThanSupported);
+    assert_eq!(
+        newer.decision_with_policy(VersionPolicy::AllowDowngrade),
+        VersionDecision::Eligible
+    );
+    raw[16..18].copy_from_slice(&507u16.to_le_bytes());
+    assert_eq!(
+        bluetooth_info(&raw)
+            .unwrap()
+            .decision_with_policy(VersionPolicy::AllowDowngrade),
+        VersionDecision::AlreadyCurrent
+    );
+    raw[0] ^= 1;
+    assert!(bluetooth_info(&raw).is_err());
+}

@@ -37,6 +37,9 @@ enum Command {
     /// Update one component using a reviewed original ZIP and record the attempt.
     Update {
         path: PathBuf,
+        /// Permit the reviewed selected release to replace a newer installed version.
+        #[arg(long)]
+        allow_downgrade: bool,
         #[arg(long)]
         model: Model,
         #[arg(long)]

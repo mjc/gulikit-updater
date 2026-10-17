@@ -2,7 +2,7 @@
 
 use crate::{
     package::{Component, VerifiedPackage},
-    version::{VersionDecision, bluetooth_info},
+    version::{VersionDecision, VersionPolicy, bluetooth_info},
 };
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +88,7 @@ pub struct CommandRecord {
 #[derive(Debug, Serialize)]
 pub struct TransferRecord {
     pub outcome: Outcome,
+    pub version_policy: VersionPolicy,
     pub prewrite_version: Option<String>,
     pub bytes_submitted: usize,
     pub bytes_confirmed: usize,
@@ -99,6 +100,7 @@ impl Default for TransferRecord {
     fn default() -> Self {
         Self {
             outcome: Outcome::Refused,
+            version_policy: VersionPolicy::UpgradeOnly,
             prewrite_version: None,
             bytes_submitted: 0,
             bytes_confirmed: 0,
@@ -130,10 +132,12 @@ pub trait BluetoothPort {
 pub fn update_bluetooth(
     port: &mut impl BluetoothPort,
     package: &VerifiedPackage,
+    policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
     if package.info().component != Component::Bluetooth {
         let mut record = TransferRecord {
+            version_policy: policy,
             error: Some("Bluetooth update requires a verified Bluetooth package".into()),
             ..TransferRecord::default()
         };
@@ -142,15 +146,19 @@ pub fn update_bluetooth(
         }
         return record;
     }
-    bluetooth(port, package.payload(), cancelled)
+    bluetooth(port, package.payload(), policy, cancelled)
 }
 
 fn bluetooth(
     port: &mut impl BluetoothPort,
     payload: &[u8],
+    policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    let mut record = TransferRecord::default();
+    let mut record = TransferRecord {
+        version_policy: policy,
+        ..TransferRecord::default()
+    };
     let mut submitted = false;
     let result = (|| -> Result<(), String> {
         if cancelled() {
@@ -161,7 +169,7 @@ fn bluetooth(
         let response = command(port, &mut record, 0xf1, &[])?;
         let version = bluetooth_info(&response).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
-        match version.decision() {
+        match version.decision_with_policy(policy) {
             VersionDecision::AlreadyCurrent => {
                 record.outcome = Outcome::AlreadyCurrent;
                 return Ok(());
@@ -266,10 +274,12 @@ pub trait MainPort {
 pub fn update_main(
     port: &mut impl MainPort,
     package: &VerifiedPackage,
+    policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
     if package.info().component != Component::Main {
         let mut record = TransferRecord {
+            version_policy: policy,
             error: Some("Main update requires a verified Main package".into()),
             ..TransferRecord::default()
         };
@@ -278,15 +288,19 @@ pub fn update_main(
         }
         return record;
     }
-    main_transfer(port, package.payload(), cancelled)
+    main_transfer(port, package.payload(), policy, cancelled)
 }
 
 fn main_transfer(
     port: &mut impl MainPort,
     payload: &[u8],
+    policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    let mut record = TransferRecord::default();
+    let mut record = TransferRecord {
+        version_policy: policy,
+        ..TransferRecord::default()
+    };
     let result = (|| -> Result<(), String> {
         if cancelled() {
             record.outcome = Outcome::CancelledBeforeWrite;
@@ -296,7 +310,7 @@ fn main_transfer(
         let raw = port.read_version()?;
         let version = crate::version::MainVersion::parse(&raw).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
-        match version.decision() {
+        match version.decision_with_policy(policy) {
             VersionDecision::AlreadyCurrent => {
                 record.outcome = Outcome::AlreadyCurrent;
                 return Ok(());
@@ -369,11 +383,16 @@ mod tests {
         events: Vec<&'static str>,
         written: Vec<u8>,
         version: &'static [u8],
+        refuse_write: bool,
         fail: Option<&'static str>,
     }
     impl MainPort for MainFake {
         fn prepare_write(&mut self) -> Result<(), String> {
-            Ok(())
+            if self.refuse_write {
+                Err("unqualified adapter".into())
+            } else {
+                Ok(())
+            }
         }
         fn read_version(&mut self) -> Result<Vec<u8>, String> {
             Ok(self.version.to_vec())
@@ -422,6 +441,7 @@ mod tests {
             events: vec![],
             written: vec![],
             version: b"www.gulikit.com\nversion 5.8",
+            refuse_write: false,
             fail: None,
         }
     }
@@ -429,7 +449,7 @@ mod tests {
     fn main_handles_short_writes_flushes_open_file_and_waits_for_detach() {
         let mut port = main_port();
         let payload = vec![0x83; 51500];
-        let record = main_transfer(&mut port, &payload, || false);
+        let record = main_transfer(&mut port, &payload, VersionPolicy::UpgradeOnly, || false);
         assert_eq!(
             record.outcome,
             Outcome::TransferCompletedAwaitingVerification
@@ -447,7 +467,12 @@ mod tests {
         ] {
             let mut port = main_port();
             port.version = text;
-            let result = main_transfer(&mut port, &vec![0; 51500], || false);
+            let result = main_transfer(
+                &mut port,
+                &vec![0; 51500],
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
             assert!(matches!(
                 result.outcome,
                 Outcome::AlreadyCurrent | Outcome::NewerThanSupported | Outcome::Refused
@@ -458,7 +483,13 @@ mod tests {
         let mut port = main_port();
         port.fail = Some("create");
         assert_eq!(
-            main_transfer(&mut port, &vec![0; 51500], || false).outcome,
+            main_transfer(
+                &mut port,
+                &vec![0; 51500],
+                VersionPolicy::UpgradeOnly,
+                || false
+            )
+            .outcome,
             Outcome::Refused
         );
         assert!(port.written.is_empty());
@@ -469,7 +500,13 @@ mod tests {
             let mut port = main_port();
             port.fail = Some(failure);
             assert_eq!(
-                main_transfer(&mut port, &vec![0; 51500], || false).outcome,
+                main_transfer(
+                    &mut port,
+                    &vec![0; 51500],
+                    VersionPolicy::UpgradeOnly,
+                    || false
+                )
+                .outcome,
                 Outcome::OutcomeUnknown
             );
             assert!(!port.events.contains(&"detach"));
@@ -534,7 +571,7 @@ mod tests {
             version: 506,
             ..Fake::default()
         };
-        let record = bluetooth(&mut port, &payload, || false);
+        let record = bluetooth(&mut port, &payload, VersionPolicy::UpgradeOnly, || false);
         assert_eq!(
             record.outcome,
             Outcome::TransferCompletedAwaitingVerification
@@ -560,7 +597,13 @@ mod tests {
                 ..Fake::default()
             };
             assert_eq!(
-                bluetooth(&mut port, &vec![0; 345088], || false).outcome,
+                bluetooth(
+                    &mut port,
+                    &vec![0; 345088],
+                    VersionPolicy::UpgradeOnly,
+                    || false
+                )
+                .outcome,
                 outcome
             );
             assert!(port.bytes.is_empty());
@@ -575,7 +618,12 @@ mod tests {
             refuse_write: true,
             ..Fake::default()
         };
-        let record = bluetooth(&mut port, &vec![0; 345088], || false);
+        let record = bluetooth(
+            &mut port,
+            &vec![0; 345088],
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
         assert_eq!(record.outcome, Outcome::Refused);
         assert_eq!(record.bytes_submitted, 0);
         assert_eq!(port.calls, [0xf1]);
@@ -589,7 +637,12 @@ mod tests {
                 fail: Some(index),
                 ..Fake::default()
             };
-            let record = bluetooth(&mut port, &vec![0; 345088], || false);
+            let record = bluetooth(
+                &mut port,
+                &vec![0; 345088],
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
             assert_eq!(record.outcome, Outcome::OutcomeUnknown, "command {index}");
             assert_eq!(port.calls.len(), index);
             assert!(port.cleanup);
@@ -602,7 +655,12 @@ mod tests {
             invalidate: Some(3),
             ..Fake::default()
         };
-        let record = bluetooth(&mut port, &vec![0; 345088], || false);
+        let record = bluetooth(
+            &mut port,
+            &vec![0; 345088],
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
         assert_eq!(record.outcome, Outcome::OutcomeUnknown);
         assert_eq!(port.calls, [0xf1, 0xf0, 0xf2]);
         let mut port = Fake {
@@ -610,10 +668,121 @@ mod tests {
             ..Fake::default()
         };
         assert_eq!(
-            bluetooth(&mut port, &vec![0; 345088], || true).outcome,
+            bluetooth(
+                &mut port,
+                &vec![0; 345088],
+                VersionPolicy::UpgradeOnly,
+                || true
+            )
+            .outcome,
             Outcome::CancelledBeforeWrite
         );
         assert!(port.calls.is_empty());
         assert!(port.cleanup);
+    }
+    #[test]
+    fn downgrade_permission_never_bypasses_version_or_adapter_preflight() {
+        let mut main = main_port();
+        main.version = b"www.gulikit.com\nversion 5.10";
+        let default = main_transfer(
+            &mut main,
+            &vec![0; 51500],
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(default.outcome, Outcome::NewerThanSupported);
+        assert!(main.written.is_empty());
+        let mut main = main_port();
+        main.version = b"www.gulikit.com\nversion 5.10";
+        let allowed = main_transfer(
+            &mut main,
+            &vec![0; 51500],
+            VersionPolicy::AllowDowngrade,
+            || false,
+        );
+        assert_eq!(
+            allowed.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(allowed.version_policy, VersionPolicy::AllowDowngrade);
+        for version in [b"www.gulikit.com\nversion 5.9".as_slice(), b"unknown"] {
+            let mut main = main_port();
+            main.version = version;
+            let result = main_transfer(
+                &mut main,
+                &vec![0; 51500],
+                VersionPolicy::AllowDowngrade,
+                || false,
+            );
+            assert!(matches!(
+                result.outcome,
+                Outcome::AlreadyCurrent | Outcome::Refused
+            ));
+            assert!(main.written.is_empty());
+        }
+        let mut main = main_port();
+        main.version = b"www.gulikit.com\nversion 5.10";
+        main.refuse_write = true;
+        assert_eq!(
+            main_transfer(
+                &mut main,
+                &vec![0; 51500],
+                VersionPolicy::AllowDowngrade,
+                || false
+            )
+            .outcome,
+            Outcome::Refused
+        );
+        assert!(!main.events.contains(&"create"));
+        let mut bt = Fake {
+            version: 508,
+            ..Fake::default()
+        };
+        assert_eq!(
+            bluetooth(
+                &mut bt,
+                &vec![0; 345088],
+                VersionPolicy::UpgradeOnly,
+                || false
+            )
+            .outcome,
+            Outcome::NewerThanSupported
+        );
+        assert!(bt.bytes.is_empty());
+        let mut bt = Fake {
+            version: 508,
+            ..Fake::default()
+        };
+        assert_eq!(
+            bluetooth(
+                &mut bt,
+                &vec![0; 345088],
+                VersionPolicy::AllowDowngrade,
+                || false
+            )
+            .outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        for (version, fail, refuse_write, outcome) in [
+            (507, None, false, Outcome::AlreadyCurrent),
+            (508, Some(1), false, Outcome::Refused),
+            (508, None, true, Outcome::Refused),
+        ] {
+            let mut bt = Fake {
+                version,
+                fail,
+                refuse_write,
+                ..Fake::default()
+            };
+            let result = bluetooth(
+                &mut bt,
+                &vec![0; 345088],
+                VersionPolicy::AllowDowngrade,
+                || false,
+            );
+            assert_eq!(result.outcome, outcome);
+            assert!(bt.bytes.is_empty());
+            assert_eq!(result.bytes_submitted, 0);
+        }
     }
 }

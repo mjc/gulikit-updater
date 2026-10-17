@@ -61,8 +61,12 @@ Each update uses one original, verified package and creates an exclusive host
 attempt record outside the controller volume. Operation submission, actual
 results, raw version bytes and cleanup results are persisted as JSON lines.
 An incomplete record preserves an interrupted attempt; it does not prove a
-transfer completed. Equal, newer and unknown installed versions write nothing;
-there is no force, reinstall or downgrade option. Main copying and raw Bluetooth
+transfer completed. Equal and unknown installed versions write nothing. A newer installed version
+refuses by default; `update --allow-downgrade` explicitly permits installing the
+selected older reviewed release. The record retains that version policy. This
+option changes version direction only: package hashes, physical model confirmation,
+fresh component readback, session ownership and native qualification still apply.
+There is no general force or equal-version reinstall option. Main copying and raw Bluetooth
 traffic are serialized. A topology change invalidates the active session.
 
 Transfer completion is separate from installation verification. Main installation

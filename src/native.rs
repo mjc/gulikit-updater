@@ -18,7 +18,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             BluetoothPort, MainPort, Outcome, TransferRecord, Verification, update_bluetooth,
             update_main, verify_restart,
         },
-        version::{MainVersion, bluetooth_info},
+        version::{MainVersion, VersionPolicy, bluetooth_info},
     };
     use gulikit_platform::journal::{Recorded, finalize_record, write_event};
     use gulikit_platform::macos::{Session, discover, read_main};
@@ -61,11 +61,17 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
         }
         Command::Update {
             component,
+            allow_downgrade,
             confirm_ns39,
             record,
             ..
         } => {
             let package = package.ok_or("Missing verified package")?;
+            let policy = if allow_downgrade {
+                VersionPolicy::AllowDowngrade
+            } else {
+                VersionPolicy::UpgradeOnly
+            };
             let cancelled = Arc::new(AtomicBool::new(false));
             let flag = Arc::clone(&cancelled);
             ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
@@ -73,27 +79,31 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let mut session = Session::open(confirm_ns39, component)?;
             let target = session.target.clone();
             let mut journal = session.create_record(&record)?;
-            let header = json!({"event":"attempt_started","schema_version":1,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
+            let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
             write_event(&mut journal, &header)?;
             let result = match component {
                 Component::Main => match session.main() {
-                    Ok(port) => {
-                        update_main(&mut Recorded::new(port, &mut journal), &package, || {
-                            cancelled.load(Ordering::SeqCst)
-                        })
-                    }
+                    Ok(port) => update_main(
+                        &mut Recorded::new(port, &mut journal),
+                        &package,
+                        policy,
+                        || cancelled.load(Ordering::SeqCst),
+                    ),
                     Err(error) => TransferRecord {
+                        version_policy: policy,
                         error: Some(error),
                         ..TransferRecord::default()
                     },
                 },
                 Component::Bluetooth => match session.bluetooth() {
-                    Ok(port) => {
-                        update_bluetooth(&mut Recorded::new(port, &mut journal), &package, || {
-                            cancelled.load(Ordering::SeqCst)
-                        })
-                    }
+                    Ok(port) => update_bluetooth(
+                        &mut Recorded::new(port, &mut journal),
+                        &package,
+                        policy,
+                        || cancelled.load(Ordering::SeqCst),
+                    ),
                     Err(error) => TransferRecord {
+                        version_policy: policy,
                         error: Some(error),
                         ..TransferRecord::default()
                     },

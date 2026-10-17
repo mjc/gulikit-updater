@@ -164,3 +164,27 @@ fn verification_refuses_symlinks_and_fifos_before_device_access() {
     }
     assert_eq!(std::fs::read(original).unwrap(), b"{}\n");
 }
+
+#[test]
+fn downgrade_opt_in_never_bypasses_package_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let archive = directory.path().join("invalid.zip");
+    let record = directory.path().join("attempt.jsonl");
+    std::fs::write(&archive, b"not firmware").unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .arg("update")
+        .arg(archive)
+        .args([
+            "--model",
+            "kk3-max",
+            "--component",
+            "main",
+            "--confirm-ns39",
+            "--allow-downgrade",
+            "--record",
+        ])
+        .arg(&record)
+        .assert()
+        .code(3);
+    assert!(!record.exists());
+}
