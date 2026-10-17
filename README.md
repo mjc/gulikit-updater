@@ -63,9 +63,10 @@ transfer completed. Equal, newer and unknown installed versions write nothing;
 there is no force, reinstall or downgrade option. Main copying and raw Bluetooth
 traffic are serialized. A topology change invalidates the active session.
 
-Transfer completion is separate from installation verification. After a completed
-transfer, power the controller off and on normally and re-enter update mode if
-needed. `verify` requires a fresh version read on a new attachment plus explicit
+Transfer completion is separate from installation verification. Main installation
+finishes with the controller automatically restarting; its own detach is observed
+without manually unmounting it. After a completed Bluetooth transfer, power the
+controller off and on normally. Re-enter update mode if needed for fresh readback. `verify` requires a fresh version read on a new attachment plus explicit
 confirmation of the same physical controller. No USB serial is available, so
 this assisted association is recorded separately from the machine-read version.
 The required `verify --record` creates a new exclusive host record linking the

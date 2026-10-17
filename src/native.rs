@@ -36,24 +36,25 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             confirm_ns39,
             ..
         } => {
-            let (target, raw, version) = match component {
+            let (target, raw, version, qualified_lun) = match component {
                 Component::Main => {
                     let (target, raw, version) = read_main(confirm_ns39)?;
-                    (target, raw, version.to_string())
+                    (target, raw, version.to_string(), None)
                 }
                 Component::Bluetooth => {
                     let mut port = Session::open(confirm_ns39)?.bluetooth()?;
                     let target = port.target().clone();
+                    let qualified_lun = port.qualified_lun();
                     let raw = port.read_info();
                     let cleanup = port.finish();
                     let raw = raw.map_err(|e| format!("{e}; cleanup={cleanup:?}"))?;
                     cleanup?;
                     let version = bluetooth_info(&raw).map_err(|e| e.to_string())?.to_string();
-                    (target, raw, version)
+                    (target, raw, version, qualified_lun)
                 }
             };
             Ok(
-                json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"target":target,"identity_provenance":"user-confirmed NS39; observed update profile"}),
+                json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"qualified_bot_lun":qualified_lun,"target":target,"identity_provenance":"user-confirmed NS39; observed update profile"}),
             )
         }
         Command::Update {
@@ -99,7 +100,11 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let action = match result.outcome {
                 Outcome::TransferCompletedAwaitingVerification
                 | Outcome::TransferSubmittedPendingCompletion => {
-                    "Power off and on normally, re-enter update mode, then use verify with this record and confirm the same physical controller. Transfer completion does not verify installation."
+                    if component == Component::Main {
+                        "The controller completes Main installation and restarts automatically. Once it has restarted, re-enter update mode if needed and use verify with this attempt plus a new host record. Confirm the same physical controller; transfer completion alone does not verify installation."
+                    } else {
+                        "Power off and on normally, re-enter update mode, then use verify with this attempt plus a new host record and confirm the same physical controller. Transfer completion does not verify installation."
+                    }
                 }
                 Outcome::OutcomeUnknown => {
                     "Keep the cable connected. No retry or resume will be attempted. Use the documented recovery procedure if needed, then obtain a fresh independent version observation."
@@ -146,22 +151,23 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 &mut journal,
                 &json!({"event":"verification_started","schema_version":1,"source_attempt":attempt,"prior_result":prior,"target":target,"same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity"}),
             )?;
-            let (readback, cleanup) = match component {
+            let (readback, cleanup, qualified_lun) = match component {
                 Component::Main => match session.main() {
                     Ok(mut port) => {
                         let raw = port.read_version();
                         let cleanup = port.finish();
-                        (raw, cleanup)
+                        (raw, cleanup, None)
                     }
-                    Err(error) => (Err(error), Ok(())),
+                    Err(error) => (Err(error), Ok(()), None),
                 },
                 Component::Bluetooth => match session.bluetooth() {
                     Ok(mut port) => {
+                        let qualified_lun = port.qualified_lun();
                         let raw = port.read_info();
                         let cleanup = port.finish();
-                        (raw, cleanup)
+                        (raw, cleanup, qualified_lun)
                     }
-                    Err(error) => (Err(error), Ok(())),
+                    Err(error) => (Err(error), Ok(()), None),
                 },
             };
             let version = readback
@@ -193,7 +199,7 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 json!({
                     "event":"verification_result", "schema_version":1,
                     "source_attempt":attempt, "verification":observation,
-                    "raw_version_bytes":readback.ok(), "target":target,
+                    "raw_version_bytes":readback.ok(), "qualified_bot_lun":qualified_lun, "target":target,
                     "same_unit_association":"user-confirmed; attachment generation bound; no machine-proven unique serial identity",
                     "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
                 }),
