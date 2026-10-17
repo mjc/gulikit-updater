@@ -12,7 +12,7 @@ use gulikit_core::{
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{CStr, c_char, c_void},
-    fs::{File, OpenOptions},
+    fs::File,
     path::PathBuf,
     process::Command,
     ptr::NonNull,
@@ -164,7 +164,7 @@ impl Drop for Watch {
 pub struct Session {
     pub target: NativeCandidate,
     watch: Watch,
-    _lock: File,
+    lock: crate::lock::ProcessLock,
     service: u32,
 }
 impl Session {
@@ -219,18 +219,7 @@ impl Session {
         ))
     }
     pub fn open(confirmed: bool) -> Result<Self, String> {
-        let home = std::env::var_os("HOME").ok_or("HOME unavailable for updater lock")?;
-        let state = PathBuf::from(home).join("Library/Application Support/gulikit-updater");
-        std::fs::create_dir_all(&state).map_err(|e| e.to_string())?;
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(state.join("update.lock"))
-            .map_err(|e| e.to_string())?;
-        lock.try_lock()
-            .map_err(|e| format!("Another updater owns the process lock: {e}"))?;
+        let lock = crate::lock::ProcessLock::acquire()?;
         let watch = Watch::new()?;
         let target = discover()?.select(confirmed)?;
         let service = unsafe { gu_entry_hold(target.ancestor) };
@@ -240,13 +229,14 @@ impl Session {
         let session = Self {
             target,
             watch,
-            _lock: lock,
+            lock,
             service,
         };
         session.check()?;
         Ok(session)
     }
     pub fn check(&self) -> Result<(), String> {
+        self.lock.check()?;
         if !self.watch.unchanged() {
             return Err("USB topology changed; this session is invalidated. Rediscover and confirm the controller again.".into());
         }
@@ -337,6 +327,7 @@ impl Session {
     // Quiescing storage can remove its logical mount. Still require all physical
     // candidates, the selected ancestor and live watcher, never a cached mount path.
     fn check_transport(&self) -> Result<(), String> {
+        self.lock.check()?;
         if !self.watch.unchanged() {
             return Err("USB topology changed during transport ownership".into());
         }

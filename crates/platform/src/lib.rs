@@ -5,6 +5,8 @@
 pub mod macos;
 
 pub mod journal;
+#[cfg(unix)]
+pub mod lock;
 pub mod process;
 #[cfg(unix)]
 pub mod volume;
