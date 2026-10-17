@@ -21,12 +21,18 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
         version::{MainVersion, VersionPolicy, bluetooth_info},
     };
     use gulikit_platform::journal::{Recorded, finalize_record, write_event};
-    use gulikit_platform::macos::{Session, discover, read_main};
+    use gulikit_platform::macos::{Session, discover};
     use serde_json::json;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    if !matches!(&command, Command::Devices { .. }) {
+        let flag = Arc::clone(&cancelled);
+        ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
+            .map_err(|error| error.to_string())?;
+    }
     match command {
         Command::Devices { .. } => Ok(
             json!({"discovery":discover()?,"coverage":"Observed GuliKit update profiles and correlated GuliKit volumes. Put only one device in update mode; future unknown identities may not be recognized."}),
@@ -38,16 +44,35 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
         } => {
             let (target, raw, version, qualified_lun, cleanup_errors) = match component {
                 Component::Main => {
-                    let (target, raw, version) = read_main(confirm_ns39)?;
-                    (target, raw, version.to_string(), None, Vec::<String>::new())
+                    let mut port = Session::open(confirm_ns39, Component::Main)?.main()?;
+                    let target = port.target().clone();
+                    let (raw, cleanup) = read_with_cleanup(
+                        &mut port,
+                        MainPort::read_version,
+                        MainPort::finish,
+                        || cancelled.load(Ordering::SeqCst),
+                    );
+                    let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
+                    let raw = raw.map_err(|error| {
+                        AppError::from(error).with_cleanup(cleanup_errors.clone())
+                    })?;
+                    let version = MainVersion::parse(&raw).map_err(|error| {
+                        AppError::from(error.to_string()).with_cleanup(cleanup_errors.clone())
+                    })?;
+                    (target, raw, version.to_string(), None, cleanup_errors)
                 }
                 Component::Bluetooth => {
                     let mut port =
                         Session::open(confirm_ns39, Component::Bluetooth)?.bluetooth()?;
                     let target = port.target().clone();
                     let qualified_lun = port.qualified_lun();
-                    let raw = port.read_info();
-                    let cleanup_errors: Vec<_> = port.finish().err().into_iter().collect();
+                    let (raw, cleanup) = read_with_cleanup(
+                        &mut port,
+                        |port| port.read_info(),
+                        BluetoothPort::finish,
+                        || cancelled.load(Ordering::SeqCst),
+                    );
+                    let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
                     let raw = raw.map_err(|error| {
                         AppError::from(error).with_cleanup(cleanup_errors.clone())
                     })?;
@@ -77,10 +102,6 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             } else {
                 VersionPolicy::UpgradeOnly
             };
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let flag = Arc::clone(&cancelled);
-            ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
-                .map_err(|e| e.to_string())?;
             let mut session = Session::open(confirm_ns39, component)?;
             let target = session.target.clone();
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
@@ -172,8 +193,12 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
             let (readback, cleanup, qualified_lun) = match component {
                 Component::Main => match session.main() {
                     Ok(mut port) => {
-                        let raw = port.read_version();
-                        let cleanup = port.finish();
+                        let (raw, cleanup) = read_with_cleanup(
+                            &mut port,
+                            MainPort::read_version,
+                            MainPort::finish,
+                            || cancelled.load(Ordering::SeqCst),
+                        );
                         (raw, cleanup, None)
                     }
                     Err(error) => (Err(error), Ok(()), None),
@@ -181,8 +206,12 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
                 Component::Bluetooth => match session.bluetooth() {
                     Ok(mut port) => {
                         let qualified_lun = port.qualified_lun();
-                        let raw = port.read_info();
-                        let cleanup = port.finish();
+                        let (raw, cleanup) = read_with_cleanup(
+                            &mut port,
+                            |port| port.read_info(),
+                            BluetoothPort::finish,
+                            || cancelled.load(Ordering::SeqCst),
+                        );
                         (raw, cleanup, qualified_lun)
                     }
                     Err(error) => (
@@ -287,6 +316,30 @@ fn record_path(path: &std::path::Path) -> Value {
     value
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn read_with_cleanup<P>(
+    port: &mut P,
+    read: impl FnOnce(&mut P) -> Result<Vec<u8>, String>,
+    finish: impl FnOnce(&mut P) -> Result<(), String>,
+    mut cancelled: impl FnMut() -> bool,
+) -> (Result<Vec<u8>, String>, Result<(), String>) {
+    let result = if cancelled() {
+        Err("Cancelled before version read".into())
+    } else {
+        let result = read(port);
+        if cancelled() {
+            Err(match result {
+                Ok(_) => "Cancelled during version read".into(),
+                Err(error) => format!("Cancelled during version read; {error}"),
+            })
+        } else {
+            result
+        }
+    };
+    let cleanup = finish(port);
+    (result, cleanup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +387,35 @@ mod tests {
         let roundtrip: Vec<u8> = serde_json::from_value(value["unix_bytes"].clone()).unwrap();
         assert_eq!(roundtrip, bytes);
         assert!(value["display"].as_str().unwrap().contains("attempt-"));
+    }
+    #[test]
+    fn read_cancellation_preserves_cleanup_before_and_after_device_io() {
+        for already_cancelled in [false, true] {
+            let mut events = Vec::new();
+            let flag = std::cell::Cell::new(already_cancelled);
+            let (result, cleanup) = read_with_cleanup(
+                &mut events,
+                |events| {
+                    events.push("read");
+                    flag.set(true);
+                    Ok(vec![1, 2, 3])
+                },
+                |events| {
+                    events.push("finish");
+                    Err("restore failed".into())
+                },
+                || flag.get(),
+            );
+            assert!(result.unwrap_err().contains("Cancelled"));
+            assert_eq!(cleanup.unwrap_err(), "restore failed");
+            assert_eq!(
+                events,
+                if already_cancelled {
+                    vec!["finish"]
+                } else {
+                    vec!["read", "finish"]
+                }
+            );
+        }
     }
 }
