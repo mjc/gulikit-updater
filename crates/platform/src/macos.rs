@@ -678,7 +678,7 @@ impl BluetoothSession {
         &self.session.target
     }
     pub fn read_info(&mut self) -> Result<Vec<u8>, String> {
-        self.check_session()?;
+        // command invalidates the previous F1 proof before its first fallible check.
         self.command(0xf1, &[])
     }
     pub fn inquiry(&mut self) -> Result<Vec<u8>, String> {
