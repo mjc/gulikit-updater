@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 
 [workspace]
-members = ["crates/core", "crates/platform"]
+members = ["crates/core", "crates/platform", "crates/ui"]
 resolver = "3"
 
 [workspace.dependencies]

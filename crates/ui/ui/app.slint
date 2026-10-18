@@ -1,0 +1,402 @@
+import { ScrollView } from "std-widgets.slint";
+export { Palette } from "std-widgets.slint";
+
+export enum Page { connect, ready, writing, restart, verified, failed }
+export struct ViewState {
+    page: Page,
+    bluetooth: bool,
+    component-name: string,
+    main-version: string,
+    bt-version: string,
+    installed: string,
+    target: string,
+    filename: string,
+    payload: string,
+    digest: string,
+    progress: float,
+    transfer-label: string,
+    can-update: bool,
+    can-choose-package: bool,
+    can-open-attempt: bool,
+    can-switch-component: bool,
+    can-troubleshoot: bool,
+    busy: bool,
+    connected: bool,
+    identity-known: bool,
+    warning: bool,
+    notice: string,
+    status: string,
+    error: string,
+    log: string,
+}
+
+component Label inherits Text { font-size: 13px; color: #64715f; wrap: word-wrap; }
+component ActionButton inherits FocusScope {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> primary: false;
+    in property <bool> quiet: false;
+    in property <bool> selected: false;
+    callback clicked();
+    height: root.detail == "" ? 40px : 66px;
+    min-width: root.detail == "" ? label.preferred-width + 36px : 180px;
+    horizontal-stretch: 0;
+    accessible-role: button;
+    accessible-label: root.text + (root.detail == "" ? "" : ", " + root.detail);
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    key-pressed(event) => {
+        if event.text == Key.Return || event.text == " " { root.clicked(); return accept; }
+        return reject;
+    }
+    Rectangle {
+        border-radius: 6px;
+        background: !root.enabled ? #e0e5d9 : root.primary ? (touch.has-hover ? #24543d : #2e6047) : root.selected ? #fffefa : root.quiet ? (touch.has-hover ? #e6ecdf : transparent) : #f5f8ee;
+        border-width: root.has-focus ? 2px : root.selected || !root.quiet ? 1px : 0px;
+        border-color: root.has-focus ? #507c45 : root.primary ? #2e6047 : #cfdac7;
+    }
+    VerticalLayout {
+        padding-left: 16px; padding-right: 16px; padding-top: 10px; padding-bottom: 10px; spacing: 5px;
+        label := Text {
+            text: root.text;
+            color: !root.enabled ? #707a68 : root.primary ? white : #334d32;
+            font-size: 13px; font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: root.detail == "" ? center : left;
+        }
+        if root.detail != "": Label { text: root.detail; font-size: 12px; }
+    }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.focus(); root.clicked(); } }
+}
+component Notice inherits Rectangle {
+    in property <string> text;
+    in property <bool> warning;
+    background: root.warning ? #f4ebdc : #edf2e6;
+    border-radius: 6px;
+    min-height: 46px;
+    HorizontalLayout {
+        padding: 13px; spacing: 10px;
+        Text { text: root.warning ? "!" : "ⓘ"; color: root.warning ? #875c22 : #5e7449; font-size: 15px; horizontal-stretch: 0; }
+        Label { text: root.text; color: root.warning ? #7f5b26 : #536842; vertical-alignment: center; }
+    }
+}
+
+component ModeInstruction inherits HorizontalLayout {
+    in property <bool> bluetooth;
+    in property <bool> keep-held: false;
+    spacing: 6px; alignment: start;
+    Label { text: root.keep-held ? "Keep" : "Hold"; vertical-alignment: center; horizontal-stretch: 0; }
+    Image {
+        source: root.bluetooth ? @image-url("../../../mockups/icons/gear.svg") : @image-url("../../../mockups/icons/aps.svg");
+        width: 24px; height: 24px; image-fit: contain;
+        accessible-label: root.bluetooth ? "Gear / Set button" : "APS button (overlapping squares)";
+    }
+    Text { text: root.bluetooth ? "Gear" : "APS"; color: #405538; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+    Label { text: root.keep-held ? "held while pressing" : "first, then press"; vertical-alignment: center; horizontal-stretch: 0; }
+    Image {
+        source: @image-url("../../../mockups/icons/a.svg"); width: 24px; height: 24px; image-fit: contain;
+        accessible-label: "A button (rightmost in default Switch layout)";
+    }
+}
+
+component RightmostA inherits HorizontalLayout {
+    spacing: 6px; alignment: start;
+    Label { text: "Use the rightmost"; vertical-alignment: center; horizontal-stretch: 0; }
+    Image {
+        source: @image-url("../../../mockups/icons/a.svg"); width: 24px; height: 24px; image-fit: contain;
+        accessible-label: "A";
+    }
+    Label { text: "button (default Switch layout)."; vertical-alignment: center; horizontal-stretch: 0; }
+}
+
+export component AppWindow inherits Window {
+    in property <bool> demo-mode: false;
+    in-out property <bool> model-confirmed: false;
+    in-out property <bool> same-controller: false;
+    in property <bool> primary-enabled: false;
+    in property <string> primary-label;
+    title: root.demo-mode ? "GuliKit updater · Demo" : "GuliKit updater";
+    preferred-width: 1000px; preferred-height: 660px;
+    min-width: 760px; min-height: 600px;
+    background: #fbfcf8;
+    default-font-size: 14px;
+    in property <ViewState> state;
+    callback select-component(bool);
+    callback select-package(int);
+    callback primary-action();
+    callback scenario-selected(int);
+    callback confirm-model(bool);
+    callback confirm-same(bool);
+    callback choose-file();
+    callback inspect-controller();
+    callback open-attempt();
+    callback cancel-operation();
+    in-out property <bool> details-open: false;
+    in-out property <bool> log-open: false;
+    property <length> sidebar-width: 280px;
+    property <string> screen-title: root.state.page == Page.connect ? "Connect controller" : root.state.page == Page.ready ? root.state.component-name : root.state.page == Page.writing ? "Updating…" : root.state.page == Page.restart ? "Restart controller" : root.state.page == Page.verified ? "Update verified" : "Update stopped";
+    forward-focus: primary;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 66px; background: #fffefa;
+            HorizontalLayout {
+                padding-left: 24px; padding-right: 20px; spacing: 12px;
+                Rectangle { width: 32px; height: 32px; vertical-stretch: 0; border-radius: 9px; background: #2c4a36;
+                    Text { text: "g·"; color: #eef3de; font-size: 26px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Text { text: "GuliKit updater"; color: #24382f; font-size: 15px; font-weight: 600; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+                Rectangle { width: 54px; height: 23px; vertical-stretch: 0; border-radius: 4px; background: #e8eddf;
+                    Text { text: root.demo-mode ? "DEMO" : "NS39"; color: #526840; font-size: 10px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                ActionButton { text: "?"; min-width: 34px; quiet: true; accessible-label: "Connection help"; enabled: root.state.can-troubleshoot; clicked => { help.show(); } }
+            }
+        }
+        Rectangle { height: 1px; background: #dfe5d9; }
+        HorizontalLayout {
+            spacing: 0px;
+            Rectangle {
+                width: root.sidebar-width; background: #f0f3eb;
+                VerticalLayout {
+                    padding: 24px; spacing: 10px;
+                    HorizontalLayout {
+                        Label { text: root.state.identity-known ? "CONTROLLER" : "EXPECTED CONTROLLER"; font-size: 10px; }
+                        Rectangle { width: 6px; height: 6px; vertical-stretch: 0; border-radius: 3px; background: root.state.connected ? #5a824c : #99a48f; }
+                    }
+                    Image { source: @image-url("assets/controller.svg"); height: 130px; image-fit: contain; opacity: root.state.connected ? 1 : 0.45; accessible-label: "KK3 Max controller illustration"; }
+                    Text { text: "KK3 Max"; color: #293e2d; font-size: 25px; font-weight: 600; horizontal-alignment: center; }
+                    Label { text: "GuliKit · NS39"; horizontal-alignment: center; }
+                    Label { text: !root.state.connected ? "Not connected" : !root.state.identity-known ? "Identity unknown" : root.state.page == Page.restart ? "Restart pending" : "Controller inspected"; horizontal-alignment: center; color: #526c42; }
+                    Rectangle { min-height: 12px; vertical-stretch: 1; background: transparent; }
+                    ActionButton { text: "Main firmware"; detail: root.state.main-version; selected: !root.state.bluetooth; quiet: root.state.bluetooth; enabled: root.state.can-switch-component; horizontal-stretch: 1; clicked => { root.select-component(false); } }
+                    ActionButton { text: "Bluetooth firmware"; detail: root.state.bt-version; selected: root.state.bluetooth; quiet: !root.state.bluetooth; enabled: root.state.can-switch-component; horizontal-stretch: 1; clicked => { root.select-component(true); } }
+                    Rectangle { height: 12px; background: transparent; }
+                }
+            }
+            Rectangle { width: 1px; background: #dfe5d9; }
+            Rectangle {
+                background: #fbfcf8;
+                VerticalLayout {
+                    padding: 30px; spacing: 18px;
+                    procedure-reminder := Notice {
+                        warning: true;
+                        text: "Main and Bluetooth use different update and restart procedures.";
+                        accessible-role: text; accessible-label: self.text;
+                        vertical-stretch: 0;
+                    }
+                    Text { text: root.screen-title; font-size: 28px; font-weight: 600; color: #24382f; wrap: word-wrap; vertical-stretch: 0; accessible-role: text; accessible-live-region: polite; }
+                    ScrollView {
+                        min-height: 0px; vertical-stretch: 1;
+                        content-width: self.width;
+                        horizontal-scrollbar-policy: always-off;
+                        VerticalLayout {
+                            spacing: 20px; alignment: start;
+                    if root.state.page == Page.connect || root.state.page == Page.ready || root.state.page == Page.restart || root.state.page == Page.failed: VerticalLayout {
+                        spacing: 8px;
+                        ActionButton {
+                            text: (root.model-confirmed ? "☑ " : "☐ ") + "I checked the NS39 label and Max controls";
+                            accessible-label: "I checked the NS39 label and Max controls";
+                            accessible-role: checkbox; accessible-checked: root.model-confirmed;
+                            horizontal-stretch: 1; enabled: !root.state.busy;
+                            clicked => { root.model-confirmed = !root.model-confirmed; root.confirm-model(root.model-confirmed); }
+                        }
+                        if root.state.page == Page.restart: ActionButton {
+                            text: (root.same-controller ? "☑ " : "☐ ") + "I reconnected the same controller";
+                            accessible-label: "I reconnected the same controller";
+                            accessible-role: checkbox; accessible-checked: root.same-controller;
+                            horizontal-stretch: 1; enabled: !root.state.busy;
+                            clicked => { root.same-controller = !root.same-controller; root.confirm-same(root.same-controller); }
+                        }
+                    }
+                    if root.state.page == Page.connect && root.state.can-troubleshoot: VerticalLayout {
+                        spacing: 12px;
+                        Label { text: "To switch modes: Mode off → normal on, then off again."; }
+                        Label { text: "Start with the controller off and connect USB."; }
+                        ModeInstruction { bluetooth: root.state.bluetooth; }
+                        ModeInstruction { bluetooth: root.state.bluetooth; keep-held: true; }
+                        RightmostA { }
+                        ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
+                    }
+                    if root.state.page == Page.ready: VerticalLayout {
+                        spacing: 16px;
+                        Rectangle {
+                            background: #fffefa; border-width: 1px; border-color: #d9e1d3; border-radius: 8px;
+                            VerticalLayout {
+                                spacing: 0px;
+                                HorizontalLayout {
+                                    padding: 22px;
+                                    VerticalLayout { spacing: 8px; Label { text: "INSTALLED"; font-size: 10px; } Text { text: root.state.installed; color: #293e2d; font-size: 32px; font-weight: 500; } }
+                                    Text { text: "→"; color: #8d9b80; font-size: 23px; horizontal-alignment: center; vertical-alignment: center; }
+                                    VerticalLayout { spacing: 8px; Label { text: "SELECTED"; font-size: 10px; horizontal-alignment: right; } Text { text: root.state.target; color: #416c37; font-size: 32px; font-weight: 500; horizontal-alignment: right; } }
+                                }
+                                Rectangle { height: 1px; background: #e0e6d9; }
+                                HorizontalLayout { padding: 17px; spacing: 10px;
+                                    Text { text: "▤"; font-size: 19px; color: #718464; horizontal-stretch: 0; vertical-alignment: center; }
+                                    Label { text: root.state.filename; font-size: 12px; wrap: char-wrap; min-width: 0px; }
+                                }
+                            }
+                        }
+                        Notice { text: root.state.notice; warning: root.state.warning; }
+                        ActionButton { text: (root.details-open ? "▾ " : "▸ ") + "Package details"; quiet: true; clicked => { root.details-open = !root.details-open; } }
+                        ActionButton { text: "Inspect again"; quiet: true; enabled: !root.state.busy && root.model-confirmed; clicked => { root.inspect-controller(); } }
+                        if root.details-open: Label { text: (root.demo-mode ? "Sample package · not read from disk" : "Reviewed release · not a publisher signature") + "\nPayload: " + root.state.payload + "\nSHA-256: " + root.state.digest; font-size: 12px; wrap: char-wrap; }
+                    }
+                    if root.state.page == Page.writing: VerticalLayout {
+                        spacing: 18px;
+                        Rectangle {
+                            background: #fffefa; border-width: 1px; border-color: #d9e1d3; border-radius: 8px;
+                            VerticalLayout {
+                                padding: 24px; spacing: 16px;
+                                HorizontalLayout { Text { text: root.state.component-name + " " + root.state.target; color: #354e30; font-size: 14px; vertical-alignment: center; } Text { text: round(root.state.progress * 100) + "%"; font-size: 27px; color: #416c37; horizontal-alignment: right; } }
+                                Rectangle { height: 7px; background: #e5ecdc; border-radius: 4px;
+                                    Rectangle { width: parent.width * root.state.progress; background: #668c4f; border-radius: 4px; }
+                                    accessible-role: progress-indicator; accessible-label: "Firmware transfer"; accessible-value-minimum: 0; accessible-value-maximum: 100; accessible-value: round(root.state.progress * 100);
+                                }
+                                Label { text: root.state.transfer-label; font-size: 12px; }
+                                Label { text: "✓  Package checked"; color: #5c7549; }
+                                Text { text: "●  Writing firmware"; color: #355b30; font-size: 14px; font-weight: 600; }
+                                Label { text: "○  Restart & verify"; }
+                            }
+                        }
+                        Notice { text: "Keep USB connected."; }
+                    }
+                    if root.state.page == Page.restart: VerticalLayout {
+                        spacing: 12px;
+                        Label { text: root.state.bluetooth ? "After completion, power off and on normally." : "Wait for automatic power-off and for the GuliKit drive to disappear. Then turn on normally."; }
+                        Label { text: "For fresh readback, turn off and re-enter this component’s update mode:"; }
+                        ModeInstruction { bluetooth: root.state.bluetooth; }
+                        ModeInstruction { bluetooth: root.state.bluetooth; keep-held: true; }
+                        RightmostA { }
+                        Notice { text: root.state.notice; warning: root.state.warning; }
+                    }
+                    if root.state.page == Page.verified: VerticalLayout {
+                        spacing: 18px;
+                        Text { text: "✓"; font-size: 38px; color: #628547; }
+                        Rectangle {
+                            background: #f2f7ea; border-color: #d4e0c9; border-width: 1px; border-radius: 7px;
+                            HorizontalLayout { padding: 21px; spacing: 14px;
+                                VerticalLayout { Text { text: root.state.component-name; color: #3e5c32; font-size: 15px; font-weight: 600; } Label { text: "Confirmed after restart"; font-size: 12px; } }
+                                Text { text: root.state.target; color: #416c37; font-size: 30px; horizontal-alignment: right; }
+                            }
+                        }
+                        Label { text: "You can disconnect."; }
+                    }
+                    if root.state.page == Page.failed: VerticalLayout {
+                        spacing: 20px;
+                        Text { text: "!"; font-size: 36px; color: #92662c; }
+                        Notice { text: root.state.error; warning: true; }
+                        if root.state.can-troubleshoot: Label { text: "Check the connection before continuing."; }
+                        if !root.state.can-troubleshoot: Label { text: "Keep the controller connected and unchanged."; }
+                        ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
+                    }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 16px;
+                        if root.state.page == Page.ready: ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
+                        if root.state.page == Page.writing: ActionButton { text: "Cancel"; quiet: true; clicked => { root.cancel-operation(); } }
+                        if root.state.page == Page.failed: ActionButton { text: "View log"; quiet: true; clicked => { root.log-open = true; } }
+                        if root.state.page == Page.connect || root.state.page == Page.restart: ActionButton { text: "Connection help"; quiet: true; enabled: root.state.can-troubleshoot; clicked => { help.show(); } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                        primary := ActionButton {
+                            visible: root.state.page != Page.writing;
+                            primary: true;
+                            enabled: root.primary-enabled;
+                            text: root.primary-label;
+                            clicked => { root.primary-action(); }
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: #dfe5d9; }
+        Rectangle {
+            height: 48px; background: #f8faf3;
+            HorizontalLayout {
+                padding-left: 20px; padding-right: 14px; spacing: 12px;
+                Label { text: root.demo-mode ? "DEMO · no device access" : "KK3 Max · NS39"; font-size: 11px; vertical-alignment: center; horizontal-stretch: 0; }
+                Label { text: root.state.status; font-size: 11px; vertical-alignment: center; }
+                Rectangle { background: transparent; horizontal-stretch: 1; }
+                if root.demo-mode: ActionButton { text: "Demo…"; quiet: true; enabled: !root.state.busy; clicked => { scenarios.show(); } }
+                if !root.demo-mode: ActionButton { text: "Open record…"; quiet: true; enabled: root.state.can-open-attempt; clicked => { root.open-attempt(); } }
+                ActionButton { text: root.log-open ? "Close log" : "Log"; quiet: true; clicked => { root.log-open = !root.log-open; } }
+            }
+        }
+    }
+    if root.log-open: Rectangle {
+        x: root.sidebar-width + 1px; y: root.height - 295px;
+        width: root.width - root.sidebar-width - 1px; height: 246px;
+        background: #f4f8ed; border-width: 1px; border-color: #ccd9bf;
+        VerticalLayout {
+            padding: 20px; spacing: 10px;
+            HorizontalLayout { Text { text: "Activity log"; color: #36532e; font-weight: 600; } ActionButton { text: "Copy"; quiet: true; clicked => { log-text.select-all(); log-text.copy(); } } ActionButton { text: "Close"; quiet: true; clicked => { root.log-open = false; } } }
+            ScrollView {
+                content-width: self.width;
+                horizontal-scrollbar-policy: always-off;
+                VerticalLayout {
+                    log-text := TextInput {
+                        text: root.state.log; read-only: true; single-line: false;
+                        font-size: 12px; wrap: word-wrap; color: #334d32;
+                        selection-background-color: #cdddc1; selection-foreground-color: #24382f;
+                    }
+                }
+            }
+        }
+    }
+    files := PopupWindow {
+        close-policy: close-on-click-outside;
+        x: (root.width - self.width) / 2; y: (root.height - self.height) / 2; width: 480px; height: 330px;
+        Rectangle { background: #fbfcf6; border-color: #c9d7bd; border-width: 1px; border-radius: 10px; }
+        VerticalLayout {
+            padding: 26px; spacing: 14px;
+            Text { text: "Choose sample file"; color: #2d452d; font-size: 23px; font-weight: 600; }
+            Label { text: "Demo files only"; }
+            ActionButton { text: root.state.bluetooth ? "NS39 · Bluetooth 5.07" : "NS39 · Main 5.9"; horizontal-stretch: 1; clicked => { root.select-package(0); files.close(); } }
+            ActionButton { text: "NS38 · wrong model"; horizontal-stretch: 1; clicked => { root.select-package(1); files.close(); } }
+            ActionButton { text: "Wrong component"; horizontal-stretch: 1; clicked => { root.select-package(2); files.close(); } }
+            ActionButton { text: "Long filename"; horizontal-stretch: 1; clicked => { root.select-package(3); files.close(); } }
+        }
+    }
+    help := PopupWindow {
+        close-policy: close-on-click-outside;
+        x: (root.width - self.width) / 2; y: (root.height - self.height) / 2; width: 440px; height: 470px;
+        Rectangle { background: #fbfcf6; border-color: #c9d7bd; border-width: 1px; border-radius: 10px; }
+        VerticalLayout { padding: 24px; spacing: 14px;
+            Text { text: "Connection help"; color: #2d452d; font-size: 24px; font-weight: 600; }
+            ScrollView {
+                content-width: self.width;
+                horizontal-scrollbar-policy: always-off;
+                VerticalLayout { spacing: 12px;
+                    if !root.state.can-troubleshoot: Label { text: "Keep the controller connected and unchanged."; }
+                    if root.state.can-troubleshoot: VerticalLayout { spacing: 12px;
+                    Label { text: "Main and Bluetooth use different procedures. Start off, with USB connected."; }
+                    Label { text: "Main firmware"; }
+                    ModeInstruction { bluetooth: false; }
+                    ModeInstruction { bluetooth: false; keep-held: true; }
+                    Label { text: "Bluetooth firmware"; }
+                    ModeInstruction { bluetooth: true; }
+                    ModeInstruction { bluetooth: true; keep-held: true; }
+                    RightmostA { }
+                    Label { text: "Switch modes: Mode off → normal on, then off again."; }
+                    Label { text: "Main powers off automatically; then turn on normally. Bluetooth needs normal power off and on after completion."; }
+                    }
+                }
+            }
+            ActionButton { text: "Done"; primary: true; clicked => { help.close(); } }
+        }
+    }
+    scenarios := PopupWindow {
+        close-policy: close-on-click-outside;
+        x: root.width - self.width - 16px; y: root.height - self.height - 54px; width: 350px; height: 480px;
+        Rectangle { background: #fbfcf6; border-color: #c9d7bd; border-width: 1px; border-radius: 9px; }
+        VerticalLayout { padding: 16px; spacing: 4px;
+            Text { text: "Demo scenario"; color: #2d452d; font-size: 21px; font-weight: 600; }
+            for scenario[index] in ["Normal device", "Already current", "Newer version", "Identity failure", "Transfer failure", "Verification failure", "Unknown version"]: ActionButton {
+                text: scenario; quiet: true; horizontal-stretch: 1;
+                clicked => { root.scenario-selected(index); scenarios.close(); }
+            }
+        }
+    }
+}

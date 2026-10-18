@@ -5,7 +5,8 @@
     toolchainFile = ./rust-toolchain.toml;
   };
 
-  packages = with pkgs; [ cargo-nextest python3 uv ];
+  packages = with pkgs; [ cargo-nextest python3 uv ]
+    ++ lib.optionals stdenv.hostPlatform.isLinux [ pkg-config fontconfig ];
 
   tasks."check:all".exec = ''
     set -euo pipefail
