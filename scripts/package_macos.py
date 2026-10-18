@@ -87,7 +87,18 @@ def archive(app, path):
     run("/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, path)
 
 
-def release(app, output, name, identity, profile, keychain):
+def release(
+    app,
+    output,
+    name,
+    identity,
+    profile,
+    keychain,
+    *,
+    notary_key=None,
+    key_id=None,
+    issuer=None,
+):
     final = output / f"{name}.zip"
     if final.exists():
         raise FileExistsError(final)
@@ -98,9 +109,18 @@ def release(app, output, name, identity, profile, keychain):
         "/usr/bin/security", "find-identity", "-v", "-p", "codesigning", *security_args
     ):
         raise ValueError("Developer ID Application identity/private key is unavailable")
-    credentials = ["--keychain-profile", profile]
-    if keychain:
-        credentials += ["--keychain", keychain]
+    if notary_key:
+        if profile or not key_id:
+            raise ValueError("API-key notarization requires a key ID and no profile")
+        credentials = ["--key", notary_key, "--key-id", key_id]
+        if issuer:
+            credentials += ["--issuer", issuer]
+    else:
+        if not profile:
+            raise ValueError("A notarization profile or API key is required")
+        credentials = ["--keychain-profile", profile]
+        if keychain:
+            credentials += ["--keychain", keychain]
     sign(app, identity, keychain)
     smoke(app)
     submission = app.parent / "notary-submission.zip"
@@ -160,11 +180,24 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/distribution")
     parser.add_argument("--arch", choices=["arm64", "x86_64"], required=True)
     parser.add_argument("--identity", default=os.environ.get("MACOS_SIGNING_IDENTITY"))
-    parser.add_argument("--notary-profile")
+    auth = parser.add_mutually_exclusive_group()
+    auth.add_argument("--notary-profile")
+    auth.add_argument("--notary-key", default=os.environ.get("APPLE_NOTARY_KEY_PATH"))
+    parser.add_argument(
+        "--notary-key-id", default=os.environ.get("APPLE_NOTARY_KEY_ID")
+    )
+    parser.add_argument(
+        "--notary-issuer", default=os.environ.get("APPLE_NOTARY_ISSUER_ID")
+    )
     parser.add_argument("--keychain")
     args = parser.parse_args()
-    if args.mode == "release" and (not args.identity or not args.notary_profile):
-        parser.error("release requires --identity and --notary-profile")
+    if args.mode == "release":
+        if not args.identity or not (args.notary_profile or args.notary_key):
+            parser.error("release requires --identity and a notary profile or API key")
+        if args.notary_profile and args.notary_key:
+            parser.error("choose either a notary profile or API key")
+        if args.notary_key and not args.notary_key_id:
+            parser.error("--notary-key requires --notary-key-id")
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         parser.error("macOS bundle version must have three numeric components")
@@ -184,6 +217,9 @@ def main():
                 args.identity,
                 args.notary_profile,
                 args.keychain,
+                notary_key=args.notary_key,
+                key_id=args.notary_key_id,
+                issuer=args.notary_issuer,
             )
 
 

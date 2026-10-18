@@ -51,6 +51,17 @@ and optionally `--keychain` after storing notarization credentials with
 `xcrun notarytool store-credentials`. The bundled CLI is at
 `GuliKit Updater.app/Contents/Helpers/gulikit-updater`.
 
+The local release command also accepts an existing App Store Connect API key,
+including one materialized as a temporary file by SecretSpec. Supply
+`--notary-key PATH --notary-key-id ID` and, for a team key, `--notary-issuer ID`
+instead of `--notary-profile`. The equivalent environment names are
+`APPLE_NOTARY_KEY_PATH`, `APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER_ID`.
+Have the existing secrets loader inject them only into the packaging process;
+never export private-key contents to the terminal or copy them into the repository.
+This path uses the API key directly for submission and log retrieval without
+storing another notarization password/profile. Developer ID signing still uses
+the selected signing identity and optional keychain.
+
 Windows builds use the MSVC x64 target with `RUSTFLAGS=-C target-feature=+crt-static`.
 In a Visual Studio developer PowerShell:
 

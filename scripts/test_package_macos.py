@@ -90,12 +90,17 @@ class MacPackagingTests(unittest.TestCase):
     def test_failed_notarytool_retains_rejected_submission_log(self):
         self.check_rejected_notarization(nonzero_exit=True)
 
-    def check_rejected_notarization(self, nonzero_exit):
+    def test_api_key_is_used_for_submission_and_rejection_log(self):
+        self.check_rejected_notarization(nonzero_exit=False, api_key=True)
+
+    def check_rejected_notarization(self, nonzero_exit, api_key=False):
         app = self.stage()
         identity = "Developer ID Application: Example (TEAM)"
         real_run = package.run
+        calls = []
 
         def fake_apple_service(*args):
+            calls.append(args)
             if args[0] == "/usr/bin/security":
                 return f'1) HASH "{identity}"\n'
             if args[0:3] == ("/usr/bin/xcrun", "notarytool", "submit"):
@@ -112,11 +117,37 @@ class MacPackagingTests(unittest.TestCase):
             patch.object(package, "sign"),
             self.assertRaisesRegex(ValueError, "not accepted"),
         ):
-            package.release(app, self.root, "release", identity, "profile", None)
+            package.release(
+                app,
+                self.root,
+                "release",
+                identity,
+                None if api_key else "profile",
+                None,
+                **(
+                    {
+                        "notary_key": "/private/temporary-notary-key.p8",
+                        "key_id": "KEYID",
+                        "issuer": "ISSUER",
+                    }
+                    if api_key
+                    else {}
+                ),
+            )
         self.assertFalse((self.root / "release.zip").exists())
         self.assertIn(
             "signature rejected", (self.root / "release-notary-log.json").read_text()
         )
+        if api_key:
+            requests = [
+                call for call in calls if call[:2] == ("/usr/bin/xcrun", "notarytool")
+            ]
+            self.assertEqual(len(requests), 2)
+            for request in requests:
+                self.assertIn("/private/temporary-notary-key.p8", request)
+                self.assertIn("KEYID", request)
+                self.assertIn("ISSUER", request)
+                self.assertNotIn("--keychain-profile", request)
 
 
 if __name__ == "__main__":
