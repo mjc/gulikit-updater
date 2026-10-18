@@ -274,6 +274,7 @@ fn catalog_controls_render_and_select_reviewed_historical_release_without_contro
         &app.ui,
         "Catalog hashes check consistency with supplied metadata; publisher authenticity is not established.",
     );
+    scroll_catalog(&app.ui, -150.);
     element(&app.ui, "Parser: kk3_bluetooth_pe_v1");
     scroll_catalog(&app.ui, 1000.);
     click(&app.ui, "Import downloaded ZIP…");
