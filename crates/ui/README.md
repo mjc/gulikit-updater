@@ -82,6 +82,11 @@ xvfb-run -a env GULIKIT_PROFILE_LIFECYCLE_MS=1000 pyroclast memory --out artifac
 
 Keep Linux virtual-display results separate from native macOS measurements.
 
+The controller illustration uses a pre-rendered image through 2× display scale
+and the vector source above that scale. Regenerate the image from its retained
+SVG source with `resvg --height 260 crates/ui/ui/assets/controller.svg crates/ui/ui/assets/controller@2x.png`
+inside the profiling environment. Button icons remain vector assets.
+
 ```sh
 devenv shell -- cargo test -p gulikit-ui
 devenv tasks run check:all

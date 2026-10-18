@@ -165,7 +165,7 @@ export component AppWindow inherits Window {
                         Label { text: root.state.identity-known ? "CONTROLLER" : "EXPECTED CONTROLLER"; font-size: 10px; }
                         Rectangle { width: 6px; height: 6px; vertical-stretch: 0; border-radius: 3px; background: root.state.connected ? #5a824c : #99a48f; }
                     }
-                    Image { source: @image-url("assets/controller@2x.png"); height: 130px; image-fit: contain; opacity: root.state.connected ? 1 : 0.45; accessible-label: "KK3 Max controller illustration"; }
+                    Image { source: 1px > 2phx ? @image-url("assets/controller.svg") : @image-url("assets/controller@2x.png"); height: 130px; image-fit: contain; opacity: root.state.connected ? 1 : 0.45; accessible-label: "KK3 Max controller illustration"; }
                     Text { text: "KK3 Max"; color: #293e2d; font-size: 25px; font-weight: 600; horizontal-alignment: center; }
                     Label { text: "GuliKit · NS39"; horizontal-alignment: center; }
                     Label { text: !root.state.connected ? "Not connected" : !root.state.identity-known ? "Identity unknown" : root.state.page == Page.restart ? "Restart pending" : "Controller inspected"; horizontal-alignment: center; color: #526c42; }
