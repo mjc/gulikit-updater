@@ -28,6 +28,7 @@ pub enum Request {
         record: PathBuf,
         confirm_ns39: bool,
         confirm_same_controller: bool,
+        expected_receipt: Option<ReceiptIdentity>,
     },
 }
 
@@ -67,6 +68,7 @@ pub struct Inspection {
 pub struct Attempt {
     pub event: &'static str,
     pub schema_version: u8,
+    pub record_finalized: bool,
     pub target: NativeCandidate,
     pub package: PackageInfo,
     pub transfer: TransferRecord,
@@ -110,6 +112,15 @@ pub enum Reply {
     Readback(Readback),
 }
 
+/// Receipt fields presented before the user confirmed a verification request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptIdentity {
+    pub component: Component,
+    pub outcome: Outcome,
+    pub generation: u64,
+    pub expected_version: String,
+}
+
 /// A receipt can only request a fresh observation; it cannot authorize a transfer.
 #[derive(Debug)]
 pub struct PriorAttempt {
@@ -121,9 +132,36 @@ pub struct PriorAttempt {
 }
 
 impl PriorAttempt {
+    pub fn identity(&self) -> ReceiptIdentity {
+        ReceiptIdentity {
+            component: self.component,
+            outcome: self.outcome,
+            generation: self.generation,
+            expected_version: self.expected_version.clone(),
+        }
+    }
+
+    /// Refuse a replaced receipt before opening a controller session.
+    pub fn require_identity(&self, expected: &ReceiptIdentity) -> Result<(), String> {
+        if self.component == expected.component
+            && self.outcome == expected.outcome
+            && self.generation == expected.generation
+            && self.expected_version == expected.expected_version
+        {
+            Ok(())
+        } else {
+            Err("Attempt record changed since selection. Keep the controller unchanged; verification requires the original record.".into())
+        }
+    }
+
     /// Check the receipt before acquiring a new controller session.
     pub fn require_verifiable(&self) -> Result<(), String> {
-        if self.outcome.awaits_restart_verification() {
+        if self.outcome.awaits_restart_verification()
+            && self
+                .record
+                .get("record_finalized")
+                .is_none_or(|value| value.as_bool() == Some(true))
+        {
             Ok(())
         } else {
             Err("This receipt does not safely await restart verification. Keep a partial or unknown controller connected and unchanged; no new device session or reset is permitted by this receipt.".into())
@@ -132,20 +170,39 @@ impl PriorAttempt {
 
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
-        let records: Vec<serde_json::Value> = text
-            .lines()
-            .map(serde_json::from_str)
-            .collect::<Result<_, _>>()
-            .map_err(|e| e.to_string())?;
-        let prior = records
-            .into_iter()
-            .last()
+        // Validate every record, retaining only the final one for verification.
+        let mut prior: Option<serde_json::Value> = None;
+        let mut acknowledged = false;
+        for line in text.lines() {
+            let record: serde_json::Value =
+                serde_json::from_str(line).map_err(|e| e.to_string())?;
+            if record["event"] == "record_finalized" {
+                let result = prior
+                    .as_mut()
+                    .ok_or("Finalization has no preceding result")?;
+                acknowledge_synced_result(result, &record, text.ends_with('\n'))?;
+                acknowledged = true;
+            } else {
+                prior = Some(record);
+                acknowledged = false;
+            }
+        }
+        // Older receipts set `record_finalized` to `true` before syncing.
+        // That flag cannot prove finalization. Receipts without the field
+        // retain their existing compatibility policy.
+        if !acknowledged
+            && let Some(result) = prior.as_mut()
+            && result.get("record_finalized").is_some()
+        {
+            result["record_finalized"] = false.into();
+        }
+        let prior = prior
             .filter(|v| v["event"] == "attempt_result")
             .ok_or(
                 "Attempt has no complete result. Keep the controller connected and unchanged; a missing final receipt does not establish that no firmware was submitted. Do not probe or reset until recovery is separately qualified.",
             )?;
         let (component, expected_version) = native::attempt_target(&prior)?;
-        let outcome = serde_json::from_value(prior["transfer"]["outcome"].clone())
+        let outcome = serde::Deserialize::deserialize(&prior["transfer"]["outcome"])
             .map_err(|e| e.to_string())?;
         let generation = prior["target"]["generation"]
             .as_u64()
@@ -158,6 +215,27 @@ impl PriorAttempt {
             expected_version,
         })
     }
+}
+
+fn acknowledge_synced_result(
+    result: &mut serde_json::Value,
+    acknowledgement: &serde_json::Value,
+    complete_line: bool,
+) -> Result<(), String> {
+    let valid_acknowledgement = acknowledgement
+        .as_object()
+        .is_some_and(|object| object.len() == 3)
+        && acknowledgement["schema_version"].as_u64() == Some(1)
+        && acknowledgement["result_event"] == "attempt_result";
+    if !complete_line
+        || !valid_acknowledgement
+        || result["event"] != "attempt_result"
+        || result["record_finalized"].as_bool() != Some(false)
+    {
+        return Err("Invalid or incomplete result finalization acknowledgement".into());
+    }
+    result["record_finalized"] = true.into();
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -204,58 +282,84 @@ impl From<gulikit_platform::acquisition::AcquisitionError> for ApplicationError 
 }
 mod native;
 
-/// Execute a desktop operation through the shared component transaction and
-/// native ownership boundary. Firmware installation requires fresh readback.
+/// Run a desktop request through shared transactions and native resource ownership.
+/// Installation is verified only by a fresh version readback.
 pub fn execute(
     request: Request,
     cancelled: &mut dyn FnMut() -> bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Reply, String> {
-    if let Request::Update { .. } = &request {
-        return Err("Desktop firmware writes are not available until a verified rollback path and desktop update supervision are ready.".into());
-    }
-    let context = match &request {
-        Request::Verify {
-            attempt,
-            confirm_same_controller,
-            ..
-        } => Some((attempt.clone(), *confirm_same_controller)),
-        _ => None,
-    };
-    let component = match &request {
-        Request::Probe { component, .. } => Some(*component),
-        _ => None,
-    };
-    let mut value = execute_raw(request, cancelled, progress)
+    let reply = ReplyContext::for_request(&request)?;
+    let value = execute_raw(request, cancelled, progress)
         .map_err(|error| format!("{}; cleanup={:?}", error.message, error.cleanup_errors))?;
-    if value.get("discovery").is_some() {
-        return Ok(Reply::Devices(Devices {
-            discovery: field(&mut value, "discovery")?,
-            coverage: "Observed GuliKit update profiles and correlated GuliKit volumes. Put only one device in update mode; future unknown identities may not be recognized.",
-        }));
+    reply.decode(value)
+}
+
+/// Retain only the request context needed to interpret a native response.
+enum ReplyContext {
+    Devices,
+    Inspection(Component),
+    Readback {
+        source_attempt: PathBuf,
+        confirmed: bool,
+    },
+}
+
+impl ReplyContext {
+    fn for_request(request: &Request) -> Result<Self, String> {
+        match request {
+            Request::Devices => Ok(Self::Devices),
+            Request::Probe { component, .. } => Ok(Self::Inspection(*component)),
+            Request::Verify { attempt, confirm_same_controller, .. } => Ok(Self::Readback {
+                source_attempt: attempt.clone(),
+                confirmed: *confirm_same_controller,
+            }),
+            Request::Update { .. } => Err("Desktop firmware writes are not available until a verified rollback path and desktop update supervision are ready.".into()),
+        }
     }
-    if let Some(component) = component {
-        let raw: Vec<u8> = field(&mut value, "raw_version_bytes")?;
-        let decision = match component {
-            Component::Main => gulikit_core::version::MainVersion::parse(&raw)
-                .map_err(|error| error.to_string())?
-                .decision(),
-            Component::Bluetooth => gulikit_core::version::bluetooth_info(&raw)
-                .map_err(|error| error.to_string())?
-                .decision(),
-        };
-        return Ok(Reply::Inspection(Inspection {
-            component,
-            installed_version: field(&mut value, "installed_version")?,
-            decision,
-            raw_version_bytes: raw,
-            qualified_bot_lun: field(&mut value, "qualified_bot_lun")?,
-            cleanup_errors: field(&mut value, "cleanup_errors")?,
-            target: field(&mut value, "target")?,
-            identity_provenance: "user-confirmed NS39; observed update profile",
-        }));
+
+    fn decode(self, mut value: serde_json::Value) -> Result<Reply, String> {
+        match self {
+            Self::Devices => Ok(Reply::Devices(Devices {
+                discovery: field(&mut value, "discovery")?,
+                coverage: "Observed GuliKit update profiles and correlated GuliKit volumes. Put only one device in update mode; future unknown identities may not be recognized.",
+            })),
+            Self::Inspection(component) => decode_inspection(value, component),
+            Self::Readback {
+                source_attempt,
+                confirmed,
+            } => decode_readback(value, source_attempt, confirmed),
+        }
     }
-    let (source_attempt, confirmed) = context.ok_or("Unexpected application operation result")?;
+}
+
+fn decode_inspection(mut value: serde_json::Value, component: Component) -> Result<Reply, String> {
+    let raw: Vec<u8> = field(&mut value, "raw_version_bytes")?;
+    let decision = match component {
+        Component::Main => gulikit_core::version::MainVersion::parse(&raw)
+            .map_err(|error| error.to_string())?
+            .decision(),
+        Component::Bluetooth => gulikit_core::version::bluetooth_info(&raw)
+            .map_err(|error| error.to_string())?
+            .decision(),
+    };
+    Ok(Reply::Inspection(Inspection {
+        component,
+        installed_version: field(&mut value, "installed_version")?,
+        decision,
+        raw_version_bytes: raw,
+        qualified_bot_lun: field(&mut value, "qualified_bot_lun")?,
+        cleanup_errors: field(&mut value, "cleanup_errors")?,
+        target: field(&mut value, "target")?,
+        identity_provenance: "user-confirmed NS39; observed update profile",
+    }))
+}
+
+fn decode_readback(
+    mut value: serde_json::Value,
+    source_attempt: PathBuf,
+    confirmed: bool,
+) -> Result<Reply, String> {
     Ok(Reply::Readback(Readback {
         event: "verification_result",
         schema_version: 1,
@@ -268,6 +372,7 @@ pub fn execute(
         transfer: field(&mut value, "transfer")?,
     }))
 }
+
 fn field<T: serde::de::DeserializeOwned>(
     value: &mut serde_json::Value,
     name: &str,
@@ -454,6 +559,42 @@ mod tests {
     }
 
     #[test]
+    fn verification_receipt_identity_rejects_each_changed_confirmation_field() {
+        let record = serde_json::json!({
+            "event":"attempt_result", "package":gulikit_core::package::catalog()[2],
+            "transfer":{"outcome":"transfer_completed_awaiting_verification"},
+            "target":{"generation":7}
+        });
+        let prior = PriorAttempt::parse(&serde_json::to_vec(&record).unwrap()).unwrap();
+        prior.require_verifiable().unwrap();
+        let identity = prior.identity();
+        prior.require_identity(&identity).unwrap();
+        for changed in [
+            ReceiptIdentity {
+                component: Component::Main,
+                ..identity.clone()
+            },
+            ReceiptIdentity {
+                outcome: Outcome::TransferSubmittedPendingCompletion,
+                ..identity.clone()
+            },
+            ReceiptIdentity {
+                generation: 8,
+                ..identity.clone()
+            },
+            ReceiptIdentity {
+                expected_version: "5.07".into(),
+                ..identity.clone()
+            },
+        ] {
+            assert_eq!(
+                prior.require_identity(&changed).unwrap_err(),
+                "Attempt record changed since selection. Keep the controller unchanged; verification requires the original record."
+            );
+        }
+    }
+
+    #[test]
     fn only_completed_or_pending_completion_receipts_allow_a_verification_session() {
         for outcome in [
             Outcome::Refused,
@@ -479,6 +620,125 @@ mod tests {
             );
             assert_eq!(prior.require_verifiable().is_ok(), expected, "{outcome:?}");
         }
+    }
+
+    #[test]
+    fn receipt_parsing_validates_all_records_and_requires_the_final_result() {
+        let result = serde_json::json!({
+            "event":"attempt_result", "package":gulikit_core::package::catalog()[2],
+            "transfer":{"outcome":"transfer_completed_awaiting_verification"},
+            "target":{"generation":42}
+        });
+        let result_text = serde_json::to_string(&result).unwrap();
+        let events = [
+            serde_json::json!({"event":"attempt_started"}),
+            serde_json::json!({"event":"command_result", "error":"line one\nline two — USB"}),
+        ];
+        let mut journal = String::new();
+        for event in events {
+            journal.push_str(&serde_json::to_string(&event).unwrap());
+            journal.push('\n');
+        }
+        journal.push_str(&result_text);
+        journal.push('\n');
+        let prior = PriorAttempt::parse(journal.as_bytes()).unwrap();
+        assert_eq!(prior.record, result);
+        assert_eq!(prior.generation, 42);
+        assert_eq!(
+            prior.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        for invalid in [
+            format!("invalid earlier record\n{result_text}\n"),
+            format!("{{\"value\":1e400}}\n{result_text}\n"),
+            format!("{{\"value\":\"\\ud800\"}}\n{result_text}\n"),
+            format!("{}0{}\n{result_text}\n", "[".repeat(129), "]".repeat(129)),
+            format!("{{\"event\":\"attempt_started\"}}\n\n{result_text}\n"),
+            format!("{journal}{{\"event\":\"command_result\"}}\n"),
+            format!("{journal}truncated final record"),
+            String::new(),
+        ] {
+            assert!(
+                PriorAttempt::parse(invalid.as_bytes()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicitly_unfinalized_receipts_cannot_request_verification() {
+        for marker in [
+            serde_json::json!(false),
+            serde_json::json!(null),
+            serde_json::json!("true"),
+        ] {
+            let record = serde_json::json!({"event":"attempt_result","record_finalized":marker,"package":gulikit_core::package::catalog()[2],"transfer":{"outcome":"transfer_completed_awaiting_verification"},"target":{"generation":7}});
+            let prior = PriorAttempt::parse(&serde_json::to_vec(&record).unwrap()).unwrap();
+            assert!(prior.require_verifiable().is_err());
+        }
+    }
+
+    #[test]
+    fn finalization_requires_a_complete_acknowledgement_after_the_synced_result() {
+        let mut record = serde_json::json!({
+            "event":"attempt_result", "record_finalized":true,
+            "package":gulikit_core::package::catalog()[2],
+            "transfer":{"outcome":"transfer_completed_awaiting_verification"},
+            "target":{"generation":7}
+        });
+        let unacknowledged = serde_json::to_string(&record).unwrap();
+        assert!(
+            PriorAttempt::parse(unacknowledged.as_bytes())
+                .unwrap()
+                .require_verifiable()
+                .is_err()
+        );
+        record["record_finalized"] = false.into();
+        let pending = serde_json::to_string(&record).unwrap();
+        let acknowledgement =
+            r#"{"event":"record_finalized","schema_version":1,"result_event":"attempt_result"}"#;
+        let complete = format!("{pending}\n{acknowledgement}\n");
+        let prior = PriorAttempt::parse(complete.as_bytes()).unwrap();
+        prior.require_verifiable().unwrap();
+        assert_eq!(prior.record["record_finalized"], true);
+        for invalid in [
+            format!("{pending}\n{acknowledgement}"),
+            format!("{pending}\n{{\"event\":\"command_result\"}}\n{acknowledgement}\n"),
+            format!("{pending}\n{acknowledgement}\n{acknowledgement}\n"),
+            format!("{unacknowledged}\n{acknowledgement}\n"),
+            complete.replace(
+                "\"result_event\":\"attempt_result\"",
+                "\"result_event\":\"verification_result\"",
+            ),
+            complete.replace("\"schema_version\":1", "\"schema_version\":2"),
+        ] {
+            assert!(
+                PriorAttempt::parse(invalid.as_bytes()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn finalized_host_receipt_reopens_for_the_original_release() {
+        let record = serde_json::json!({
+            "event":"attempt_result", "schema_version":1,
+            "package":gulikit_core::package::catalog()[2],
+            "transfer":{"outcome":"transfer_completed_awaiting_verification", "cleanup_errors":[]},
+            "target":{"generation":7}
+        });
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let result =
+            gulikit_platform::journal::finalize_record(&mut file.reopen().unwrap(), record);
+        assert_eq!(result["record_finalized"], true);
+        let prior = PriorAttempt::parse(&std::fs::read(file.path()).unwrap()).unwrap();
+        prior.require_verifiable().unwrap();
+        assert_eq!(prior.generation, 7);
+        assert_eq!(
+            prior.expected_version,
+            gulikit_core::package::catalog()[2].version
+        );
+        assert_eq!(prior.record, result);
     }
 
     #[test]

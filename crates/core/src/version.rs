@@ -38,6 +38,37 @@ fn decision<T: Ord>(current: T, target: T, policy: VersionPolicy) -> VersionDeci
     }
 }
 
+/// Compare canonical version text already obtained from a validated device read.
+pub(crate) fn release_decision(
+    component: crate::package::Component,
+    installed: &str,
+    target: &str,
+    policy: VersionPolicy,
+) -> Result<VersionDecision, UnknownVersion> {
+    let parts = |text: &str| -> Result<(u16, u16), UnknownVersion> {
+        let (major, minor) = text.split_once('.').ok_or(UnknownVersion)?;
+        let part = |value: &str| -> Result<u16, UnknownVersion> {
+            if !(1..=4).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(UnknownVersion);
+            }
+            value.parse().map_err(|_| UnknownVersion)
+        };
+        let value = (part(major)?, part(minor)?);
+        if component == crate::package::Component::Bluetooth
+            && (minor.len() != 2
+                || value
+                    .0
+                    .checked_mul(100)
+                    .and_then(|major| major.checked_add(value.1))
+                    .is_none())
+        {
+            return Err(UnknownVersion);
+        }
+        Ok(value)
+    };
+    Ok(decision(parts(installed)?, parts(target)?, policy))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MainVersion {
     major: u16,
@@ -51,7 +82,11 @@ impl MainVersion {
             return Err(UnknownVersion);
         }
         let text = std::str::from_utf8(bytes).map_err(|_| UnknownVersion)?;
-        if text.replace("\r\n", "").contains('\r') {
+        if text
+            .split('\r')
+            .skip(1)
+            .any(|suffix| !suffix.starts_with('\n'))
+        {
             return Err(UnknownVersion);
         }
         let mut website = false;

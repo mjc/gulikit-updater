@@ -61,11 +61,14 @@ impl Channel {
         Self::new(UnixStream::from(fd))
     }
     pub fn send(&mut self, message: &Message) -> Result<(), String> {
-        let body = serde_json::to_vec(message).map_err(|error| error.to_string())?;
-        if body.len() > LIMIT {
+        let mut frame = Vec::with_capacity(128);
+        frame.extend_from_slice(&[0; 4]);
+        serde_json::to_writer(&mut frame, message).map_err(|error| error.to_string())?;
+        let length = frame.len() - 4;
+        if length > LIMIT {
             return Err("Main worker message exceeds bound".into());
         }
-        let frame = [(body.len() as u32).to_le_bytes().as_slice(), &body].concat();
+        frame[..4].copy_from_slice(&(length as u32).to_le_bytes());
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut remaining = frame.as_slice();
         while !remaining.is_empty() {
@@ -608,6 +611,25 @@ mod tests {
             ));
         }
     }
+    #[test]
+    fn channel_sends_exact_length_prefixed_json_for_consecutive_messages() {
+        let (local, mut remote) = UnixStream::pair().unwrap();
+        let mut channel = Channel::new(local).unwrap();
+        for message in [
+            Message::Request(serde_json::json!({"payload":"µ\n\"".repeat(1024)})),
+            Message::Go,
+        ] {
+            let expected = serde_json::to_vec(&message).unwrap();
+            channel.send(&message).unwrap();
+            let mut prefix = [0; 4];
+            remote.read_exact(&mut prefix).unwrap();
+            assert_eq!(u32::from_le_bytes(prefix) as usize, expected.len());
+            let mut body = vec![0; expected.len()];
+            remote.read_exact(&mut body).unwrap();
+            assert_eq!(body, expected);
+        }
+    }
+
     #[test]
     fn channel_rejects_oversized_frames_and_incomplete_eof() {
         for bytes in [((LIMIT + 1) as u32).to_le_bytes().to_vec(), vec![1, 0]] {

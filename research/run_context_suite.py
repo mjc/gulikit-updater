@@ -21,31 +21,44 @@ def validate_result(x, case, failures):
     require(len(io) == (677 if case == 'expected_upgrade' else min(failures + 1, 10) if selected else 0), "Context invariant failed: len(io) == (677 if case == 'expected_upgrade' else min(")
     for e in io:
         require(e['cdb_len'] == 10 and e['timeout_s'] == 5, "Context invariant failed: e['cdb_len'] == 10 and e['timeout_s'] == 5")
-    f1 = [e for e in io if e['cdb_hex'].startswith('f1')]
-    for e in f1:
+    for e in io:
+        if not e['cdb_hex'].startswith('f1'):
+            continue
         require(e['cdb_hex'] == 'f10000000000a5a54500' and e['transfer_length'] == 20 and (e['direction'] == 1), "Context invariant failed: e['cdb_hex'] == 'f10000000000a5a54500' and e['transfer_")
     query = [e for e in events if e.get('ioctl') == '0x2d1400']
     require(len(query) == 1 and query[0]['input_bytes'] == '0000000000000000a5a5a5a5', "Context invariant failed: len(query) == 1 and query[0]['input_bytes'] == '0000000")
     if case == 'expected_upgrade':
-        require(x['write_count'] == 674 and x['streamed_length'] == 345088 and (x['streamed_sha256'] == '2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826'), "Context invariant failed: x['write_count'] == 674 and x['streamed_length'] == 345")
-        require(x['f2_count'] == 2 and x['ui_pump_count'] == 674 and (x['ui_update_count'] == 674), "Context invariant failed: x['f2_count'] == 2 and x['ui_pump_count'] == 674 and (x")
-        dialogs = [e['text'] for e in events if e.get('name') == 'MessageBoxW']
-        require(dialogs == ['Do you want to upgrade from ver:5.06 to ver:5.07?\n', 'Upgrade success!\n'], "Context invariant failed: dialogs == ['Do you want to upgrade from ver:5.06 to ve")
-        opcodes = [e['cdb_hex'][:2] for e in io]
-        require(opcodes[:3] == ['f1', 'f0', 'f2'] and opcodes[-1] == 'f2' and (opcodes.count('f0') == 674), "Context invariant failed: opcodes[:3] == ['f1', 'f0', 'f2'] and opcodes[-1] == 'f")
-        for e in io:
-            if e['cdb_hex'].startswith('f0'):
-                require(e['direction'] == 0 and e['transfer_length'] == 512, "Context invariant failed: e['direction'] == 0 and e['transfer_length'] == 512")
-            elif e['cdb_hex'].startswith('f2'):
-                require(e['direction'] == 1 and e['transfer_length'] == 20, "Context invariant failed: e['direction'] == 1 and e['transfer_length'] == 20")
+        validate_upgrade_trace(x, events, io)
     else:
         require(x['write_count'] == 0 and x['f2_count'] == 0, "Context invariant failed: x['write_count'] == 0 and x['f2_count'] == 0")
     if selected:
         require(x['stop_reason'] == 'function_return', "Context invariant failed: x['stop_reason'] == 'function_return'")
+    validate_worker_quiescence(x, events, io, selected, failures)
+
+def validate_upgrade_trace(x, events, io):
+    require(x['write_count'] == 674 and x['streamed_length'] == 345088 and (x['streamed_sha256'] == '2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826'), "Context invariant failed: x['write_count'] == 674 and x['streamed_length'] == 345")
+    require(x['f2_count'] == 2 and x['ui_pump_count'] == 674 and (x['ui_update_count'] == 674), "Context invariant failed: x['f2_count'] == 2 and x['ui_pump_count'] == 674 and (x")
+    dialogs = [e['text'] for e in events if e.get('name') == 'MessageBoxW']
+    require(dialogs == ['Do you want to upgrade from ver:5.06 to ver:5.07?\n', 'Upgrade success!\n'], "Context invariant failed: dialogs == ['Do you want to upgrade from ver:5.06 to ve")
+    opcodes = [e['cdb_hex'][:2] for e in io]
+    require(opcodes[:3] == ['f1', 'f0', 'f2'] and opcodes[-1] == 'f2' and (opcodes.count('f0') == 674), "Context invariant failed: opcodes[:3] == ['f1', 'f0', 'f2'] and opcodes[-1] == 'f")
+    write_index = 0
+    payload_offset = 0
+    for e in io:
+        if e['cdb_hex'].startswith('f0'):
+            require(e['direction'] == 0 and e['transfer_length'] == 512, "Context invariant failed: e['direction'] == 0 and e['transfer_length'] == 512")
+            require(e['write_index'] == write_index and e['payload_offset'] == payload_offset, "Context invariant failed: firmware write index or payload offset diverged")
+            write_index += 1
+            payload_offset += e['transfer_length']
+        elif e['cdb_hex'].startswith('f2'):
+            require(e['direction'] == 1 and e['transfer_length'] == 20, "Context invariant failed: e['direction'] == 1 and e['transfer_length'] == 20")
+
+def validate_worker_quiescence(x, events, io, selected, failures):
     worker = [e for e in events if e.get('phase') == 'worker_during_quiesce']
     require(not any((e['kind'] == 'actual_vendor_export' or e.get('name') == 'GetLogicalDrives' for e in worker)), "Context invariant failed: not any((e['kind'] == 'actual_vendor_export' or e.get('")
     sleeps = [e for e in events if e.get('name') == 'Sleep']
-    require(len([e for e in sleeps if e['milliseconds'] == 20]) == (min(failures, 9) if selected else 0), "Context invariant failed: len([e for e in sleeps if e['milliseconds'] == 20]) == ")
+    retry_sleeps = sum(e['milliseconds'] == 20 for e in sleeps)
+    require(retry_sleeps == (min(failures, 9) if selected else 0), "Context invariant failed: len([e for e in sleeps if e['milliseconds'] == 20]) == ")
     if selected:
         require(len(worker) == 2 and all((e.get('milliseconds') == 200 and e['discovery_flag'] == '00' for e in worker)), "Context invariant failed: len(worker) == 2 and all((e.get('milliseconds') == 200 ")
         require(any((e['milliseconds'] == 300 and e['discovery_flag'] == '00' for e in sleeps)), "Context invariant failed: any((e['milliseconds'] == 300 and e['discovery_flag'] =")

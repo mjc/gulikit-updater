@@ -4,6 +4,7 @@ MFC UI wrappers execute. Two static pure CRT text-format routines remain explici
 runtime boundaries, alongside Windows/CRT imported functions.
 """
 from pathlib import Path
+from collections import deque
 import argparse, hashlib, json, struct
 from emulate_update import require
 import pefile
@@ -21,6 +22,32 @@ def read_reference(path, size, digest, label):
         data = source.read(size + 1)
     require(len(data) == size and hashlib.sha256(data).hexdigest() == digest, f'not the reviewed {label}')
     return data
+
+def read_terminated_bytes(memory, address, terminator):
+    """Read complete code units, excluding the terminator, into a bytearray."""
+    result = bytearray()
+    unit_size = len(terminator)
+    while True:
+        unit = bytes(memory.mem_read(address + len(result), unit_size))
+        if unit == terminator:
+            return result
+        result.extend(unit)
+
+def convert_windows_text(memory, source, count, *, wide_input):
+    """Model the fixture's Latin-1/UTF-16 conversion and terminator rules."""
+    source_encoding = 'utf-16le' if wide_input else 'latin1'
+    target_encoding = 'latin1' if wide_input else 'utf-16le'
+    source_unit_size = 2 if wide_input else 1
+    terminated = count == 4294967295
+    if terminated:
+        terminator = b'\x00\x00' if wide_input else b'\x00'
+        raw = read_terminated_bytes(memory, source, terminator)
+    else:
+        raw = memory.mem_read(source, count * source_unit_size)
+    result = raw.decode(source_encoding).encode(target_encoding)
+    if terminated:
+        result += b'\x00' if wide_input else b'\x00\x00'
+    return result
 
 def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
     EXE, DLL, R = (Path(exe), Path(dll), Path(output))
@@ -49,16 +76,10 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
         return struct.unpack('<I', u.mem_read(a, 4))[0]
 
     def astr(a):
-        out = bytearray()
-        while (c := bytes(u.mem_read(a + len(out), 1)))[0]:
-            out += c
-        return bytes(out)
+        return bytes(read_terminated_bytes(u, a, b'\x00'))
 
     def wstr(a):
-        b = bytearray()
-        while (c := bytes(u.mem_read(a + len(b), 2))) != b'\x00\x00':
-            b += c
-        return b.decode('utf-16le')
+        return read_terminated_bytes(u, a, b'\x00\x00').decode('utf-16le')
     imports = {}
     offset = 0
     for module, pe in pes:
@@ -111,11 +132,13 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
     close_calls = 0
     stop_reason = ''
     flag_writes = []
-    recent = []
+    recent = deque(maxlen=30)
     pending_deadline = None
     worker_context = None
     worker_fs = 0
-    writes = []
+    write_count = 0
+    streamed_length = 0
+    streamed_digest = hashlib.sha256()
     f2_count = 0
     ui_pump_count = 0
     ui_update_count = 0
@@ -152,11 +175,56 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
         u.reg_write(UC_X86_REG_EIP, get(sp))
         u.reg_write(UC_X86_REG_ESP, sp + 4 + pop)
 
+    def emulate_device_control(args, event):
+        nonlocal io_calls, write_count, streamed_length, f2_count
+        h, code, inp, ni, out, no, returned, overlapped = args[:8]
+        event.update(handle=h, ioctl=hex(code), input_bytes=bytes(u.mem_read(inp, ni)).hex() if inp else None, input_length=ni, output_length=no, overlapped=overlapped)
+        value = 1
+        if code == 2954240:
+            data = descriptor()
+            u.mem_write(out, data)
+            put(returned, len(data))
+            event['synthetic_descriptor'] = data.hex()
+        elif code == 315412:
+            request = bytes(u.mem_read(inp, 44))
+            length = get(inp + 12)
+            buf = get(inp + 20)
+            cdb = request[28:28 + request[6]]
+            event.update(spt_length=int.from_bytes(request[:2], 'little'), path=request[3], target=request[4], lun=request[5], cdb_len=request[6], sense_len=request[7], direction=request[8], transfer_length=length, timeout_s=get(inp + 16), sense_offset=get(inp + 24), cdb_hex=cdb.hex())
+            if cdb[0] == 241:
+                io_calls += 1
+                event['request_index'] = io_calls
+                if io_calls <= failures:
+                    value = 0
+                else:
+                    ident = bytes(u.mem_read(5714640, 16))
+                    version = get(5714656) & 65535
+                    version -= 1 if kind == 'expected_upgrade' else 0
+                    response = ident + struct.pack('<HH', version, 0)
+                    u.mem_write(buf, response)
+                    event['synthetic_f1_response'] = response.hex()
+            elif cdb[0] == 240 and kind == 'expected_upgrade':
+                data = bytes(u.mem_read(buf, length))
+                event.update(write_index=write_count, payload_offset=streamed_length, data_sha256=hashlib.sha256(data).hexdigest())
+                write_count += 1
+                streamed_length += len(data)
+                streamed_digest.update(data)
+            elif cdb[0] == 242 and kind == 'expected_upgrade':
+                f2_count += 1
+                u.mem_write(buf, bytes(20))
+                event.update(status_index=f2_count, status=0)
+            else:
+                raise RuntimeError('Unexpected vendor opcode or write outside synthetic upgrade scenario')
+            put(returned, 80 if value else 0)
+        else:
+            raise RuntimeError(f'Unexpected IOCTL {code:x}')
+        event['return'] = value
+        return value
+
     def hook(cpu, a, n, data):
-        nonlocal instructions, clock, handle, io_calls, close_calls, stop_reason, pending_deadline, f2_count, ui_pump_count, ui_update_count
+        nonlocal instructions, clock, handle, close_calls, stop_reason, pending_deadline, ui_pump_count, ui_update_count
         instructions += 1
-        recent.append(hex(a))
-        recent[:] = recent[-30:]
+        recent.append(a)
         if a == 4201808:
             ui_pump_count += 1
             events.append({'kind': 'actual_UI_pump', 'va': hex(a), 'index': ui_pump_count})
@@ -250,8 +318,7 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
         elif name in ['MultiByteToWideChar', 'WideCharToMultiByte']:
             cp, flags, src, count, dst, cap = args[:6]
             wide = name == 'WideCharToMultiByte'
-            text = (wstr(src) if count == 4294967295 else bytes(cpu.mem_read(src, count * 2)).decode('utf-16le')) if wide else (astr(src) if count == 4294967295 else bytes(cpu.mem_read(src, count))).decode('latin1')
-            result = (text.encode('latin1') if wide else text.encode('utf-16le')) + (b'\x00' if wide else b'\x00\x00') if count == 4294967295 else text.encode('latin1') if wide else text.encode('utf-16le')
+            result = convert_windows_text(cpu, src, count, wide_input=wide)
             value = len(result) if wide else len(result) // 2
             if dst and cap:
                 cpu.mem_write(dst, result[:cap if wide else cap * 2])
@@ -265,46 +332,8 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
             pop = 28
             event.update(path=wstr(args[0]), access=hex(args[1]), share=args[2], security=args[3], creation=args[4], flags=hex(args[5]), template=args[6], returned_handle=value)
         elif name == 'DeviceIoControl':
-            h, code, inp, ni, out, no, returned, overlapped = args[:8]
             pop = 32
-            event.update(handle=h, ioctl=hex(code), input_bytes=bytes(cpu.mem_read(inp, ni)).hex() if inp else None, input_length=ni, output_length=no, overlapped=overlapped)
-            if code == 2954240:
-                d = descriptor()
-                cpu.mem_write(out, d)
-                put(returned, len(d))
-                event['synthetic_descriptor'] = d.hex()
-            elif code == 315412:
-                s = bytes(cpu.mem_read(inp, 44))
-                length = get(inp + 12)
-                buf = get(inp + 20)
-                cdb = s[28:28 + s[6]]
-                event.update(spt_length=int.from_bytes(s[:2], 'little'), path=s[3], target=s[4], lun=s[5], cdb_len=s[6], sense_len=s[7], direction=s[8], transfer_length=length, timeout_s=get(inp + 16), sense_offset=get(inp + 24), cdb_hex=cdb.hex())
-                if cdb[0] == 241:
-                    io_calls += 1
-                    event['request_index'] = io_calls
-                    if io_calls <= failures:
-                        value = 0
-                    else:
-                        ident = bytes(cpu.mem_read(5714640, 16))
-                        version = get(5714656) & 65535
-                        version -= 1 if kind == 'expected_upgrade' else 0
-                        response = ident + struct.pack('<HH', version, 0)
-                        cpu.mem_write(buf, response)
-                        event['synthetic_f1_response'] = response.hex()
-                elif cdb[0] == 240 and kind == 'expected_upgrade':
-                    data = bytes(cpu.mem_read(buf, length))
-                    event.update(write_index=len(writes), payload_offset=sum(map(len, writes)), data_sha256=hashlib.sha256(data).hexdigest())
-                    writes.append(data)
-                elif cdb[0] == 242 and kind == 'expected_upgrade':
-                    f2_count += 1
-                    cpu.mem_write(buf, bytes(20))
-                    event.update(status_index=f2_count, status=0)
-                else:
-                    raise RuntimeError('Unexpected vendor opcode or write outside synthetic upgrade scenario')
-                put(returned, 80 if value else 0)
-            else:
-                raise RuntimeError(f'Unexpected IOCTL {code:x}')
-            event['return'] = value
+            value = emulate_device_control(args, event)
         elif name == 'CloseHandle':
             close_calls += 1
             pop = 4
@@ -365,11 +394,27 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
         try:
             u.emu_start(a, 50397169, count=2000000)
         except Exception:
-            (R / 'last-failure.json').write_text(json.dumps({'eip': hex(u.reg_read(UC_X86_REG_EIP)), 'esp': hex(u.reg_read(UC_X86_REG_ESP)), 'recent': recent, 'events': events}, indent=2))
+            (R / 'last-failure.json').write_text(json.dumps({'eip': hex(u.reg_read(UC_X86_REG_EIP)), 'esp': hex(u.reg_read(UC_X86_REG_ESP)), 'recent': [hex(address) for address in recent], 'events': events}, indent=2))
             raise
 
+    def run_worker_until(deadline):
+        nonlocal phase, clock, worker_context, worker_fs
+        handler = u.context_save()
+        handler_fs = get(0)
+        phase = 'worker_during_quiesce'
+        u.context_restore(worker_context)
+        put(0, worker_fs)
+        while clock < deadline:
+            start(u.reg_read(UC_X86_REG_EIP))
+        worker_context = u.context_save()
+        worker_fs = get(0)
+        phase = 'handler'
+        clock = deadline
+        u.context_restore(handler)
+        put(0, handler_fs)
+
     def invoke(a, argument=False):
-        nonlocal phase, clock, pending_deadline, worker_context, worker_fs
+        nonlocal pending_deadline, worker_context, worker_fs
         sp = 16908288 if argument else 16973824
         put(sp, 50397168)
         if argument:
@@ -385,19 +430,7 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
         while pending_deadline is not None:
             deadline = pending_deadline
             pending_deadline = None
-            handler = u.context_save()
-            handler_fs = get(0)
-            phase = 'worker_during_quiesce'
-            u.context_restore(worker_context)
-            put(0, worker_fs)
-            while clock < deadline:
-                start(u.reg_read(UC_X86_REG_EIP))
-            worker_context = u.context_save()
-            worker_fs = get(0)
-            phase = 'handler'
-            clock = deadline
-            u.context_restore(handler)
-            put(0, handler_fs)
+            run_worker_until(deadline)
             start(u.reg_read(UC_X86_REG_EIP))
     invoke(4205168, True)
     selected = get(6264924)
@@ -405,7 +438,7 @@ def emulate(kind='expected', failures=0, *, exe=EXE, dll=DLL, output=OUTPUT):
     if selected != 255:
         phase = 'handler'
         invoke(4203728)
-    return {'descriptor_case': kind, 'f1_io_failures_before_success': failures, 'selected_drive_index': selected, 'reached_handler': selected != 255, 'discovery_event_count': discovery_events, 'ioctl_f1_attempts': io_calls, 'close_calls': close_calls, 'final_discovery_flag': bytes(u.mem_read(obj + 188, 1)).hex(), 'virtual_time_ms': clock, 'stop_reason': stop_reason, 'instruction_count': instructions, 'UI_boundaries': {hex(k): v for k, v in UI.items()}, 'write_count': len(writes), 'streamed_length': sum(map(len, writes)), 'streamed_sha256': hashlib.sha256(b''.join(writes)).hexdigest(), 'f2_count': f2_count, 'ui_pump_count': ui_pump_count, 'ui_update_count': ui_update_count, 'events': events}
+    return {'descriptor_case': kind, 'f1_io_failures_before_success': failures, 'selected_drive_index': selected, 'reached_handler': selected != 255, 'discovery_event_count': discovery_events, 'ioctl_f1_attempts': io_calls, 'close_calls': close_calls, 'final_discovery_flag': bytes(u.mem_read(obj + 188, 1)).hex(), 'virtual_time_ms': clock, 'stop_reason': stop_reason, 'instruction_count': instructions, 'UI_boundaries': {hex(k): v for k, v in UI.items()}, 'write_count': write_count, 'streamed_length': streamed_length, 'streamed_sha256': streamed_digest.hexdigest(), 'f2_count': f2_count, 'ui_pump_count': ui_pump_count, 'ui_update_count': ui_update_count, 'events': events}
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--exe', type=Path, default=EXE)

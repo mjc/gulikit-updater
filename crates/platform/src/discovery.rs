@@ -52,11 +52,12 @@ pub struct Snapshot {
 }
 impl Snapshot {
     pub fn select(&self, confirmed: bool, component: Component) -> Result<NativeCandidate, String> {
-        let selected = Discovery {
-            candidates: self.candidates.iter().map(NativeCandidate::core).collect(),
-            incomplete: self.incomplete.clone(),
-        }
-        .select(confirmed, component)
+        let selected = Discovery::select_from(
+            self.candidates.iter().map(NativeCandidate::core),
+            !self.incomplete.is_empty(),
+            confirmed,
+            component,
+        )
         .map_err(|e| e.to_string())?;
         self.candidates
             .iter()
@@ -77,11 +78,12 @@ impl Snapshot {
         target: &NativeCandidate,
         component: Component,
     ) -> Result<(), String> {
-        let selected = Discovery {
-            candidates: self.candidates.iter().map(NativeCandidate::core).collect(),
-            incomplete: self.incomplete.clone(),
-        }
-        .select(true, component)
+        let selected = Discovery::select_from(
+            self.candidates.iter().map(NativeCandidate::core),
+            !self.incomplete.is_empty(),
+            true,
+            component,
+        )
         .map_err(|e| e.to_string())?;
         if selected.ancestor != target.ancestor || selected.generation != target.generation {
             return Err("Transport attachment changed".into());

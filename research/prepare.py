@@ -24,6 +24,22 @@ def checked(data, size, digest):
     return data
 
 
+def extract_device_usb(pe):
+    dlls = []
+    for resource in pe.DIRECTORY_ENTRY_RESOURCE.entries:
+        if str(resource.name) != "IDR_DLL":
+            continue
+        for item in resource.directory.entries:
+            if item.id != 0x82:
+                continue
+            for language in item.directory.entries:
+                entry = language.data.struct
+                dlls.append(pe.get_data(entry.OffsetToData, entry.Size))
+    if len(dlls) != 1:
+        raise ValueError("ambiguous embedded DeviceUsb.dll")
+    return checked(dlls[0], 8_704, DLL_SHA)
+
+
 def prepare(archive, output):
     with archive.open("rb") as source:
         original = checked(source.read(1_148_145), 1_148_144, ZIP_SHA)
@@ -32,17 +48,7 @@ def prepare(archive, output):
             exe = checked(source.read(2_245_633), 2_245_632, EXE_SHA)
     pe = pefile.PE(data=exe)
     payload = checked(pe.get_data(0x1732F0, 345_088), 345_088, PAYLOAD_SHA)
-    dlls = [
-        pe.get_data(language.data.struct.OffsetToData, language.data.struct.Size)
-        for resource in pe.DIRECTORY_ENTRY_RESOURCE.entries
-        if str(resource.name) == "IDR_DLL"
-        for item in resource.directory.entries
-        if item.id == 0x82
-        for language in item.directory.entries
-    ]
-    if len(dlls) != 1:
-        raise ValueError("ambiguous embedded DeviceUsb.dll")
-    dll = checked(dlls[0], 8_704, DLL_SHA)
+    dll = extract_device_usb(pe)
     output.mkdir(parents=True, exist_ok=True)
     for name, data in [(EXE_NAME, exe), ("bt-v5.07-payload.bin", payload), ("DeviceUsb.official.dll", dll)]:
         destination = output / name
