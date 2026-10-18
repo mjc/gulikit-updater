@@ -11,8 +11,8 @@ pub(super) fn execute(
     use gulikit_core::{
         package::Component,
         update::{
-            BluetoothPort, MainPort, Outcome, TransferRecord, Verification,
-            update_bluetooth_with_progress, update_main_with_progress, verify_restart,
+            BluetoothPort, MainPort, TransferRecord, Verification, update_bluetooth_with_progress,
+            update_main_with_progress, verify_restart,
         },
         version::{MainVersion, bluetooth_info},
     };
