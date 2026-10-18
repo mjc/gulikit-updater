@@ -47,6 +47,7 @@ pub struct Recorded<'a, P> {
     inner: P,
     journal: &'a mut File,
     index: usize,
+    audit_failures: Vec<String>,
 }
 impl<'a, P> Recorded<'a, P> {
     pub fn new(inner: P, journal: &'a mut File) -> Self {
@@ -54,18 +55,42 @@ impl<'a, P> Recorded<'a, P> {
             inner,
             journal,
             index: 0,
+            audit_failures: Vec::new(),
         }
     }
     fn event(&mut self, value: serde_json::Value) -> Result<(), String> {
-        serde_json::to_writer(&mut *self.journal, &value).map_err(|e| e.to_string())?;
-        writeln!(self.journal).map_err(|e| e.to_string())?;
-        self.journal.sync_all().map_err(|e| e.to_string())
+        let result = (|| {
+            serde_json::to_writer(&mut *self.journal, &value).map_err(|e| e.to_string())?;
+            writeln!(self.journal).map_err(|e| e.to_string())?;
+            self.journal.sync_all().map_err(|e| e.to_string())
+        })();
+        if let Err(error) = &result {
+            self.audit_failures.push(format!(
+                "Host audit failure while recording {}: {error}",
+                value["event"].as_str().unwrap_or("operation")
+            ));
+        }
+        result
+    }
+    fn cleanup_result(&mut self, result: Result<(), String>) -> Result<(), String> {
+        let logged = self.result("cleanup_result", result, |_| json!(null));
+        let failures: Vec<_> = logged
+            .err()
+            .into_iter()
+            .chain(self.audit_failures.iter().cloned())
+            .collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
     fn submission_result<T>(
         &mut self,
         name: &str,
         result: Result<T, SubmissionError>,
         transport: Option<gulikit_core::bot::CommandEvidence>,
+        known_write_count: Option<usize>,
         actual: impl FnOnce(&T) -> serde_json::Value,
     ) -> Result<T, SubmissionError> {
         let logged = self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err().map(|error| &error.message),"may_have_been_submitted":result.as_ref().map_or_else(|error|error.may_have_been_submitted, |_|true),"transport":transport}));
@@ -81,6 +106,7 @@ impl<'a, P> Recorded<'a, P> {
                 message: format!("Operation completed but audit failed: {log}"),
                 may_have_been_submitted: true,
                 audit_failure: true,
+                known_write_count,
             }),
             (Ok(value), Ok(())) => Ok(value),
         }
@@ -118,11 +144,11 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
         self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"lun_evidence":self.inner.lun_evidence(),"requested":if opcode==0xf0{data.len()}else{20}})).map_err(SubmissionError::audit_before)?;
         let result = self.inner.command(opcode, data);
         let transport = self.inner.take_transport_evidence();
-        self.submission_result("command_result",result,transport,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
+        self.submission_result("command_result",result,transport,None,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
     }
     fn finish(&mut self) -> Result<(), String> {
         let result = self.inner.finish();
-        self.result("cleanup_result", result, |_| json!(null))
+        self.cleanup_result(result)
     }
 }
 impl<P: MainPort> MainPort for Recorded<'_, P> {
@@ -153,7 +179,10 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
         )
         .map_err(SubmissionError::audit_before)?;
         let result = self.inner.write(bytes);
-        self.submission_result("main_write_result", result, None, |count| json!(count))
+        let known_count = result.as_ref().ok().copied();
+        self.submission_result("main_write_result", result, None, known_count, |count| {
+            json!(count)
+        })
     }
     fn flush(&mut self) -> Result<(), String> {
         let result = self.inner.flush();
@@ -173,7 +202,7 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
     }
     fn finish(&mut self) -> Result<(), String> {
         let result = self.inner.finish();
-        self.result("cleanup_result", result, |_| json!(null))
+        self.cleanup_result(result)
     }
 }
 
@@ -236,13 +265,64 @@ mod tests {
             (Err(SubmissionError::from("uncertain")), true),
             (Ok(7usize), true),
         ] {
+            let known_count = result.as_ref().ok().copied();
             let error = port
-                .submission_result("result", result, None, |count| json!(count))
+                .submission_result("result", result, None, known_count, |count| json!(count))
                 .unwrap_err();
             assert_eq!(error.may_have_been_submitted, expected);
+            assert_eq!(error.known_write_count, known_count);
             assert!(error.audit_failure);
         }
     }
+    struct MainReadFake {
+        finished: bool,
+    }
+    impl MainPort for MainReadFake {
+        fn prepare_write(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn check_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_version(&mut self) -> Result<Vec<u8>, String> {
+            Ok(b"version 5.8".to_vec())
+        }
+        fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+            Ok(())
+        }
+        fn write(&mut self, _: &[u8]) -> Result<usize, SubmissionError> {
+            Ok(7)
+        }
+        fn flush(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn close(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn volume_flush(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn wait_for_completion(&mut self, _: &mut dyn FnMut() -> bool) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            self.finished = true;
+            Ok(())
+        }
+    }
+    #[test]
+    fn a_transient_read_result_audit_failure_remains_cleanup_attention() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut readonly = File::open(file.path()).unwrap();
+        let mut writable = file.reopen().unwrap();
+        let mut port = Recorded::new(MainReadFake { finished: false }, &mut readonly);
+        assert!(port.read_version().unwrap_err().contains("audit failed"));
+        port.journal = &mut writable;
+        let error = MainPort::finish(&mut port).unwrap_err();
+        assert!(error.contains("Host audit failure"), "{error}");
+        assert!(port.inner.finished);
+    }
+
     #[test]
     fn command_submission_is_persisted_before_transport_and_error_is_retained() {
         let file = tempfile::NamedTempFile::new().unwrap();

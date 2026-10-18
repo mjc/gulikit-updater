@@ -124,6 +124,8 @@ pub struct SubmissionError {
     pub message: String,
     pub may_have_been_submitted: bool,
     pub audit_failure: bool,
+    /// Successful Main write count retained when only its audit result failed.
+    pub known_write_count: Option<usize>,
 }
 impl SubmissionError {
     pub fn before(message: impl Into<String>) -> Self {
@@ -131,6 +133,7 @@ impl SubmissionError {
             message: message.into(),
             may_have_been_submitted: false,
             audit_failure: false,
+            known_write_count: None,
         }
     }
     pub fn audit_before(message: impl Into<String>) -> Self {
@@ -146,6 +149,7 @@ impl From<String> for SubmissionError {
             message,
             may_have_been_submitted: true,
             audit_failure: false,
+            known_write_count: None,
         }
     }
 }
@@ -517,7 +521,13 @@ fn main_observed(
                     return Err("Invalid filesystem write count".into());
                 }
                 Err(error) => {
-                    if error.may_have_been_submitted {
+                    if let Some(count) = error
+                        .known_write_count
+                        .filter(|count| *count <= bytes.len())
+                    {
+                        record.bytes_submitted += count;
+                        record.bytes_confirmed += count;
+                    } else if error.may_have_been_submitted {
                         record.bytes_submitted += bytes.len();
                     }
                     if error.audit_failure {
@@ -606,8 +616,23 @@ mod tests {
                 ));
             }
             self.event("write")?;
-            let n = bytes.len().min(79);
+            let n = if self.fail == Some("write_result_audit_zero") {
+                0
+            } else {
+                bytes.len().min(79)
+            };
             self.written.extend_from_slice(&bytes[..n]);
+            if matches!(
+                self.fail,
+                Some("write_result_audit" | "write_result_audit_zero")
+            ) {
+                return Err(SubmissionError {
+                    message: "write succeeded but audit failed".into(),
+                    may_have_been_submitted: true,
+                    audit_failure: true,
+                    known_write_count: Some(n),
+                });
+            }
             Ok(n)
         }
         fn flush(&mut self) -> Result<(), String> {
@@ -646,6 +671,33 @@ mod tests {
             fail: None,
         }
     }
+    #[test]
+    fn main_result_audit_failure_retains_the_successful_write_count() {
+        for (failure, count, outcome) in [
+            ("write_result_audit", 79, Outcome::OutcomeUnknown),
+            (
+                "write_result_audit_zero",
+                0,
+                Outcome::DestinationCreatedWithoutPayload,
+            ),
+        ] {
+            let mut port = main_port();
+            port.fail = Some(failure);
+            let record = main_transfer(
+                &mut port,
+                &vec![0xa5; 51500],
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
+            assert_eq!(record.bytes_submitted, count);
+            assert_eq!(record.bytes_confirmed, count);
+            assert_eq!(port.written.len(), count);
+            assert_eq!(record.outcome, outcome);
+            assert_eq!(port.events, ["create", "write", "finish"]);
+            assert!(!record.cleanup_errors.is_empty());
+        }
+    }
+
     #[test]
     fn progress_reports_confirmed_short_writes_and_never_guesses_completion() {
         let mut port = main_port();
