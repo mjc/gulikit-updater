@@ -1,7 +1,8 @@
 # GuliKit updater
 
-The updater supports reviewed KK3 Max NS39 Main 5.9 and Bluetooth 3.23 / 3.24 / 5.07
-packages. The original ZIP selects the release; the CLI does not silently replace
+The updater ships reviewed KK3 Max NS39 Main 5.9 and Bluetooth 3.23 / 3.24 / 5.07
+package records. An explicit `--catalog` selects reviewed metadata for additional
+releases that use an implemented parser. The original ZIP selects the release; the CLI does not silently replace
 that selection with the newest version. The shared Rust core owns component
 transactions and restart verification. Native macOS adapters provide Bluetooth
 transport and supervised Main filesystem updates. Actual-device acceptance is
@@ -73,8 +74,8 @@ build, Clippy, tests and documentation checks before publication.
 The inspector checks the complete original archive digest before parsing it,
 then checks the selected member and payload. Bluetooth extraction uses a PE
 parser; it never executes the Windows updater. The Main archive also contains
-an NS38 binary, which is never selected for NS39. Repacked archives and unknown
-releases are rejected. A digest match ties the bytes to the reviewed catalog;
+an NS38 binary, which is never selected for NS39. Without `--catalog`, repacked
+archives and unlisted releases are rejected. A digest match ties the bytes to the reviewed catalog;
 it does not independently establish publisher authenticity.
 
 `catalog inspect` validates local catalog metadata and reports it as unverified.
@@ -91,8 +92,32 @@ published cryptographic checksum. Recorded archive/member/payload SHA-256 values
 check consistency with reviewed downloads; they are not vendor authentication.
 There is no project signing-key setup or custom signed catalog envelope.
 HTTPS validates the download connection, while review establishes the mapping
-between official source pages and the original archives. Catalog-driven write
-selection and receipt integration remain tracked work.
+between official source pages and the original archives.
+
+`package inspect` and `update` accept `--catalog /path/to/catalog-cache.json`.
+Use metadata reviewed from a source you trust: selecting a catalog is the explicit
+choice of package records, and does not establish vendor authenticity. The archive
+selects one exact model/component/size/hash match; ambiguous matches and unsupported
+parsers are refused. Member and payload validation, installed-version policy,
+physical NS39 confirmation, and attachment checks still apply. A compatible release
+can therefore be added without rebuilding the updater. Omit the flag to use the
+compiled records.
+
+```sh
+cargo run -- package inspect /path/to/NS38_NS39_BT_V3.24.zip --catalog /path/to/catalog-cache.json --model kk3-max --component bluetooth --json
+cargo run -- update /path/to/NS38_NS39_BT_V3.24.zip --catalog /path/to/catalog-cache.json --model kk3-max --component bluetooth --confirm-ns39 --record ./bt-attempt.jsonl --json
+```
+
+Main supervision passes the selected catalog bytes to its worker. The worker
+validates the original archive against that snapshot before device access; changes
+to the source catalog file cannot replace the selected release. New attempt records
+retain the selected record as `catalog_entry`, including archive/member/payload
+identity and source provenance. `verify` reads that snapshot without requiring the
+original catalog file or consulting its latest version. Legacy receipts still use
+the compiled inventory. A receipt can request only fresh version readback and
+cannot resume or authorize another transfer. Desktop confirmation also binds the
+exact package and catalog metadata, so replacement with the same version but a
+different archive or provenance is refused.
 
 The optional archive importer is available through
 `python3 tools/firmware_archive.py --help`. It requires an isolated bare

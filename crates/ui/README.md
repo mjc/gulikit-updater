@@ -5,13 +5,22 @@ Run from the repository root:
 
 ```sh
 devenv shell -- cargo run -p gulikit-ui
+# Inspect packages using an explicitly selected catalog snapshot:
+devenv shell -- cargo run -p gulikit-ui -- --catalog catalog/official.json
 ```
 
 Confirm the physical NS39 label and Max controls, inspect the selected component,
 and choose its original reviewed firmware ZIP. Selecting a package never starts
 an update. Native **Update** is disabled; direct update requests are refused before
 reading the package or opening a save dialog. Device work and native file dialogs
-run on one worker.
+run on one worker. `--catalog` loads the metadata once at startup and uses it for
+package selection and version comparisons. Omit the option to use compiled
+records. This adds catalog inspection; native desktop writes retain their existing
+availability limits. Catalog metadata is not vendor authentication.
+
+Catalog-based receipts preserve the exact selected release record. **Open record…**
+can request fresh readback without the catalog file, and confirmation is bound to
+the package and provenance loaded with the receipt.
 
 Native device access currently supports macOS. Windows and Linux build the UI
 and support package inspection, but do not yet have native device adapters.

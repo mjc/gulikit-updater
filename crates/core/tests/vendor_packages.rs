@@ -91,3 +91,38 @@ fn selects_the_official_323_archive_as_a_distinct_706_block_release() {
     modified[100] ^= 1;
     assert!(VerifiedPackage::inspect(&modified, Model::Kk3Max, Component::Bluetooth).is_err());
 }
+
+#[test]
+#[ignore = "requires original vendor archives in ignored cache"]
+fn catalog_admission_matches_compiled_payloads_for_all_reviewed_archives() {
+    let catalog =
+        gulikit_catalog::Catalog::parse(include_bytes!("../../../catalog/official.json")).unwrap();
+    for release in gulikit_core::package::catalog() {
+        let bytes = archive(release.archive);
+        let compiled = VerifiedPackage::inspect(&bytes, release.model, release.component).unwrap();
+        let selected =
+            VerifiedPackage::inspect_catalog(&bytes, &catalog, release.model, release.component)
+                .unwrap();
+        assert_eq!(
+            selected.info(),
+            compiled.info(),
+            "metadata for {}",
+            release.archive
+        );
+        assert_eq!(
+            selected.payload(),
+            compiled.payload(),
+            "payload for {}",
+            release.archive
+        );
+        assert!(compiled.catalog_entry().is_none());
+        let snapshot = selected.catalog_entry().unwrap();
+        let roundtrip =
+            gulikit_catalog::Entry::parse(&serde_json::to_vec(snapshot).unwrap()).unwrap();
+        assert_eq!(&roundtrip, snapshot);
+        assert_eq!(
+            gulikit_core::package::catalog_package_info(&roundtrip).unwrap(),
+            *selected.info()
+        );
+    }
+}
