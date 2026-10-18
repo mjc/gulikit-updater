@@ -121,6 +121,19 @@ pub struct PriorAttempt {
 }
 
 impl PriorAttempt {
+    /// Check the receipt before acquiring a new controller session.
+    pub fn require_verifiable(&self) -> Result<(), String> {
+        if matches!(
+            self.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+                | Outcome::TransferSubmittedPendingCompletion
+        ) {
+            Ok(())
+        } else {
+            Err("This receipt does not safely await restart verification. Keep a partial or unknown controller connected and unchanged; no new device session or reset is permitted by this receipt.".into())
+        }
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
         let records: Vec<serde_json::Value> = text
@@ -446,6 +459,34 @@ mod tests {
             assert_eq!(prior.generation, 12);
             record["package"]["payload_sha256"] = "changed".into();
             assert!(PriorAttempt::parse(&serde_json::to_vec(&record).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn only_completed_or_pending_completion_receipts_allow_a_verification_session() {
+        for outcome in [
+            Outcome::Refused,
+            Outcome::AlreadyCurrent,
+            Outcome::NewerThanSupported,
+            Outcome::CancelledBeforeWrite,
+            Outcome::DestinationCreatedWithoutPayload,
+            Outcome::OutcomeUnknown,
+            Outcome::InstalledVerified,
+            Outcome::TransferCompletedAwaitingVerification,
+            Outcome::TransferSubmittedPendingCompletion,
+        ] {
+            let record = serde_json::json!({
+                "event":"attempt_result", "package":gulikit_core::package::catalog()[2],
+                "transfer":{"outcome":outcome,"bytes_submitted":512,"bytes_confirmed":512},
+                "target":{"generation":42}
+            });
+            let prior = PriorAttempt::parse(&serde_json::to_vec(&record).unwrap()).unwrap();
+            let expected = matches!(
+                outcome,
+                Outcome::TransferCompletedAwaitingVerification
+                    | Outcome::TransferSubmittedPendingCompletion
+            );
+            assert_eq!(prior.require_verifiable().is_ok(), expected, "{outcome:?}");
         }
     }
 

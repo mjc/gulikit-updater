@@ -140,19 +140,13 @@ pub(super) fn execute(
         } => {
             let bytes =
                 gulikit_platform::journal::read_attempt(&attempt).map_err(AppError::host_io)?;
-            let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
-            let records: Vec<Value> = text
-                .lines()
-                .map(serde_json::from_str)
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?;
-            let prior=records.last().filter(|v|v["event"]=="attempt_result").ok_or("Attempt has no complete result; use probe for an independent version observation")?;
-            let (component, expected_version) = attempt_target(prior)?;
-            let previous: Outcome = serde_json::from_value(prior["transfer"]["outcome"].clone())
-                .map_err(|e| e.to_string())?;
-            let generation = prior["target"]["generation"]
-                .as_u64()
-                .ok_or("Missing attachment generation")?;
+            let prior = super::PriorAttempt::parse(&bytes)?;
+            prior.require_verifiable()?;
+            let component = prior.component;
+            let expected_version = prior.expected_version;
+            let previous = prior.outcome;
+            let generation = prior.generation;
+            let prior = prior.record;
             let mut session = Session::open(confirm_ns39, component)?;
             let target = session.target.clone();
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
