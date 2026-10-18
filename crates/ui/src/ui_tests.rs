@@ -76,6 +76,98 @@ fn normal_startup_never_presents_a_simulated_controller() {
 }
 
 #[test]
+fn desktop_renders_both_components_and_routes_confirmed_inspection() {
+    use gulikit_ui::live::Work;
+
+    let app = LiveHarness::new();
+    assert!(app.work.try_recv().is_err());
+    for size in [(760., 600.), (1000., 660.)] {
+        app.ui
+            .window()
+            .set_size(slint::LogicalSize::new(size.0, size.1));
+        app.ui.invoke_select_component(false);
+        layout(&app.ui);
+        let main = app.ui.window().take_snapshot().unwrap();
+        assert!(!app.ui.get_state().bluetooth);
+        assert!(
+            main.as_slice()
+                .iter()
+                .filter(|pixel| pixel.r < 100 && pixel.g < 130 && pixel.b < 100)
+                .count()
+                > 1000,
+            "the desktop must render content at each supported window size"
+        );
+        app.ui.invoke_select_component(true);
+        layout(&app.ui);
+        let bluetooth = app.ui.window().take_snapshot().unwrap();
+        assert!(app.ui.get_state().bluetooth);
+        assert_eq!(main.width(), bluetooth.width());
+        assert_eq!(main.height(), bluetooth.height());
+        assert_ne!(main.as_bytes(), bluetooth.as_bytes());
+    }
+    assert!(app.work.try_recv().is_err());
+    app.ui.invoke_confirm_model(true);
+    app.ui.invoke_inspect_controller();
+    assert!(matches!(
+        app.work.try_recv().unwrap(),
+        Work::Inspect {
+            component: Component::Bluetooth,
+            confirmed: true
+        }
+    ));
+}
+
+#[test]
+fn controller_and_button_guidance_survive_display_scale_changes() {
+    let app = LiveHarness::new();
+    for scale in [1., 2., 3.] {
+        app.ui
+            .window()
+            .dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            });
+        let logical_size = slint::LogicalSize::new(760., 600.);
+        // The testing adapter assumes 1× in set_size; provide its backing size
+        // and the logical resize event separately when simulating another scale.
+        app.ui.window().set_size(logical_size.to_physical(scale));
+        app.ui
+            .window()
+            .dispatch_event(WindowEvent::Resized { size: logical_size });
+        layout(&app.ui);
+        let controller = element(&app.ui, "KK3 Max controller illustration");
+        inside_window(&app.ui, &controller);
+        inside_window(
+            &app.ui,
+            &element(&app.ui, "A button (rightmost in default Switch layout)"),
+        );
+        let position = controller.absolute_position();
+        let size = controller.size();
+        let horizontal =
+            f64::from(position.x * scale)..f64::from((position.x + size.width) * scale);
+        let vertical = f64::from(position.y * scale)..f64::from((position.y + size.height) * scale);
+        let snapshot = app.ui.window().take_snapshot().unwrap();
+        let width = usize::try_from(snapshot.width()).unwrap();
+        let ink = snapshot
+            .as_slice()
+            .chunks_exact(width)
+            .enumerate()
+            .filter(|(y, _)| vertical.contains(&f64::from(u32::try_from(*y).unwrap())))
+            .flat_map(|(_, row)| row.iter().enumerate())
+            .filter(|(x, pixel)| {
+                horizontal.contains(&f64::from(u32::try_from(*x).unwrap()))
+                    && pixel.r < 200
+                    && pixel.g < 210
+                    && pixel.b < 200
+            })
+            .count();
+        assert!(
+            ink > 100,
+            "the controller illustration must remain visible at {scale}×"
+        );
+    }
+}
+
+#[test]
 fn native_record_control_matches_platform_verification_support() {
     let app = LiveHarness::new();
     let record = element(&app.ui, "Open record…");

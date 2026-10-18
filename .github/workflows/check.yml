@@ -41,6 +41,8 @@ jobs:
       - run: cargo build --workspace --bins --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --all-features --locked
+      - name: Render the release UI
+        run: cargo test --release -p gulikit-ui --bin gulikit-ui --locked desktop_renders_both_components_and_routes_confirmed_inspection
       - run: cargo test --workspace --doc --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings
