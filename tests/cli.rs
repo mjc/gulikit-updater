@@ -1,0 +1,190 @@
+use assert_cmd::Command;
+use serde_json::Value;
+
+#[test]
+fn lists_reviewed_firmware_without_touching_devices() {
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .args(["packages", "--json"])
+        .assert()
+        .success();
+    let output: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(output["schema_version"], 1);
+    assert_eq!(output["packages"][0]["model"], "kk3-max");
+    assert_eq!(output["packages"][0]["component"], "main");
+    assert_eq!(output["packages"][1]["version"], "5.07");
+}
+
+#[test]
+fn rejects_an_unknown_model_instead_of_accepting_a_filename() {
+    Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .args([
+            "package",
+            "inspect",
+            "anything.zip",
+            "--model",
+            "kk3-pro",
+            "--component",
+            "main",
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn malformed_package_is_a_structured_error_with_empty_stdout() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), b"not firmware").unwrap();
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .args(["package", "inspect"])
+        .arg(file.path())
+        .args(["--model", "kk3-max", "--component", "main", "--json"])
+        .assert()
+        .code(3);
+    assert!(result.get_output().stdout.is_empty());
+    let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
+    assert_eq!(error["schema_version"], 1);
+    assert_eq!(error["error"]["kind"], "package_rejected");
+}
+
+#[test]
+fn update_requires_physical_confirmation_and_rejects_bad_package_before_io() {
+    Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .arg("update")
+        .assert()
+        .code(2);
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("bad.zip");
+    std::fs::write(&archive, b"bad").unwrap();
+    let record = dir.path().join("attempt.jsonl");
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .arg("update")
+        .arg(&archive)
+        .args([
+            "--model",
+            "kk3-max",
+            "--component",
+            "main",
+            "--confirm-ns39",
+            "--json",
+            "--record",
+        ])
+        .arg(&record)
+        .assert()
+        .code(3);
+    assert!(result.get_output().stdout.is_empty());
+    assert!(!record.exists());
+    let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
+    assert_eq!(error["error"]["kind"], "package_rejected");
+}
+
+#[test]
+fn native_commands_describe_assisted_identity_and_restart_association() {
+    for command in ["devices", "probe", "update", "verify"] {
+        Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+            .args([command, "--help"])
+            .assert()
+            .success();
+    }
+    Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .args(["probe", "--component", "main"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn missing_file_and_directory_have_io_exit_codes_and_no_stdout() {
+    let directory = tempfile::tempdir().unwrap();
+    for path in [
+        directory.path().to_owned(),
+        directory.path().join("missing.zip"),
+    ] {
+        let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+            .args(["package", "inspect"])
+            .arg(path)
+            .args(["--model", "kk3-max", "--component", "main", "--json"])
+            .assert()
+            .code(4);
+        assert!(result.get_output().stdout.is_empty());
+        let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
+        assert_eq!(error["error"]["kind"], "package_io");
+    }
+}
+
+#[test]
+fn supports_human_catalog_and_rejects_an_unknown_component() {
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .arg("packages")
+        .assert()
+        .success();
+    let text = std::str::from_utf8(&result.get_output().stdout).unwrap();
+    assert!(text.contains("kk3-max main 5.9"));
+    assert!(text.contains("kk3-max bluetooth 5.07"));
+    Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .args([
+            "package",
+            "inspect",
+            "anything.zip",
+            "--model",
+            "kk3-max",
+            "--component",
+            "receiver",
+        ])
+        .assert()
+        .code(2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn verification_refuses_symlinks_and_fifos_before_device_access() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = directory.path().join("original.jsonl");
+    std::fs::write(&original, b"{}\n").unwrap();
+    let symlink = directory.path().join("link.jsonl");
+    std::os::unix::fs::symlink(&original, &symlink).unwrap();
+    let fifo = directory.path().join("fifo.jsonl");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for path in [symlink, fifo] {
+        let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+            .timeout(std::time::Duration::from_secs(2))
+            .arg("verify")
+            .arg(path)
+            .arg("--record")
+            .arg(directory.path().join("verification.jsonl"))
+            .args(["--confirm-ns39", "--confirm-same-controller", "--json"])
+            .assert()
+            .code(4);
+        let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
+        assert!(error.to_string().contains("regular file"), "{error}");
+    }
+    assert_eq!(std::fs::read(original).unwrap(), b"{}\n");
+}
+
+#[test]
+fn downgrade_opt_in_never_bypasses_package_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let archive = directory.path().join("invalid.zip");
+    let record = directory.path().join("attempt.jsonl");
+    std::fs::write(&archive, b"not firmware").unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .arg("update")
+        .arg(archive)
+        .args([
+            "--model",
+            "kk3-max",
+            "--component",
+            "main",
+            "--confirm-ns39",
+            "--allow-downgrade",
+            "--record",
+        ])
+        .arg(&record)
+        .assert()
+        .code(3);
+    assert!(!record.exists());
+}

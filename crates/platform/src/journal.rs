@@ -1,0 +1,537 @@
+//! Durable host-side operation records around the same ports used by the updater.
+
+use gulikit_core::update::{BluetoothPort, DestinationCreationError, MainPort, SubmissionError};
+use serde_json::json;
+use std::{fs::File, io::Write};
+
+/// Open the attempt itself without following a symlink or waiting for a FIFO writer.
+#[cfg(unix)]
+pub fn read_attempt(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    use nix::{
+        fcntl::{OFlag, open},
+        sys::stat::Mode,
+    };
+    use std::io::Read;
+    let file = File::from(
+        open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| format!("Attempt record must be a readable regular file: {error}"))?,
+    );
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("Attempt record must be a regular file".into());
+    }
+    // The largest curated Bluetooth release has 706 blocks. Recording a
+    // recovered CSW stall on all 709 commands, with a full native error buffer
+    // expanded by JSON escaping, needs about 4.9 MB including its final receipt.
+    // Main can report up to 51,500 positive one-byte writes; allow its larger
+    // submission/result journal too, while keeping reads explicitly bounded.
+    const LIMIT: u64 = 16 * 1024 * 1024;
+    if metadata.len() > LIMIT {
+        return Err("Attempt record exceeds its size bound".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("Attempt record exceeds its size bound".into());
+    }
+    Ok(bytes)
+}
+
+pub struct Recorded<'a, P> {
+    inner: P,
+    journal: &'a mut File,
+    index: usize,
+    audit_failures: Vec<String>,
+}
+impl<'a, P> Recorded<'a, P> {
+    pub fn new(inner: P, journal: &'a mut File) -> Self {
+        Self {
+            inner,
+            journal,
+            index: 0,
+            audit_failures: Vec::new(),
+        }
+    }
+    fn event(&mut self, value: serde_json::Value) -> Result<(), String> {
+        let result = (|| {
+            serde_json::to_writer(&mut *self.journal, &value).map_err(|e| e.to_string())?;
+            writeln!(self.journal).map_err(|e| e.to_string())?;
+            self.journal.sync_all().map_err(|e| e.to_string())
+        })();
+        if let Err(error) = &result {
+            self.audit_failures.push(format!(
+                "Host audit failure while recording {}: {error}",
+                value["event"].as_str().unwrap_or("operation")
+            ));
+        }
+        result
+    }
+    fn cleanup_result(&mut self, result: Result<(), String>) -> Result<(), String> {
+        let logged = self.result("cleanup_result", result, |_| json!(null));
+        let failures: Vec<_> = logged
+            .err()
+            .into_iter()
+            .chain(self.audit_failures.iter().cloned())
+            .collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+    fn submission_result<T>(
+        &mut self,
+        name: &str,
+        result: Result<T, SubmissionError>,
+        transport: Option<gulikit_core::bot::CommandEvidence>,
+        known_write_count: Option<usize>,
+        actual: impl FnOnce(&T) -> serde_json::Value,
+    ) -> Result<T, SubmissionError> {
+        let logged = self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err().map(|error| &error.message),"may_have_been_submitted":result.as_ref().map_or_else(|error|error.may_have_been_submitted, |_|true),"error_completion":result.as_ref().err().map(|error|error.completion),"transport":transport}));
+        self.index += 1;
+        match (result, logged) {
+            (Err(mut error), Err(log)) => {
+                error.message = format!("{}; audit failure: {log}", error.message);
+                error.audit_failure = true;
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(log)) => Err(SubmissionError {
+                message: format!("Operation completed but audit failed: {log}"),
+                may_have_been_submitted: true,
+                audit_failure: true,
+                completion: gulikit_core::update::SubmissionCompletion::Uncertain,
+                known_write_count,
+            }),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+    fn result<T>(
+        &mut self,
+        name: &str,
+        result: Result<T, String>,
+        actual: impl FnOnce(&T) -> serde_json::Value,
+    ) -> Result<T, String> {
+        let logged=self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err()}));
+        self.index += 1;
+        match (result, logged) {
+            (Err(first), Err(log)) => Err(format!("{first}; audit failure: {log}")),
+            (Err(first), _) => Err(first),
+            (Ok(_), Err(log)) => Err(format!("Operation completed but audit failed: {log}")),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+}
+impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
+    fn lun_evidence(&self) -> Option<gulikit_core::bot::MaxLun> {
+        self.inner.lun_evidence()
+    }
+    fn qualified_lun(&self) -> Option<u8> {
+        self.inner.qualified_lun()
+    }
+    fn prepare_write(&mut self) -> Result<(), String> {
+        self.inner.prepare_write()
+    }
+    fn check_session(&mut self) -> Result<(), String> {
+        self.inner.check_session()
+    }
+    fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError> {
+        self.event(json!({"event":"command_submitted","index":self.index,"opcode":opcode,"qualified_lun":self.inner.qualified_lun(),"lun_evidence":self.inner.lun_evidence(),"requested":if opcode==0xf0{data.len()}else{20}})).map_err(SubmissionError::audit_before)?;
+        let result = self.inner.command(opcode, data);
+        let transport = self.inner.take_transport_evidence();
+        self.submission_result("command_result",result,transport,None,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
+    }
+    fn completion_detached(&mut self) -> Result<bool, String> {
+        let result = self.inner.completion_detached();
+        self.result("bluetooth_completion_detach", result, |value| json!(value))
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        let result = self.inner.finish();
+        self.cleanup_result(result)
+    }
+}
+impl<P: MainPort> MainPort for Recorded<'_, P> {
+    fn prepare_write(&mut self) -> Result<(), String> {
+        self.inner.prepare_write()
+    }
+    fn check_session(&mut self) -> Result<(), String> {
+        self.inner.check_session()
+    }
+    fn read_version(&mut self) -> Result<Vec<u8>, String> {
+        let result = self.inner.read_version();
+        self.result("main_version", result, |bytes| json!(bytes))
+    }
+    fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+        self.event(json!({"event":"main_create_submitted","index":self.index}))?;
+        let result = self.inner.create_destination();
+        let created = result.as_ref().map_or_else(|error| error.created, |_| true);
+        self.result(
+            "main_create_result",
+            result.map_err(|error| error.error),
+            |_| json!({"created":true}),
+        )
+        .map_err(|error| DestinationCreationError { error, created })
+    }
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, SubmissionError> {
+        self.event(
+            json!({"event":"main_write_submitted","index":self.index,"requested":bytes.len()}),
+        )
+        .map_err(SubmissionError::audit_before)?;
+        let result = self.inner.write(bytes);
+        let known_count = result.as_ref().ok().copied();
+        self.submission_result("main_write_result", result, None, known_count, |count| {
+            json!(count)
+        })
+    }
+    fn flush(&mut self) -> Result<(), String> {
+        let result = self.inner.flush();
+        self.result("main_flush_result", result, |_| json!(null))
+    }
+    fn close(&mut self) -> Result<(), String> {
+        let result = self.inner.close();
+        self.result("main_close_result", result, |_| json!(null))
+    }
+    fn volume_flush(&mut self) -> Result<(), String> {
+        let result = self.inner.volume_flush();
+        self.result("volume_durability",result,|_|json!("No separate qualified volume-flush API; sync_all on open file and checked close are recorded separately"))
+    }
+    fn wait_for_completion(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<bool, String> {
+        let result = self.inner.wait_for_completion(cancelled);
+        self.result("main_completion_indication", result, |value| json!(value))
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        let result = self.inner.finish();
+        self.cleanup_result(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gulikit_core::update::BluetoothPort;
+    struct Fake {
+        path: std::path::PathBuf,
+        finished: bool,
+        called: bool,
+    }
+    impl BluetoothPort for Fake {
+        fn prepare_write(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn check_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn command(&mut self, opcode: u8, _: &[u8]) -> Result<Vec<u8>, SubmissionError> {
+            self.called = true;
+            let log = std::fs::read_to_string(&self.path).unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(log.lines().last().unwrap()).unwrap();
+            assert_eq!(event["event"], "command_submitted");
+            assert_eq!(event["opcode"], opcode);
+            Err("transport failure with raw bytes".into())
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            self.finished = true;
+            Ok(())
+        }
+    }
+    #[test]
+    fn failed_submission_audit_never_calls_transport_and_retains_known_zero_submission() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut readonly = File::open(file.path()).unwrap();
+        let mut port = Recorded::new(
+            Fake {
+                path: file.path().into(),
+                finished: false,
+                called: false,
+            },
+            &mut readonly,
+        );
+        let error = port.command(0xf0, &[0; 512]).unwrap_err();
+        assert!(!error.may_have_been_submitted);
+        assert!(error.audit_failure);
+        assert!(!port.inner.called);
+        assert!(port.finish().is_err());
+        assert!(port.inner.finished);
+    }
+    #[test]
+    fn result_audit_failure_preserves_the_underlying_submission_disposition() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut readonly = File::open(file.path()).unwrap();
+        let mut port = Recorded::new((), &mut readonly);
+        for (result, expected) in [
+            (Err(SubmissionError::before("refused")), false),
+            (Err(SubmissionError::from("uncertain")), true),
+            (Ok(7usize), true),
+        ] {
+            let known_count = result.as_ref().ok().copied();
+            let error = port
+                .submission_result("result", result, None, known_count, |count| json!(count))
+                .unwrap_err();
+            assert_eq!(error.may_have_been_submitted, expected);
+            assert_eq!(error.known_write_count, known_count);
+            assert!(error.audit_failure);
+        }
+    }
+    #[test]
+    fn missing_status_disposition_survives_recording_but_an_audit_error_stays_visible() {
+        use gulikit_core::update::SubmissionCompletion;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for writable in [true, false] {
+            let mut journal = if writable {
+                file.reopen().unwrap()
+            } else {
+                File::open(file.path()).unwrap()
+            };
+            let mut port = Recorded::new((), &mut journal);
+            let failure = SubmissionError {
+                completion: SubmissionCompletion::DataSentStatusMissing,
+                ..SubmissionError::from("last F0 status lost")
+            };
+            let error = port
+                .submission_result::<Vec<u8>>("command_result", Err(failure), None, None, |_| {
+                    json!(null)
+                })
+                .unwrap_err();
+            assert_eq!(
+                error.completion,
+                SubmissionCompletion::DataSentStatusMissing
+            );
+            assert_eq!(error.audit_failure, !writable);
+            if writable {
+                let saved: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+                assert_eq!(saved["error_completion"], "data_sent_status_missing");
+            }
+        }
+    }
+
+    struct MainReadFake {
+        finished: bool,
+    }
+    impl MainPort for MainReadFake {
+        fn prepare_write(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn check_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn read_version(&mut self) -> Result<Vec<u8>, String> {
+            Ok(b"version 5.8".to_vec())
+        }
+        fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+            Ok(())
+        }
+        fn write(&mut self, _: &[u8]) -> Result<usize, SubmissionError> {
+            Ok(7)
+        }
+        fn flush(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn close(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn volume_flush(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn wait_for_completion(&mut self, _: &mut dyn FnMut() -> bool) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn finish(&mut self) -> Result<(), String> {
+            self.finished = true;
+            Ok(())
+        }
+    }
+    #[test]
+    fn a_transient_read_result_audit_failure_remains_cleanup_attention() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut readonly = File::open(file.path()).unwrap();
+        let mut writable = file.reopen().unwrap();
+        let mut port = Recorded::new(MainReadFake { finished: false }, &mut readonly);
+        assert!(port.read_version().unwrap_err().contains("audit failed"));
+        port.journal = &mut writable;
+        let error = MainPort::finish(&mut port).unwrap_err();
+        assert!(error.contains("Host audit failure"), "{error}");
+        assert!(port.inner.finished);
+    }
+
+    #[test]
+    fn command_submission_is_persisted_before_transport_and_error_is_retained() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_owned();
+        let mut journal = file.reopen().unwrap();
+        let mut port = Recorded::new(
+            Fake {
+                path: path.clone(),
+                finished: false,
+                called: false,
+            },
+            &mut journal,
+        );
+        assert!(
+            port.command(0xf1, &[])
+                .unwrap_err()
+                .message
+                .contains("transport failure")
+        );
+        port.finish().unwrap();
+        assert!(port.inner.finished);
+        let events: Vec<serde_json::Value> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(events[1]["event"], "command_result");
+        assert_eq!(events[1]["error"], "transport failure with raw bytes");
+        assert_eq!(events[2]["event"], "cleanup_result");
+    }
+}
+
+/// Complete an outcome record without hiding persistence failure from its caller.
+pub fn write_event(journal: &mut File, value: &serde_json::Value) -> Result<(), String> {
+    serde_json::to_writer(&mut *journal, value).map_err(|e| e.to_string())?;
+    writeln!(journal).map_err(|e| e.to_string())?;
+    journal.sync_all().map_err(|e| e.to_string())
+}
+pub fn finalize_record(journal: &mut File, mut value: serde_json::Value) -> serde_json::Value {
+    if let Err(error) = write_event(journal, &value) {
+        // Outcome remains a statement about the device observation. Persistence
+        // failure separately makes this result require attention (CLI exit8).
+        let transfer = value["transfer"]
+            .as_object_mut()
+            .expect("typed transfer object");
+        transfer
+            .entry("cleanup_errors")
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("typed cleanup array")
+            .push(json!(format!(
+                "Host record could not be finalized: {error}"
+            )));
+    }
+    value
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+    #[test]
+    fn fresh_verification_is_durable_and_failed_persistence_requires_attention() {
+        let input = json!({
+            "event":"verification_result", "schema_version":1,
+            "source_attempt":"attempt.jsonl",
+            "raw_version_bytes":[118,53,57],
+            "verification":{"generation":12,"previous_generation":11,"same_unit_confirmed":true,"model_confirmed":true,"version":"5.9"},
+            "transfer":{"outcome":"installed_verified","cleanup_errors":[]}
+        });
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        let mut journal = temporary.reopen().unwrap();
+        let result = finalize_record(&mut journal, input.clone());
+        assert_eq!(result, input);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temporary.path()).unwrap()).unwrap();
+        assert_eq!(saved, input);
+        let mut readonly = File::open(temporary.path()).unwrap();
+        let failed = finalize_record(&mut readonly, input.clone());
+        assert_eq!(failed["transfer"]["outcome"], "installed_verified");
+        assert!(
+            !failed["transfer"]["cleanup_errors"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(temporary.path()).unwrap())
+                .unwrap(),
+            input
+        );
+    }
+}
+
+/// Create one exclusive host record and durably publish its directory entry.
+#[cfg(unix)]
+pub fn create_host_record(
+    path: &std::path::Path,
+    excluded_devices: &[u64],
+) -> Result<File, String> {
+    use nix::{
+        fcntl::{OFlag, open},
+        sys::stat::Mode,
+    };
+    use std::os::unix::fs::MetadataExt;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or("Attempt record requires a filename")?;
+    let directory = File::from(
+        open(
+            parent,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| e.to_string())?,
+    );
+    if excluded_devices.contains(&directory.metadata().map_err(|e| e.to_string())?.dev()) {
+        return Err(
+            "Attempt records must be stored on the host, outside the controller volume".into(),
+        );
+    }
+    create_in_directory(&directory, name, File::sync_all)
+}
+#[cfg(unix)]
+fn create_in_directory(
+    directory: &File,
+    name: &std::ffi::OsStr,
+    sync_parent: impl FnOnce(&File) -> std::io::Result<()>,
+) -> Result<File, String> {
+    use nix::{
+        fcntl::{OFlag, openat},
+        sys::stat::Mode,
+    };
+    let file = File::from(
+        openat(
+            directory,
+            name,
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(|e| e.to_string())?,
+    );
+    sync_parent(directory)
+        .map_err(|error| format!("Host record directory entry could not be persisted: {error}"))?;
+    Ok(file)
+}
+#[cfg(all(test, unix))]
+mod creation_tests {
+    use super::*;
+    #[test]
+    fn parent_entry_is_synced_before_record_is_returned_and_sync_failure_refuses_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = File::open(temporary.path()).unwrap();
+        let name = std::ffi::OsStr::new("attempt.jsonl");
+        let mut synced = false;
+        let file = create_in_directory(&directory, name, |parent| {
+            assert!(temporary.path().join(name).is_file());
+            synced = true;
+            parent.sync_all()
+        })
+        .unwrap();
+        assert!(synced);
+        drop(file);
+        let failed = create_in_directory(&directory, std::ffi::OsStr::new("failed.jsonl"), |_| {
+            Err(std::io::Error::other("directory sync failed"))
+        });
+        assert!(failed.unwrap_err().contains("directory sync failed"));
+        assert!(temporary.path().join("failed.jsonl").is_file());
+        assert!(create_host_record(&temporary.path().join(name), &[]).is_err());
+    }
+}

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GuliKit updater · UI study</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="study-header">
+    <div><span class="study-kicker">UI STUDY 01</span><h1>GuliKit updater</h1></div>
+    <div class="view-switch" aria-label="Preview size"><button class="active" data-view="desktop" aria-pressed="true">Desktop</button><button data-view="android" aria-pressed="false">Android concept</button></div>
+  </header>
+  <nav class="scenarios" aria-label="Mockup scenarios">
+    <button data-state="connect">01 <span>Connect</span></button><button data-state="ready" class="active">02 <span>Review update</span></button><button data-state="writing">03 <span>Updating</span></button><button data-state="reconnect">04 <span>Restart</span></button><button data-state="complete">05 <span>Verified</span></button><button data-state="error">06 <span>Recovery</span></button>
+  </nav>
+  <main class="stage">
+    <section class="app-window" aria-label="GuliKit updater mockup">
+      <header class="app-header"><div class="app-brand"><span class="brand-mark" aria-hidden="true">g<span>•</span></span><strong>GuliKit updater</strong></div><button class="icon-button" id="help" aria-label="Connection help">?</button></header>
+      <div class="app-content">
+        <aside class="device-panel">
+          <div class="device-label">YOUR CONTROLLER <span class="connection-dot"></span></div>
+          <div class="controller-art" aria-hidden="true">
+            <svg viewBox="0 0 340 246" fill="none"><defs><linearGradient id="shell" x1="140" y1="35" x2="195" y2="223" gradientUnits="userSpaceOnUse"><stop stop-color="#fbfbf6"/><stop offset="1" stop-color="#d2d6cf"/></linearGradient><linearGradient id="grip"><stop stop-color="#bec5bd"/><stop offset="1" stop-color="#edf0e8"/></linearGradient><filter id="shadow" x="-30%" y="-30%" width="160%" height="180%"><feDropShadow dx="0" dy="12" stdDeviation="9" flood-color="#263c30" flood-opacity=".16"/></filter></defs>
+              <path d="M73 52L82 32H128L132 49M211 49L214 32H258L268 55" fill="#aab3aa" stroke="#9da79f" stroke-width="2"/>
+              <path d="M90 45C64 45 50 67 43 94L22 181C14 213 32 230 50 222C70 211 83 183 97 172C113 164 133 171 170 171C207 171 228 164 243 172C257 183 269 211 290 222C308 230 326 213 318 181L297 94C290 67 276 45 250 45C227 45 211 54 170 54C129 54 113 45 90 45Z" fill="url(#shell)" stroke="#b2bcb1" stroke-width="2" filter="url(#shadow)"/>
+              <path d="M49 139L31 189C26 209 37 218 48 213C62 207 78 176 91 164M291 139L309 189C314 209 303 218 292 213C278 207 262 176 249 164" stroke="#b4beb4" stroke-width="2"/>
+              <circle cx="99" cy="92" r="31" fill="#bcc4ba"/><circle cx="99" cy="92" r="25" fill="#35453a"/><circle cx="99" cy="92" r="20" fill="#46564a" stroke="#5c6a5f" stroke-width="2"/>
+              <circle cx="214" cy="146" r="29" fill="#bac3b9"/><circle cx="214" cy="146" r="23" fill="#35453a"/><circle cx="214" cy="146" r="18" fill="#46564a" stroke="#5c6a5f" stroke-width="2"/>
+              <path d="M117 126H132V140H146V155H132V169H117V155H103V140H117Z" fill="#44554a" stroke="#263c30" stroke-width="2"/>
+              <g fill="#3c4e41" stroke="#b8c3b6" stroke-width="2"><circle cx="251" cy="69" r="12"/><circle cx="274" cy="91" r="12"/><circle cx="251" cy="113" r="12"/><circle cx="228" cy="91" r="12"/></g>
+              <g font-family="system-ui" font-size="10" text-anchor="middle" fill="#eff2e8"><text x="251" y="73">X</text><text x="274" y="95">A</text><text x="251" y="117">B</text><text x="228" y="95">Y</text></g>
+              <g fill="#abb7a8"><circle cx="149" cy="86" r="7"/><circle cx="191" cy="86" r="7"/><circle cx="152" cy="119" r="7"/><circle cx="188" cy="119" r="7"/></g>
+              <path d="M146 86H152M188 86H194M191 83V89" stroke="#435647" stroke-width="1.5"/>
+              <rect x="149" y="115" width="6" height="6" rx=".5" stroke="#435647"/><path d="M150 114V113H156V119H155" stroke="#435647"/>
+              <circle cx="188" cy="119" r="3" stroke="#435647" stroke-width="1.5"/><path d="M188 114V116M188 122V124M183 119H185M191 119H193" stroke="#435647"/>
+              <rect x="159" y="146" width="22" height="5" rx="2.5" fill="#a3b69e"/>
+            </svg>
+          </div>
+          <h2 id="device-name">KK3 Max</h2><p class="model">GuliKit · NS39</p>
+          <div class="connection-badge" id="connection-badge">USB connected</div>
+          <div class="component-list" aria-label="Firmware component">
+            <button data-component="main"><span class="component-icon">▤</span><span><strong>Main firmware</strong><small id="main-version">Version unknown</small></span><span class="component-arrow">›</span></button>
+            <button data-component="bt" class="selected"><span class="component-icon bluetooth">ᛒ</span><span><strong>Bluetooth firmware</strong><small id="bt-version">5.06</small></span><span class="component-arrow">›</span></button>
+          </div>
+        </aside>
+        <section class="workspace" aria-labelledby="screen-title">
+          <h2 id="screen-title"></h2>
+          <div id="screen-body"></div>
+          <div class="action-area" id="action-area"></div>
+        </section>
+      </div>
+      <footer class="app-footer"><span id="footer-status"><i></i> Identity confirmed</span><button id="activity">Log <span>⌃</span></button></footer>
+      <section class="log-panel" id="log-panel" aria-label="Activity log" hidden><div><strong>Activity log</strong><button id="copy-log">Copy</button><button id="close-log" aria-label="Close activity log">×</button></div><pre id="log-text"></pre></section>
+      <dialog id="help-dialog"><form method="dialog"><button class="dialog-close" aria-label="Close help">×</button><h2>Connection help</h2><p>Use a USB data cable.</p><div class="help-modes"><p><strong>Bluetooth</strong><br>Gear / Set + A</p><p><strong>Main firmware</strong><br>APG (double-square) + A</p></div><p>Follow the package’s connection sequence. If undetected, try another cable or port.</p><button class="primary">Done</button></form></dialog>
+    </section>
+  </main>
+  <footer class="study-footer"><p><span class="sample-dot"></span> Mockup · simulated data</p><p id="platform-note">Windows / macOS / Linux</p></footer>
+  <script src="app.js"></script>
+</body>
+</html>
