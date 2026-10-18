@@ -12,6 +12,7 @@ pub const MAX_CATALOG_BYTES: usize = 256 * 1024;
 pub const MAX_ENTRIES: usize = 256;
 pub const MAX_ARCHIVE_SIZE: u64 = 64 * 1024 * 1024;
 const MAX_IDENTIFIER_LENGTH: usize = 64;
+const MAX_ENTRY_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -117,6 +118,8 @@ pub struct HardwareEvidence {
 pub enum CatalogError {
     #[error("catalog exceeds the {MAX_CATALOG_BYTES}-byte input limit")]
     InputTooLarge,
+    #[error("catalog entry exceeds the {MAX_ENTRY_BYTES}-byte input limit")]
+    EntryInputTooLarge,
     #[error("invalid catalog JSON: {0}")]
     Json(String),
     #[error("unsupported catalog schema version {0}")]
@@ -184,6 +187,19 @@ impl Catalog {
 }
 
 impl Entry {
+    /// Parse one untrusted catalog record with the same validation as a catalog entry.
+    ///
+    /// # Errors
+    /// Rejects oversized, malformed or invalid entry metadata.
+    pub fn parse(input: &[u8]) -> Result<Self, CatalogError> {
+        if input.len() > MAX_ENTRY_BYTES {
+            return Err(CatalogError::EntryInputTooLarge);
+        }
+        let raw: RawEntry =
+            serde_json::from_slice(input).map_err(|error| CatalogError::Json(error.to_string()))?;
+        Self::try_from_raw(0, raw)
+    }
+
     fn try_from_raw(index: usize, raw: RawEntry) -> Result<Self, CatalogError> {
         validate_identity(index, &raw)?;
         let hashes = validate_file_metadata(index, &raw)?;
@@ -212,7 +228,7 @@ impl Entry {
             software_support,
             hardware_evidence.as_ref(),
         )?;
-        Ok(Self {
+        let entry = Self {
             product: raw.product,
             component: raw.component,
             version: raw.version,
@@ -229,7 +245,15 @@ impl Entry {
             software_support,
             hardware_acceptance,
             hardware_evidence,
-        })
+        };
+        if serde_json::to_vec(&entry)
+            .map_err(|error| CatalogError::Json(error.to_string()))?
+            .len()
+            > MAX_ENTRY_BYTES
+        {
+            return Err(CatalogError::EntryInputTooLarge);
+        }
+        Ok(entry)
     }
 
     #[must_use]
@@ -944,6 +968,53 @@ mod tests {
         assert_eq!(main.parser_id(), ParserId::Kk3MainBinaryV1);
         assert_eq!(main.hardware_acceptance(), HardwareAcceptance::Unqualified);
         assert!(main.hardware_evidence().is_none());
+    }
+
+    #[test]
+    fn parses_one_entry_with_catalog_validation_and_bounds() {
+        let input: serde_json::Value = serde_json::from_str(&one_entry()).unwrap();
+        let entry = Entry::parse(&serde_json::to_vec(&input["entries"][0]).unwrap())
+            .expect("one valid entry");
+        assert_eq!(entry.product(), "kk3-max");
+        assert_eq!(entry.component(), "main");
+        assert_eq!(
+            Entry::parse(&serde_json::to_vec(&entry).expect("entry serializes"))
+                .expect("serialized entry parses"),
+            entry
+        );
+        assert!(matches!(
+            Entry::parse(&vec![b' '; MAX_ENTRY_BYTES + 1]),
+            Err(CatalogError::EntryInputTooLarge)
+        ));
+        assert!(Entry::parse(br#"{"product":"kk3-max"}"#).is_err());
+    }
+
+    #[test]
+    fn catalog_entries_round_trip_within_shared_serialized_entry_bound() {
+        let mut raw: serde_json::Value = serde_json::from_str(&one_entry()).unwrap();
+        let base_entry = Entry::parse(
+            &serde_json::to_vec(&raw["entries"][0]).expect("fixture entry serializes"),
+        )
+        .expect("fixture entry parses");
+        let base_size = serde_json::to_vec(&base_entry).unwrap().len();
+        let base_url = raw["entries"][0]["source_url"].as_str().unwrap().to_owned();
+        let url_padding = MAX_ENTRY_BYTES - base_size;
+        raw["entries"][0]["source_url"] = format!("{base_url}{}", "a".repeat(url_padding)).into();
+        let boundary_catalog = serde_json::to_vec(&raw).unwrap();
+        let catalog = Catalog::parse(&boundary_catalog).expect("entry at limit parses");
+        let serialized_entry = serde_json::to_vec(&catalog.entries()[0]).unwrap();
+        assert_eq!(serialized_entry.len(), MAX_ENTRY_BYTES);
+        assert_eq!(
+            Entry::parse(&serialized_entry).expect("boundary entry reparses"),
+            catalog.entries()[0]
+        );
+
+        raw["entries"][0]["source_url"] =
+            format!("{base_url}{}", "a".repeat(url_padding + 1)).into();
+        assert!(matches!(
+            Catalog::parse(&serde_json::to_vec(&raw).unwrap()),
+            Err(CatalogError::EntryInputTooLarge)
+        ));
     }
 
     #[test]

@@ -71,6 +71,7 @@ pub struct Attempt {
     pub record_finalized: bool,
     pub target: NativeCandidate,
     pub package: PackageInfo,
+    pub catalog_entry: Option<Box<gulikit_catalog::Entry>>,
     pub transfer: TransferRecord,
     pub operator_action: &'static str,
 }
@@ -119,6 +120,28 @@ pub struct ReceiptIdentity {
     pub outcome: Outcome,
     pub generation: u64,
     pub expected_version: String,
+    pub receipt_sha256: String,
+}
+
+impl ReceiptIdentity {
+    /// Build a verification confirmation identity from the exact package metadata.
+    #[must_use]
+    pub fn for_package(
+        outcome: Outcome,
+        generation: u64,
+        package: &PackageInfo,
+        catalog_entry: Option<&gulikit_catalog::Entry>,
+    ) -> Self {
+        let package_value = serde_json::json!(package);
+        let entry_value = catalog_entry.map(|entry| serde_json::json!(entry));
+        Self {
+            component: package.component,
+            outcome,
+            generation,
+            expected_version: package.version.clone(),
+            receipt_sha256: metadata_sha256(&package_value, entry_value.as_ref()),
+        }
+    }
 }
 
 /// A receipt can only request a fresh observation; it cannot authorize a transfer.
@@ -139,19 +162,31 @@ impl PriorAttempt {
             outcome: self.outcome,
             generation: self.generation,
             expected_version: self.expected_version.clone(),
+            receipt_sha256: metadata_sha256(
+                &self.record["package"],
+                self.record
+                    .get("catalog_entry")
+                    .filter(|value| !value.is_null()),
+            ),
         }
     }
 
     /// Refuse a replaced receipt before opening a controller session.
     ///
     /// # Errors
-    /// Returns an error if the component, outcome, generation or expected version
-    /// differs from the receipt the user confirmed.
+    /// Returns an error if the package or catalog snapshot differs from the
+    /// metadata the user confirmed, or if confirmation fields differ.
     pub fn require_identity(&self, expected: &ReceiptIdentity) -> Result<(), String> {
         if self.component == expected.component
             && self.outcome == expected.outcome
             && self.generation == expected.generation
             && self.expected_version == expected.expected_version
+            && metadata_sha256(
+                &self.record["package"],
+                self.record
+                    .get("catalog_entry")
+                    .filter(|value| !value.is_null()),
+            ) == expected.receipt_sha256
         {
             Ok(())
         } else {
@@ -229,6 +264,15 @@ impl PriorAttempt {
             expected_version,
         })
     }
+}
+
+fn metadata_sha256(
+    package: &serde_json::Value,
+    catalog_entry: Option<&serde_json::Value>,
+) -> String {
+    use sha2::Digest;
+    let value = serde_json::json!({"package":package,"catalog_entry":catalog_entry});
+    hex::encode(sha2::Sha256::digest(value.to_string().as_bytes()))
 }
 
 fn acknowledge_synced_result(
@@ -629,6 +673,49 @@ mod tests {
                 "Attempt record changed since selection. Keep the controller unchanged; verification requires the original record."
             );
         }
+    }
+
+    #[test]
+    fn verification_receipt_identity_binds_catalog_hashes_and_provenance() {
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../catalog/official.json")).unwrap();
+        raw["entries"][2]["archive_sha256"] = "0".repeat(64).into();
+        let entry = gulikit_catalog::Entry::parse(&serde_json::to_vec(&raw["entries"][2]).unwrap())
+            .unwrap();
+        let package = gulikit_core::package::catalog_package_info(&entry).unwrap();
+        let record = serde_json::json!({
+            "event":"attempt_result",
+            "package":package,
+            "catalog_entry":entry,
+            "identity_provenance":"reviewed source mapping A",
+            "transfer":{"outcome":"transfer_completed_awaiting_verification"},
+            "target":{"generation":7}
+        });
+        let original = PriorAttempt::parse(&serde_json::to_vec(&record).unwrap()).unwrap();
+        let identity = original.identity();
+
+        let mut changed_hash = record.clone();
+        changed_hash["catalog_entry"]["archive_sha256"] = "1".repeat(64).into();
+        changed_hash["package"] = serde_json::to_value(
+            gulikit_core::package::catalog_package_info(
+                &gulikit_catalog::Entry::parse(
+                    &serde_json::to_vec(&changed_hash["catalog_entry"]).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let changed_hash =
+            PriorAttempt::parse(&serde_json::to_vec(&changed_hash).unwrap()).unwrap();
+        assert!(changed_hash.require_identity(&identity).is_err());
+
+        let mut changed_provenance = record;
+        changed_provenance["catalog_entry"]["hardware_evidence"]["scope"] =
+            "Different reviewed hardware evidence scope".into();
+        let changed_provenance =
+            PriorAttempt::parse(&serde_json::to_vec(&changed_provenance).unwrap()).unwrap();
+        assert!(changed_provenance.require_identity(&identity).is_err());
     }
 
     #[test]

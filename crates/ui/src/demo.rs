@@ -203,6 +203,7 @@ impl DemoDevice {
             record_finalized: true,
             target: self.target(),
             package: package.clone(),
+            catalog_entry: None,
             operator_action: updater::operator_action(component, transfer.outcome),
             transfer,
         };

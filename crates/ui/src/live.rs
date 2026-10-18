@@ -295,13 +295,7 @@ impl LiveApp {
             .as_ref()?
             .installed_version;
         let package = &self.package.as_ref()?.info;
-        catalog()
-            .iter()
-            .find(|release| {
-                release.model == package.model
-                    && release.component == package.component
-                    && release.version == package.version
-            })?
+        package
             .decision_for_installed(installed, gulikit_core::version::VersionPolicy::UpgradeOnly)
             .ok()
     }
@@ -426,7 +420,7 @@ impl LiveApp {
             }
             Event::Verified(result) if self.pending == Some(Job::Verify) => self.verified(result),
             Event::Prior { path, prior } if self.pending == Some(Job::Receipt) => {
-                self.loaded(path, prior);
+                self.loaded(path, &prior);
             }
             _ => {
                 if self.pending.is_some() {
@@ -551,12 +545,12 @@ impl LiveApp {
                 self.receipt = Some(Receipt {
                     path: record,
                     lifecycle: ReceiptLifecycle::Pending,
-                    identity: ReceiptIdentity {
-                        component: result.package.component,
-                        outcome: result.transfer.outcome,
-                        generation: result.target.generation,
-                        expected_version: result.package.version,
-                    },
+                    identity: ReceiptIdentity::for_package(
+                        result.transfer.outcome,
+                        result.target.generation,
+                        &result.package,
+                        result.catalog_entry.as_deref(),
+                    ),
                 });
                 self.page = Page::Restart;
             }
@@ -639,7 +633,7 @@ impl LiveApp {
         }
         self.log.push(self.notice.clone());
     }
-    fn loaded(&mut self, path: PathBuf, prior: PriorAttempt) {
+    fn loaded(&mut self, path: PathBuf, prior: &PriorAttempt) {
         self.pending = None;
         if self.has_unverified_receipt() || self.retry_block.is_some() {
             return;
@@ -664,12 +658,7 @@ impl LiveApp {
         self.receipt = verifiable.then_some(Receipt {
             path,
             lifecycle: ReceiptLifecycle::Pending,
-            identity: ReceiptIdentity {
-                component: prior.component,
-                outcome: prior.outcome,
-                generation: prior.generation,
-                expected_version: prior.expected_version,
-            },
+            identity: prior.identity(),
         });
         self.package = None;
         self.same_controller = false;

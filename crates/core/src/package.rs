@@ -1,4 +1,8 @@
-//! Offline inspection of reviewed official firmware packages.
+//! Offline inspection of firmware packages against compiled or explicitly selected metadata.
+//!
+//! Catalog hash checks establish consistency with the supplied record only;
+//! callers must obtain catalog metadata through the application's reviewed
+//! publication path. Catalog-derived packages retain their exact selected record.
 
 use gulikit_catalog::{Catalog, Entry, ParserId, SoftwareSupport};
 use object::read::pe::PeFile32;
@@ -116,11 +120,26 @@ pub struct PackageInfo {
     pub member: String,
 }
 
+impl PackageInfo {
+    /// Compare a freshly read device version with this package's selected version.
+    ///
+    /// # Errors
+    /// Rejects version text that is malformed for this component.
+    pub fn decision_for_installed(
+        &self,
+        installed: &str,
+        policy: crate::version::VersionPolicy,
+    ) -> Result<crate::version::VersionDecision, crate::version::UnknownVersion> {
+        crate::version::release_decision(self.component, installed, &self.version, policy)
+    }
+}
+
 #[derive(Debug)]
 pub struct VerifiedPackage {
     info: PackageInfo,
     payload: Vec<u8>,
     bluetooth_version: Option<u16>,
+    catalog_entry: Option<Box<Entry>>,
 }
 
 impl VerifiedPackage {
@@ -135,6 +154,33 @@ impl VerifiedPackage {
         let release = release_from_archive(bytes, model, component)?;
         let recipe = PackageRecipe::from_release(release);
         inspect_with_metadata(bytes, model, component, &recipe)
+    }
+
+    /// Inspect an archive against an explicitly selected catalog and retain its record.
+    ///
+    /// This checks consistency with the supplied metadata and makes no catalog
+    /// signature or vendor-authenticity claim.
+    ///
+    /// # Errors
+    /// Rejects an archive without one exact matching record, unsupported parser
+    /// metadata, and member/payload size or digest mismatches.
+    pub fn inspect_catalog(
+        bytes: &[u8],
+        catalog: &Catalog,
+        model: Model,
+        component: Component,
+    ) -> Result<Self, PackageError> {
+        let entry = catalog_entry_for_archive(bytes, catalog, model, component)?;
+        let recipe = PackageRecipe::from_entry(entry)?;
+        let mut package = inspect_verified_archive(bytes, model, component, &recipe)?;
+        package.catalog_entry = Some(Box::new(entry.clone()));
+        Ok(package)
+    }
+
+    /// Catalog record selected during inspection, if this package came from a catalog.
+    #[must_use]
+    pub fn catalog_entry(&self) -> Option<&Entry> {
+        self.catalog_entry.as_deref()
     }
 
     #[must_use]
@@ -174,7 +220,8 @@ impl CatalogPackageInspection {
         model: Model,
         component: Component,
     ) -> Result<Self, PackageError> {
-        let recipe = catalog_recipe(bytes, catalog, model, component)?;
+        let entry = catalog_entry_for_archive(bytes, catalog, model, component)?;
+        let recipe = PackageRecipe::from_entry(entry)?;
         let checked = inspect_verified_archive(bytes, model, component, &recipe)?;
         Ok(Self { info: checked.info })
     }
@@ -183,6 +230,24 @@ impl CatalogPackageInspection {
     pub fn info(&self) -> &PackageInfo {
         &self.info
     }
+}
+
+/// Build descriptive package metadata from one parsed catalog record.
+///
+/// This validates the record's fixed parser and size/version constraints without
+/// reading an archive. The catalog's publication provenance remains the caller's
+/// responsibility.
+///
+/// # Errors
+/// Rejects unsupported products/components/parsers, metadata-only records, or
+/// invalid version and package bounds.
+pub fn catalog_package_info(entry: &Entry) -> Result<PackageInfo, PackageError> {
+    let model =
+        Model::from_str(entry.product()).map_err(|_| PackageError::UnsupportedCatalogEntry)?;
+    let component = Component::from_str(entry.component())
+        .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
+    let recipe = PackageRecipe::from_entry(entry)?;
+    Ok(package_info(model, component, &recipe))
 }
 
 struct PackageRecipe<'a> {
@@ -215,7 +280,7 @@ impl<'a> PackageRecipe<'a> {
     }
 
     fn from_entry(entry: &'a Entry) -> Result<Self, PackageError> {
-        if entry.software_support() != SoftwareSupport::Supported {
+        if entry.product() != "kk3-max" || entry.software_support() != SoftwareSupport::Supported {
             return Err(PackageError::UnsupportedCatalogEntry);
         }
         let bluetooth_version = match entry.parser_id() {
@@ -231,6 +296,14 @@ impl<'a> PackageRecipe<'a> {
             }
             _ => return Err(PackageError::UnsupportedCatalogEntry),
         };
+        crate::version::release_decision(
+            Component::from_str(entry.component())
+                .map_err(|_| PackageError::UnsupportedCatalogEntry)?,
+            entry.version(),
+            entry.version(),
+            crate::version::VersionPolicy::UpgradeOnly,
+        )
+        .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
         let archive_size = usize::try_from(entry.archive_size())
             .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
         let member_size = usize::try_from(entry.member_size())
@@ -262,12 +335,12 @@ impl<'a> PackageRecipe<'a> {
     }
 }
 
-fn catalog_recipe<'a>(
+fn catalog_entry_for_archive<'a>(
     bytes: &[u8],
     catalog: &'a Catalog,
     model: Model,
     component: Component,
-) -> Result<PackageRecipe<'a>, PackageError> {
+) -> Result<&'a Entry, PackageError> {
     if bytes.len() > MAX_CATALOG_ARCHIVE_SIZE {
         return Err(PackageError::CatalogArchiveTooLarge);
     }
@@ -304,7 +377,7 @@ fn catalog_recipe<'a>(
     if matching_archive.next().is_some() {
         return Err(PackageError::UnsupportedCatalogEntry);
     }
-    PackageRecipe::from_entry(entry)
+    Ok(entry)
 }
 
 fn parse_bluetooth_version(version: &str) -> Result<u16, PackageError> {
@@ -368,19 +441,24 @@ fn inspect_verified_archive(
         "payload",
     )?;
     Ok(VerifiedPackage {
-        info: PackageInfo {
-            model,
-            component,
-            version: recipe.version.to_owned(),
-            payload_size: payload.len(),
-            payload_sha256: recipe.payload_sha256.to_owned(),
-            archive_sha256: recipe.archive_sha256.to_owned(),
-            source_url: recipe.source_url.to_owned(),
-            member: recipe.member.to_owned(),
-        },
+        info: package_info(model, component, recipe),
         payload,
         bluetooth_version: recipe.bluetooth_version,
+        catalog_entry: None,
     })
+}
+
+fn package_info(model: Model, component: Component, recipe: &PackageRecipe<'_>) -> PackageInfo {
+    PackageInfo {
+        model,
+        component,
+        version: recipe.version.to_owned(),
+        payload_size: recipe.payload_size,
+        payload_sha256: recipe.payload_sha256.to_owned(),
+        archive_sha256: recipe.archive_sha256.to_owned(),
+        source_url: recipe.source_url.to_owned(),
+        member: recipe.member.to_owned(),
+    }
 }
 
 /// Reviewed source data is compiled into the application, never loaded from a

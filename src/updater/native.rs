@@ -51,12 +51,12 @@ pub(super) fn execute(
             let target = session.target.clone();
             check_attachment(expected_attachment, &target)?;
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
-            let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
+            let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"catalog_entry":package.catalog_entry(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
             write_event(&mut journal, &header).map_err(AppError::host_io)?;
             let result =
                 transfer_package(session, &package, policy, &mut journal, cancelled, progress);
             let action = super::operator_action(component, result.outcome);
-            let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"transfer":result,"operator_action":action});
+            let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"catalog_entry":package.catalog_entry(),"transfer":result,"operator_action":action});
             Ok(finalize_record(&mut journal, value))
         }
         Request::Verify {
@@ -367,10 +367,25 @@ pub(super) fn attempt_target(
             && package["member"].as_str() == Some(release.member)
             && package["source_url"].as_str() == Some(release.source_url)
     });
-    if !recognized {
-        return Err(
-            "Original attempt package metadata is not a recognized reviewed release".into(),
-        );
+    match prior.get("catalog_entry") {
+        Some(Value::Null) | None if recognized => {}
+        Some(Value::Null) | None => {
+            return Err(
+                "Original attempt package metadata is not a recognized reviewed release".into(),
+            );
+        }
+        Some(snapshot) => {
+            let bytes = serde_json::to_vec(snapshot).map_err(|error| error.to_string())?;
+            let entry = gulikit_catalog::Entry::parse(&bytes).map_err(|error| error.to_string())?;
+            let info = gulikit_core::package::catalog_package_info(&entry)
+                .map_err(|error| error.to_string())?;
+            let expected = serde_json::to_value(info).map_err(|error| error.to_string())?;
+            if package != &expected {
+                return Err(
+                    "Original attempt catalog snapshot does not match package metadata".into(),
+                );
+            }
+        }
     }
     Ok((component, version.into()))
 }
@@ -577,6 +592,58 @@ mod tests {
                 "accepted mistyped {field}"
             );
         }
+    }
+
+    #[test]
+    fn catalog_snapshot_supports_historical_metadata_but_never_falls_back_when_present() {
+        let mut raw: Value =
+            serde_json::from_slice(include_bytes!("../../catalog/official.json")).unwrap();
+        let entry_value = &mut raw["entries"][2];
+        entry_value["version"] = "3.25".into();
+        let entry_bytes = serde_json::to_vec(entry_value).unwrap();
+        let entry = gulikit_catalog::Entry::parse(&entry_bytes).unwrap();
+        let package = gulikit_core::package::catalog_package_info(&entry).unwrap();
+        assert_eq!(package.version, "3.25");
+        assert!(!gulikit_core::package::catalog().iter().any(|release| {
+            release.component == package.component && release.version == package.version
+        }));
+
+        let mut prior = serde_json::json!({
+            "event":"attempt_result",
+            "package":package,
+            "catalog_entry":entry,
+            "transfer":{"outcome":"transfer_completed_awaiting_verification"},
+            "target":{"generation":7}
+        });
+        assert_eq!(
+            attempt_target(&prior).unwrap(),
+            (gulikit_core::package::Component::Bluetooth, "3.25".into())
+        );
+
+        prior["package"]["archive_sha256"] = "0".repeat(64).into();
+        assert!(
+            attempt_target(&prior).is_err(),
+            "package metadata tampering"
+        );
+
+        prior["package"] =
+            serde_json::to_value(gulikit_core::package::catalog_package_info(&entry).unwrap())
+                .unwrap();
+        prior["catalog_entry"]["version"] = "3.26".into();
+        assert!(attempt_target(&prior).is_err(), "snapshot tampering");
+
+        prior["package"] =
+            serde_json::to_value(gulikit_core::package::catalog_package_info(&entry).unwrap())
+                .unwrap();
+        prior["catalog_entry"] = serde_json::json!({"component":"bluetooth"});
+        assert!(attempt_target(&prior).is_err(), "incomplete snapshot");
+
+        prior["package"] = serde_json::to_value(&gulikit_core::package::catalog()[2]).unwrap();
+        prior["catalog_entry"] = serde_json::json!({"malformed":true});
+        assert!(
+            attempt_target(&prior).is_err(),
+            "malformed present snapshot cannot fall back"
+        );
     }
     #[cfg(windows)]
     #[test]

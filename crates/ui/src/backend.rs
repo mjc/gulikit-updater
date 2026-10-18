@@ -38,7 +38,30 @@ impl Device for NativeDevice {
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
-        run_native(work, cancelled, emit)
+        run_native(work, None, cancelled, emit)
+    }
+}
+
+/// Native inspection using an explicitly selected catalog snapshot.
+pub struct CatalogDevice {
+    catalog: gulikit_catalog::Catalog,
+}
+
+impl CatalogDevice {
+    #[must_use]
+    pub fn new(catalog: gulikit_catalog::Catalog) -> Self {
+        Self { catalog }
+    }
+}
+
+impl Device for CatalogDevice {
+    fn run(
+        &mut self,
+        work: Work,
+        cancelled: &AtomicBool,
+        emit: &mut dyn FnMut(Event),
+    ) -> Result<Event, String> {
+        run_native(work, Some(&self.catalog), cancelled, emit)
     }
 }
 
@@ -118,8 +141,25 @@ impl Drop for Worker {
 /// Returns an error if the path cannot be read within the package size limit or
 /// the archive does not match a reviewed KK3 Max release for the requested component.
 pub fn inspect_selected_package(path: &Path, component: Component) -> Result<Event, String> {
-    let package = gulikit_platform::inspect_package(path, Model::Kk3Max, component)
-        .map_err(|e| e.to_string())?;
+    inspect_selected_package_from_catalog(path, component, None)
+}
+
+/// Inspect a local archive using a selected catalog, or the compiled inventory.
+///
+/// # Errors
+/// Rejects unreadable archives and mismatched model, component or package bytes.
+pub fn inspect_selected_package_from_catalog(
+    path: &Path,
+    component: Component,
+    catalog: Option<&gulikit_catalog::Catalog>,
+) -> Result<Event, String> {
+    let package = match catalog {
+        Some(catalog) => {
+            gulikit_platform::inspect_catalog_package(path, catalog, Model::Kk3Max, component)
+        }
+        None => gulikit_platform::inspect_package(path, Model::Kk3Max, component),
+    }
+    .map_err(|e| e.to_string())?;
     Ok(Event::Package {
         path: path.to_owned(),
         info: package.info().clone(),
@@ -136,6 +176,7 @@ fn record_path() -> Option<PathBuf> {
 
 fn run_native(
     work: Work,
+    catalog: Option<&gulikit_catalog::Catalog>,
     cancelled: &AtomicBool,
     emit: &mut dyn FnMut(Event),
 ) -> Result<Event, String> {
@@ -143,7 +184,7 @@ fn run_native(
         return Ok(Event::Cancelled);
     }
     match work {
-        Work::ChoosePackage(component) => choose_package(component, cancelled),
+        Work::ChoosePackage(component) => choose_package(component, catalog, cancelled),
         Work::OpenAttempt => open_attempt(),
         Work::Inspect {
             component,
@@ -180,7 +221,11 @@ fn run_native(
     }
 }
 
-fn choose_package(component: Component, cancelled: &AtomicBool) -> Result<Event, String> {
+fn choose_package(
+    component: Component,
+    catalog: Option<&gulikit_catalog::Catalog>,
+    cancelled: &AtomicBool,
+) -> Result<Event, String> {
     let Some(path) = rfd::FileDialog::new()
         .set_title("Choose original firmware ZIP")
         .add_filter("Firmware ZIP", &["zip"])
@@ -191,7 +236,7 @@ fn choose_package(component: Component, cancelled: &AtomicBool) -> Result<Event,
     if cancelled.load(Ordering::Acquire) {
         return Ok(Event::Cancelled);
     }
-    inspect_selected_package(&path, component)
+    inspect_selected_package_from_catalog(&path, component, catalog)
 }
 
 fn open_attempt() -> Result<Event, String> {

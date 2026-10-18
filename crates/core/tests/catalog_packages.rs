@@ -1,5 +1,8 @@
-use gulikit_catalog::Catalog;
-use gulikit_core::package::{CatalogPackageInspection, Component, Model, PackageError};
+use gulikit_catalog::{Catalog, Entry};
+use gulikit_core::package::{
+    CatalogPackageInspection, Component, Model, PackageError, VerifiedPackage, catalog_package_info,
+};
+use gulikit_core::version::{VersionDecision, VersionPolicy};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -104,7 +107,10 @@ fn minimal_bluetooth_pe(version: u16, payload: &[u8]) -> Vec<u8> {
 #[test]
 fn catalog_metadata_selects_hash_checked_archive_and_preserves_package_provenance() {
     let (archive, entry) = fixture();
-    let package = inspect(&archive, &[entry]).unwrap();
+    let catalog = parsed_catalog(std::slice::from_ref(&entry)).unwrap();
+    let package =
+        VerifiedPackage::inspect_catalog(&archive, &catalog, Model::Kk3Max, Component::Main)
+            .unwrap();
     assert_eq!(package.info().version, "6.1");
     assert_eq!(
         package.info().source_url,
@@ -112,6 +118,35 @@ fn catalog_metadata_selects_hash_checked_archive_and_preserves_package_provenanc
     );
     assert_eq!(package.info().member, "firmware/kk3.bin");
     assert_eq!(package.info().payload_size, 51_500);
+    assert_eq!(package.catalog_entry().unwrap().version(), "6.1");
+
+    let raw_entry = serde_json::to_vec(&entry).unwrap();
+    let parsed_entry = Entry::parse(&raw_entry).unwrap();
+    assert_eq!(
+        catalog_package_info(&parsed_entry).unwrap(),
+        *package.info()
+    );
+    assert_eq!(
+        package
+            .info()
+            .decision_for_installed("6.0", VersionPolicy::UpgradeOnly)
+            .unwrap(),
+        VersionDecision::Eligible
+    );
+    assert_eq!(
+        package
+            .info()
+            .decision_for_installed("6.2", VersionPolicy::UpgradeOnly)
+            .unwrap(),
+        VersionDecision::NewerThanSupported
+    );
+    assert_eq!(
+        package
+            .info()
+            .decision_for_installed("6.2", VersionPolicy::AllowDowngrade)
+            .unwrap(),
+        VersionDecision::Eligible
+    );
 }
 
 #[test]
@@ -214,6 +249,16 @@ fn three_version_catalog_selects_the_exact_bluetooth_archive_record() {
             .unwrap();
     assert_eq!(inspection.info().version, "3.24");
     assert_eq!(inspection.info().member, "controller.exe");
+    let package =
+        VerifiedPackage::inspect_catalog(&archive, &catalog, Model::Kk3Max, Component::Bluetooth)
+            .unwrap();
+    assert_eq!(package.info().version, "3.24");
+    assert_eq!(package.catalog_entry().unwrap().version(), "3.24");
+    assert_eq!(package.payload().len(), payload.len());
+    assert_eq!(
+        catalog_package_info(package.catalog_entry().unwrap()).unwrap(),
+        *package.info()
+    );
 }
 
 #[test]

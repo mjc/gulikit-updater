@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 gulikit-core = { path = "../core" }
+gulikit-catalog = { path = "../catalog" }
 gulikit-platform = { path = "../platform" }
 gulikit-updater = { path = "../.." }
 rfd = "=0.17.2"
@@ -25,6 +26,9 @@ slint = { version = "=1.18.1", default-features = false, features = [
 slint-build = "=1.18.1"
 
 [dev-dependencies]
+zip = { version = "9", default-features = false, features = ["deflate"] }
+sha2 = "0.11"
+hex = "0.4"
 tempfile = "3"
 # Slint's preliminary testing API requires the exact same version as Slint.
 i-slint-backend-testing = { version = "=1.18.1", features = [

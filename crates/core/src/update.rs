@@ -612,7 +612,14 @@ pub fn update_main_with_progress(
         }
         return record;
     }
-    run_main_transaction(port, package.payload(), policy, cancelled, progress)
+    run_main_transaction(
+        port,
+        package.payload(),
+        &package.info().version,
+        policy,
+        cancelled,
+        progress,
+    )
 }
 
 #[cfg(test)]
@@ -622,11 +629,12 @@ fn main_transfer(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    run_main_transaction(port, payload, policy, cancelled, |_| {})
+    run_main_transaction(port, payload, "5.9", policy, cancelled, |_| {})
 }
 fn run_main_transaction(
     port: &mut impl MainPort,
     payload: &[u8],
+    target_version: &str,
     policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(Progress),
@@ -644,7 +652,14 @@ fn run_main_transaction(
         let raw = port.read_version()?;
         let version = crate::version::MainVersion::parse(&raw).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
-        match version.decision_with_policy(policy) {
+        let decision = crate::version::release_decision(
+            Component::Main,
+            &version.to_string(),
+            target_version,
+            policy,
+        )
+        .map_err(|error| error.to_string())?;
+        match decision {
             VersionDecision::AlreadyCurrent => {
                 record.outcome = Outcome::AlreadyCurrent;
                 return Ok(());
@@ -886,6 +901,7 @@ mod tests {
         let result = run_main_transaction(
             &mut port,
             &vec![0; 51500],
+            "5.9",
             VersionPolicy::UpgradeOnly,
             || false,
             |p| progress.push(p),
@@ -908,6 +924,24 @@ mod tests {
             progress.iter().find(|p| p.confirmed > 0).unwrap().confirmed,
             79
         );
+    }
+    #[test]
+    fn main_transaction_compares_against_selected_package_version() {
+        let mut port = main_port();
+        port.version = b"www.gulikit.com\nversion 6.0";
+        let result = run_main_transaction(
+            &mut port,
+            &vec![0; 51500],
+            "6.1",
+            VersionPolicy::UpgradeOnly,
+            || false,
+            |_| {},
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(port.written.len(), 51500);
     }
     #[test]
     fn failed_bluetooth_command_reports_submission_without_confirmation() {

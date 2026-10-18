@@ -1772,15 +1772,19 @@ dependencies = [
 name = "gulikit-ui"
 version = "0.1.0"
 dependencies = [
+ "gulikit-catalog",
  "gulikit-core",
  "gulikit-platform",
  "gulikit-updater",
+ "hex",
  "i-slint-backend-testing",
  "rfd",
  "serde_json",
+ "sha2",
  "slint",
  "slint-build",
  "tempfile",
+ "zip",
 ]
 
 [[package]]
@@ -1793,9 +1797,12 @@ dependencies = [
  "gulikit-catalog",
  "gulikit-core",
  "gulikit-platform",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "zip",
 ]
 
 [[package]]

@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
-use gulikit_core::package::{Component, Model, catalog};
-use gulikit_platform::{InspectError, inspect_package};
+use gulikit_catalog::{Catalog, MAX_CATALOG_BYTES};
+use gulikit_core::package::{Component, Model, VerifiedPackage, catalog};
+use gulikit_platform::{
+    InspectError, catalog::CatalogCacheError, inspect_catalog_package, inspect_package,
+};
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -42,7 +45,10 @@ enum Command {
     /// Update one component in its separate mode (Main APS+A; Bluetooth Gear/Set+A).
     Update {
         path: PathBuf,
-        /// Permit the reviewed selected release to replace a newer installed version.
+        /// Use this explicitly selected metadata catalog for package matching.
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        /// Permit the selected package version to replace a newer installed version.
         #[arg(long)]
         allow_downgrade: bool,
         #[arg(long)]
@@ -79,7 +85,7 @@ enum Command {
         #[command(subcommand)]
         command: PackageCommand,
     },
-    /// Inspect catalog metadata without authorizing packages or accessing a device.
+    /// Inspect catalog metadata without accessing a device or claiming vendor authenticity.
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
@@ -116,9 +122,12 @@ enum CatalogCommand {
 
 #[derive(Subcommand)]
 enum PackageCommand {
-    /// Validate an original official ZIP and inspect its selected payload.
+    /// Inspect an original ZIP against compiled releases or explicitly selected catalog metadata.
     Inspect {
         path: PathBuf,
+        /// Use this explicitly selected metadata catalog for package matching.
+        #[arg(long)]
+        catalog: Option<PathBuf>,
         #[arg(long)]
         model: Model,
         #[arg(long)]
@@ -209,20 +218,34 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
             command:
                 PackageCommand::Inspect {
                     path,
+                    catalog,
                     model,
                     component,
                     json,
                 },
-        } => match inspect_package(&path, model, component) {
+        } => match inspect_selected_package(&path, model, component, catalog.as_deref()) {
             Ok(package) => {
                 if json {
-                    write_json(out, serde_json::json!({"package": package.info()}))?;
+                    write_json(
+                        out,
+                        serde_json::json!({
+                            "package": package.info(),
+                            "catalog_authenticity": if catalog.is_some() { "not_established" } else { "not_applicable" }
+                        }),
+                    )?;
                 } else {
                     let info = package.info();
                     writeln!(
                         out,
-                        "Reviewed package: {} {} {}",
-                        info.model, info.component, info.version
+                        "{}: {} {} {}",
+                        if catalog.is_some() {
+                            "Catalog-matched package (catalog authenticity not established)"
+                        } else {
+                            "Reviewed package"
+                        },
+                        info.model,
+                        info.component,
+                        info.version
                     )?;
                     writeln!(out, "Member: {}", info.member)?;
                     writeln!(
@@ -239,19 +262,15 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
                 Ok(ExitCode::SUCCESS)
             }
             Err(error) => {
-                let (kind, code) = match &error {
-                    InspectError::Rejected(_) => ("package_rejected", 3),
-                    InspectError::Io(_) | InspectError::NotFile => ("package_io", 4),
-                };
                 if json {
                     write_json(
                         err,
-                        serde_json::json!({"error": {"kind": kind, "message": error.to_string()}}),
+                        serde_json::json!({"error": {"kind": error.kind, "message": error.message}}),
                     )?;
                 } else {
-                    writeln!(err, "{error}")?;
+                    writeln!(err, "{}", error.message)?;
                 }
-                Ok(ExitCode::from(code))
+                Ok(ExitCode::from(error.code))
             }
         },
     }
@@ -260,33 +279,121 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
 use gulikit_updater::updater::ApplicationError as AppError;
 
 fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
+    let catalog_bytes = if let Command::Update {
+        catalog: Some(path),
+        ..
+    } = &command
+    {
+        Some(read_catalog_snapshot(path)?)
+    } else {
+        None
+    };
+    if let Some(bytes) = catalog_bytes.as_deref() {
+        let _ = parse_catalog(bytes)?;
+    }
     #[cfg(target_os = "macos")]
     if let Command::Update {
         component: Component::Main,
         ..
     } = &command
     {
-        return main_supervision::update(command);
+        let catalog_selected = catalog_bytes.is_some();
+        let result = main_supervision::update(command, catalog_bytes)?;
+        return Ok(mark_catalog_authenticity(result, catalog_selected));
     }
     // Package rejection precedes device access and attempt-file creation on every OS.
     let package = if let Command::Update {
         path,
+        catalog: _,
         model,
         component,
         ..
     } = &command
     {
-        Some(inspect_package(path, *model, *component).map_err(|e| {
-            let (kind, code) = match &e {
-                InspectError::Rejected(_) => ("package_rejected", 3),
-                InspectError::Io(_) | InspectError::NotFile => ("package_io", 4),
-            };
-            AppError::new(kind, code, e.to_string())
-        })?)
+        Some(inspect_package_with_catalog_bytes(
+            path,
+            *model,
+            *component,
+            catalog_bytes.as_deref(),
+        )?)
     } else {
         None
     };
-    native::execute(command, package)
+    let catalog_selected = catalog_bytes.is_some();
+    let result = native::execute(command, package)?;
+    Ok(mark_catalog_authenticity(result, catalog_selected))
+}
+
+fn mark_catalog_authenticity(
+    mut result: serde_json::Value,
+    catalog_selected: bool,
+) -> serde_json::Value {
+    if catalog_selected && let Some(object) = result.as_object_mut() {
+        object.insert(
+            "catalog_authenticity".into(),
+            serde_json::json!("not_established"),
+        );
+    }
+    result
+}
+
+fn inspect_selected_package(
+    path: &std::path::Path,
+    model: Model,
+    component: Component,
+    catalog_path: Option<&std::path::Path>,
+) -> Result<VerifiedPackage, AppError> {
+    let catalog_bytes = if let Some(catalog_path) = catalog_path {
+        Some(read_catalog_snapshot(catalog_path)?)
+    } else {
+        None
+    };
+    inspect_package_with_catalog_bytes(path, model, component, catalog_bytes.as_deref())
+}
+
+fn inspect_package_with_catalog_bytes(
+    path: &std::path::Path,
+    model: Model,
+    component: Component,
+    catalog_bytes: Option<&[u8]>,
+) -> Result<VerifiedPackage, AppError> {
+    let package = if let Some(bytes) = catalog_bytes {
+        let catalog = parse_catalog(bytes)?;
+        inspect_catalog_package(path, &catalog, model, component)
+    } else {
+        inspect_package(path, model, component)
+    };
+    package.map_err(|error| package_error(&error))
+}
+
+fn read_catalog_snapshot(path: &std::path::Path) -> Result<Vec<u8>, AppError> {
+    gulikit_platform::catalog::read_catalog_file(path, MAX_CATALOG_BYTES)
+        .map_err(|error| catalog_read_error(&error))
+}
+
+fn parse_catalog(bytes: &[u8]) -> Result<Catalog, AppError> {
+    Catalog::parse(bytes).map_err(|error| AppError::new("catalog_rejected", 3, error.to_string()))
+}
+
+fn catalog_read_error(error: &CatalogCacheError) -> AppError {
+    let message = error.to_string();
+    let (kind, code) = match &error {
+        CatalogCacheError::TooLarge | CatalogCacheError::Catalog(_) => ("catalog_rejected", 3),
+        CatalogCacheError::Io(_)
+        | CatalogCacheError::UnsafeFile
+        | CatalogCacheError::Lock(_)
+        | CatalogCacheError::PublishedButDurabilityUnknown(_)
+        | CatalogCacheError::Fetch(_) => ("catalog_io", 4),
+    };
+    AppError::new(kind, code, message)
+}
+
+fn package_error(error: &InspectError) -> AppError {
+    let (kind, code) = match &error {
+        InspectError::Rejected(_) => ("package_rejected", 3),
+        InspectError::Io(_) | InspectError::NotFile => ("package_io", 4),
+    };
+    AppError::new(kind, code, error.to_string())
 }
 fn outcome_code(value: &serde_json::Value) -> u8 {
     if value.pointer("/transfer/outcome").and_then(|v| v.as_str()) == Some("outcome_unknown") {

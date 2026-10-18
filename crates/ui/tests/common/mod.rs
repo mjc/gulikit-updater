@@ -51,6 +51,7 @@ pub fn attempt(outcome: Outcome) -> Attempt {
         record_finalized: true,
         target: inspection().target,
         package: package(),
+        catalog_entry: None,
         operator_action: "Restart and verify",
         transfer: TransferRecord {
             outcome,
