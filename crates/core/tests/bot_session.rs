@@ -140,7 +140,7 @@ fn out_data_is_exact_and_private_at_the_firmware_buffer_boundary() {
                 length,
             )
             .unwrap();
-        assert!(response.is_empty());
+        assert_eq!(response, [] as [u8; 0]);
         assert_eq!(session.io_mut().writes[1], payload);
         assert!(
             payload
@@ -217,7 +217,10 @@ fn qualifies_each_attachment_before_any_bot_command_and_refuses_ambiguous_addres
                 .is_err()
         );
         assert_eq!(session.io_mut().address_queries, 1);
-        assert!(session.io_mut().calls.is_empty());
+        assert_eq!(
+            session.io_mut().calls,
+            [] as [gulikit_core::bot::Direction; 0]
+        );
         assert!(!session.firmware_may_have_been_submitted());
     }
     for _ in 0..2 {
@@ -374,7 +377,10 @@ fn timeout_partial_cbw_and_failed_os_read_never_authorize_sense() {
     }
     let mut session = Session::new(io());
     assert!(session.diagnostic_request_sense().is_err());
-    assert!(session.io_mut().calls.is_empty());
+    assert_eq!(
+        session.io_mut().calls,
+        [] as [gulikit_core::bot::Direction; 0]
+    );
 }
 
 #[test]

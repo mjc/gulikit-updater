@@ -387,7 +387,7 @@ mod tests {
             let mut out = Vec::new();
             let error = write_json(&mut out, body).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            assert!(out.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
         }
     }
 }

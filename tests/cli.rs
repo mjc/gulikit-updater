@@ -40,7 +40,7 @@ fn malformed_package_is_a_structured_error_with_empty_stdout() {
         .args(["--model", "kk3-max", "--component", "main", "--json"])
         .assert()
         .code(3);
-    assert!(result.get_output().stdout.is_empty());
+    assert_eq!(result.get_output().stdout, [] as [u8; 0]);
     let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
     assert_eq!(error["schema_version"], 1);
     assert_eq!(error["error"]["kind"], "package_rejected");
@@ -71,7 +71,7 @@ fn update_requires_physical_confirmation_and_rejects_bad_package_before_io() {
         .arg(&record)
         .assert()
         .code(3);
-    assert!(result.get_output().stdout.is_empty());
+    assert_eq!(result.get_output().stdout, [] as [u8; 0]);
     assert!(!record.exists());
     let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
     assert_eq!(error["error"]["kind"], "package_rejected");
@@ -104,7 +104,7 @@ fn missing_file_and_directory_have_io_exit_codes_and_no_stdout() {
             .args(["--model", "kk3-max", "--component", "main", "--json"])
             .assert()
             .code(4);
-        assert!(result.get_output().stdout.is_empty());
+        assert_eq!(result.get_output().stdout, [] as [u8; 0]);
         let error: Value = serde_json::from_slice(&result.get_output().stderr).unwrap();
         assert_eq!(error["error"]["kind"], "package_io");
     }

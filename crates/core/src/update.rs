@@ -875,7 +875,7 @@ mod tests {
             assert_eq!(port.written.len(), count);
             assert_eq!(record.outcome, outcome);
             assert_eq!(port.events, ["create", "write", "finish"]);
-            assert!(!record.cleanup_errors.is_empty());
+            assert_ne!(record.cleanup_errors, [] as [std::string::String; 0]);
         }
     }
 
@@ -969,7 +969,7 @@ mod tests {
         assert!(record.main_destination_created);
         assert_eq!(record.bytes_submitted, 0);
         assert_eq!(record.bytes_confirmed, 0);
-        assert!(port.written.is_empty());
+        assert_eq!(port.written, [] as [u8; 0]);
         assert_eq!(port.events, ["create", "finish"]);
         assert!(record.error.as_deref().unwrap().contains("destination"));
     }
@@ -1007,7 +1007,7 @@ mod tests {
                 result.outcome,
                 Outcome::AlreadyCurrent | Outcome::NewerThanSupported | Outcome::Refused
             ));
-            assert!(port.written.is_empty());
+            assert_eq!(port.written, [] as [u8; 0]);
             assert_eq!(port.events, ["finish"]);
         }
         let mut port = main_port();
@@ -1022,7 +1022,7 @@ mod tests {
             .outcome,
             Outcome::Refused
         );
-        assert!(port.written.is_empty());
+        assert_eq!(port.written, [] as [u8; 0]);
     }
     #[test]
     fn main_failure_never_turns_later_detach_into_success() {
@@ -1312,9 +1312,9 @@ mod tests {
         assert_eq!(record.outcome, Outcome::Refused);
         assert_eq!(record.bytes_submitted, 0);
         assert_eq!(record.bytes_confirmed, 0);
-        assert!(!record.cleanup_errors.is_empty());
+        assert_ne!(record.cleanup_errors, [] as [std::string::String; 0]);
         assert_eq!(port.calls, [0xf1]);
-        assert!(port.bytes.is_empty());
+        assert_eq!(port.bytes, [] as [u8; 0]);
         assert!(port.cleanup);
     }
     #[test]
@@ -1330,9 +1330,9 @@ mod tests {
         assert_eq!(record.outcome, Outcome::DestinationCreatedWithoutPayload);
         assert!(record.main_destination_created);
         assert_eq!(record.bytes_submitted, 0);
-        assert!(!record.cleanup_errors.is_empty());
+        assert_ne!(record.cleanup_errors, [] as [std::string::String; 0]);
         assert_eq!(port.events, ["create", "finish"]);
-        assert!(port.written.is_empty());
+        assert_eq!(port.written, [] as [u8; 0]);
     }
     #[test]
     fn selected_324_release_uses_its_target_and_all_706_blocks() {
@@ -1368,7 +1368,7 @@ mod tests {
             };
             let record = bluetooth_release(&mut port, &payload, 324, policy, || false);
             assert_eq!(record.outcome, outcome);
-            assert!(port.bytes.is_empty());
+            assert_eq!(port.bytes, [] as [u8; 0]);
             assert_eq!(port.calls, [0xf1]);
         }
     }
@@ -1398,7 +1398,7 @@ mod tests {
                 commands.push(0xf2);
                 assert_eq!(port.calls, commands);
             } else {
-                assert!(port.bytes.is_empty());
+                assert_eq!(port.bytes, [] as [u8; 0]);
                 assert_eq!(port.calls, [0xf1]);
             }
         }
@@ -1442,7 +1442,7 @@ mod tests {
                 || false,
             );
             assert_eq!(record.outcome, Outcome::Refused);
-            assert!(port.bytes.is_empty());
+            assert_eq!(port.bytes, [] as [u8; 0]);
             assert_eq!(port.calls, [0xf1]);
         }
         let mut port = Fake {
@@ -1506,7 +1506,7 @@ mod tests {
                 .outcome,
                 outcome
             );
-            assert!(port.bytes.is_empty());
+            assert_eq!(port.bytes, [] as [u8; 0]);
             assert_eq!(port.calls, [0xf1]);
             assert!(port.cleanup);
         }
@@ -1577,7 +1577,7 @@ mod tests {
             .outcome,
             Outcome::CancelledBeforeWrite
         );
-        assert!(port.calls.is_empty());
+        assert_eq!(port.calls, [] as [u8; 0]);
         assert!(port.cleanup);
     }
     #[test]
@@ -1591,7 +1591,7 @@ mod tests {
             || false,
         );
         assert_eq!(default.outcome, Outcome::NewerThanSupported);
-        assert!(main.written.is_empty());
+        assert_eq!(main.written, [] as [u8; 0]);
         let mut main = main_port();
         main.version = b"www.gulikit.com\nversion 5.10";
         let allowed = main_transfer(
@@ -1618,7 +1618,7 @@ mod tests {
                 result.outcome,
                 Outcome::AlreadyCurrent | Outcome::Refused
             ));
-            assert!(main.written.is_empty());
+            assert_eq!(main.written, [] as [u8; 0]);
         }
         let mut main = main_port();
         main.version = b"www.gulikit.com\nversion 5.10";
@@ -1652,7 +1652,7 @@ mod tests {
             .outcome,
             Outcome::NewerThanSupported
         );
-        assert!(bt.bytes.is_empty());
+        assert_eq!(bt.bytes, [] as [u8; 0]);
         let mut bt = Fake {
             version: 508,
             ..Fake::default()
@@ -1685,7 +1685,7 @@ mod tests {
                 || false,
             );
             assert_eq!(result.outcome, outcome);
-            assert!(bt.bytes.is_empty());
+            assert_eq!(bt.bytes, [] as [u8; 0]);
             assert_eq!(result.bytes_submitted, 0);
         }
     }

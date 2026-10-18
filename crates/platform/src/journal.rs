@@ -750,11 +750,12 @@ mod verification_tests {
         let failed = finalize_record(&mut readonly, input);
         assert_eq!(failed["record_finalized"], false);
         assert_eq!(failed["transfer"]["outcome"], "installed_verified");
-        assert!(
-            !failed["transfer"]["cleanup_errors"]
+        assert_ne!(
+            failed["transfer"]["cleanup_errors"]
                 .as_array()
                 .unwrap()
-                .is_empty()
+                .as_slice(),
+            [] as [serde_json::Value; 0]
         );
         let reopened: Vec<serde_json::Value> = std::fs::read_to_string(temporary.path())
             .unwrap()

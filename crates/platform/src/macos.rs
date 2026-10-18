@@ -1170,7 +1170,10 @@ mod tests {
         let hub = collect(1);
         assert_eq!(hub["bot"], false);
         assert_eq!(hub["cached"], false);
-        assert!(hub["storage_identities"].as_array().unwrap().is_empty());
+        assert_eq!(
+            hub["storage_identities"].as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
         let controller = collect(2);
         assert_eq!(controller["bot"], true);
         assert_eq!(controller["cached"], true);

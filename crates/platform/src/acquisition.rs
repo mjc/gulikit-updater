@@ -43,6 +43,6 @@ mod tests {
         assert_eq!(failure.cleanup_errors, ["remount failed"]);
         let clean = AcquisitionError::after_cleanup("open failed".into(), Ok(()));
         assert_eq!(clean.error, "open failed");
-        assert!(clean.cleanup_errors.is_empty());
+        assert_eq!(clean.cleanup_errors, [] as [String; 0]);
     }
 }
