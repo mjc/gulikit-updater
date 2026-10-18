@@ -57,6 +57,31 @@ The window resizes and scrolls, with a minimum size of 760 × 600. macOS, Window
 and Linux use the same Slint source. A build on one platform does not establish
 acceptance on the others.
 
+For native startup and normal-shutdown measurements, enter
+`devenv --profile profiling shell` and build with
+`cargo build -p gulikit-ui --release --locked`. The profile retains debug symbols
+in the optimized binary and supplies Linux profiling and virtual-display tools.
+
+```sh
+GULIKIT_PROFILE_LIFECYCLE_MS=1000 pyroclast cpu --out artifacts/research/lifecycle/cpu -- target/release/gulikit-ui --demo
+```
+
+`GULIKIT_PROFILE_LIFECYCLE_MS` requests a normal window close after the given
+idle interval; it requires `--demo` and accepts 50–60000 milliseconds. Its JSON
+output separates time to show the window, idle time, and shutdown through the
+worker join. Time to show the window does not establish time to first paint.
+Pyroclast records the whole process, including initialization and teardown.
+Use a new output directory for each capture. On macOS, select the installed
+Xcode developer directory for the command if `xctrace` is unavailable.
+
+Pyroclast allocation recording currently requires Linux:
+
+```sh
+xvfb-run -a env GULIKIT_PROFILE_LIFECYCLE_MS=1000 pyroclast memory --out artifacts/research/lifecycle/heap -- target/release/gulikit-ui --demo
+```
+
+Keep Linux virtual-display results separate from native macOS measurements.
+
 ```sh
 devenv shell -- cargo test -p gulikit-ui
 devenv tasks run check:all

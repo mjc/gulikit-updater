@@ -22,6 +22,37 @@
       fontconfig
     ];
 
+  profiles.profiling.module = {
+    env = {
+      CARGO_PROFILE_RELEASE_DEBUG = "1";
+      CARGO_PROFILE_RELEASE_STRIP = "none";
+    }
+    // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      LD_LIBRARY_PATH = lib.makeLibraryPath (
+        with pkgs;
+        [
+          libxkbcommon
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXrandr
+          xorg.libXi
+          xorg.libxcb
+        ]
+      );
+    };
+    packages = [
+      pkgs.resvg
+    ]
+    ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (
+      with pkgs;
+      [
+        heaptrack
+        linuxPackages.perf
+        xvfb-run
+      ]
+    );
+  };
+
   treefmt = {
     enable = true;
     config = {
