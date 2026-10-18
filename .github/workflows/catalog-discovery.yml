@@ -1,0 +1,31 @@
+name: Check official release candidates
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record official page and archive observations
+        shell: bash
+        run: |
+          mkdir -p artifacts/discovery
+          args=(--watchlist catalog/watch.json --output artifacts/discovery/report.json)
+          if [[ -f catalog/discovery-baseline.json ]]; then
+            args+=(--baseline catalog/discovery-baseline.json)
+          fi
+          python3 tools/discover_releases.py "${args[@]}"
+      - name: Preserve the review report, including incomplete observations
+        if: ${{ always() && hashFiles('artifacts/discovery/report.json') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: official-release-observations
+          path: artifacts/discovery/report.json
+          if-no-files-found: error
+          retention-days: 7

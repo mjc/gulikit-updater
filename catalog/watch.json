@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "pages": [
+    { "id": "official-downloads", "url": "https://www.gulikit.com/download/" },
+    {
+      "id": "kk3-main-release",
+      "url": "https://www.gulikit.com/newsinfo/887152.html"
+    },
+    {
+      "id": "kk3-bluetooth-release",
+      "url": "https://www.gulikit.com/newsinfo/915900.html"
+    }
+  ],
+  "archives": []
+}

@@ -211,3 +211,31 @@ remain hardware-unqualified. To compare a later observation of the same official
 page, pass `--previous candidate.json` to `prepare`; its report includes
 `page_changed`. Commit the reviewed metadata and candidate evidence through the
 normal code-review process, keeping firmware ZIPs outside the source repository.
+
+Automated discovery compares official page titles, normalized page content and
+the hashes of bounded, page-linked static scripts. This covers the site's
+JavaScript-backed wrappers without executing JavaScript. Known anti-CSRF token
+and nonce changes are excluded from the page comparison. Optional reviewed,
+stable direct ZIP URLs can be fingerprinted to detect replaced archive bytes.
+CAPTCHA-gated firmware remains a browser download.
+
+```sh
+python3 tools/discover_releases.py --watchlist catalog/watch.json --output /path/to/new-report.json
+python3 tools/discover_releases.py --watchlist catalog/watch.json --baseline /path/to/reviewed-report.json --output /path/to/next-report.json
+```
+
+The **Check official release candidates** Actions workflow runs this check on
+demand and preserves its report as an artifact. Review a successful observation
+before committing it as `catalog/discovery-baseline.json`. Without a baseline,
+each successfully observed source is a new review candidate. Reports never
+update the catalog or authorize firmware. HTTP errors, rate limits, unsafe
+resources and incomplete observations stay explicit; the last reviewed baseline
+is preserved. Redirects and unapproved script origins are refused. The checker
+fetches only GuliKit pages, approved page-linked scripts and configured stable
+official ZIPs; it does not solve CAPTCHAs or execute an updater.
+
+The initial watchlist covers the download index and the KK3 Main and Bluetooth
+release pages. No direct ZIP URL or reviewed baseline is configured yet. The
+workflow has no recurring schedule; a maintainer starts each check explicitly.
+Watchlists are limited to 256 KiB and reports/baselines to 16 MiB. A scan whose
+report exceeds that limit must use a smaller watchlist; it publishes no report.
