@@ -114,8 +114,9 @@ char *gu_snapshot(uint64_t bound_id) {
             IOObjectRelease(service);
         }
         if (iterator) IOObjectRelease(iterator);
-        DASessionRef session=DASessionCreate(kCFAllocatorDefault);
-        if (!session) [errors addObject:@"Disk Arbitration unavailable"];
+        BOOL arbitrationAttempted=bound_id==0;
+        DASessionRef session=arbitrationAttempted ? DASessionCreate(kCFAllocatorDefault) : NULL;
+        if (arbitrationAttempted && !session) [errors addObject:@"Disk Arbitration unavailable"];
         iterator=0;
         if (IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOMedia"),&iterator)) [errors addObject:@"Media enumeration failed"];
         while (iterator && (service=IOIteratorNext(iterator))) {
@@ -125,6 +126,10 @@ char *gu_snapshot(uint64_t bound_id) {
             // but internal media cannot belong to any physical USB ancestor.
             if (bound_id && !id) {IOObjectRelease(service);continue;}
             NSString *bsd=p[@"BSD Name"];
+            if (bsd && !arbitrationAttempted) {
+                arbitrationAttempted=YES;session=DASessionCreate(kCFAllocatorDefault);
+                if(!session)[errors addObject:@"Disk Arbitration unavailable"];
+            }
             DADiskRef disk=session && bsd ? DADiskCreateFromBSDName(kCFAllocatorDefault,session,bsd.UTF8String) : NULL;
             NSDictionary *description=disk ? CFBridgingRelease(DADiskCopyDescription(disk)) : nil;
             NSString *label=description[(__bridge NSString *)kDADiskDescriptionVolumeNameKey];
