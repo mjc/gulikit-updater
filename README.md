@@ -138,3 +138,23 @@ cargo test -p gulikit-core --test vendor_packages -- --ignored
 have separate run instructions. Protocol details, hardware evidence and remaining
 work live in the [NS39 guide](https://lific.mjc.lol/GULI/pages/242) and
 [delivery plan](https://lific.mjc.lol/GULI/plans/141).
+
+The desktop catalog is available before connecting a controller. Choose a product,
+component and version, then use **Official download** or **Import ZIP**. Pages
+that require a CAPTCHA open in your default system browser; download the complete
+original archive there and import it for the selected release. Selecting an older
+version requires explicit rollback consent before it can become eligible.
+
+```sh
+cargo run --bin gulikit-updater -- catalog releases --product kk3-max --component bluetooth --json
+cargo run --bin gulikit-updater -- catalog source --product kk3-max --component bluetooth --version 3.24
+cargo run --bin gulikit-updater -- catalog download --product kk3-max --component bluetooth --version 3.24 --output /path/to/original.zip --json
+```
+
+`catalog download` reports `manual_required` when no reviewed direct ZIP URL is
+recorded. Add `--open` to request the official page in your default browser.
+Direct downloads use HTTPS, reject redirects and unexpected encodings, and check
+the complete archive's size and SHA-256 before publishing a new destination file.
+They never overwrite an existing file. These checks establish consistency with
+the chosen metadata; they do not establish vendor authenticity. Browsing or
+acquiring an archive does not authorize a firmware write.

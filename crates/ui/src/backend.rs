@@ -1,5 +1,6 @@
 //! One serialized worker for native dialogs, bounded package I/O and updater operations.
 use crate::live::{Event, Work};
+use gulikit_catalog::{Catalog, Entry, SoftwareSupport};
 use gulikit_core::package::{Component, Model};
 use gulikit_updater::updater::{self, ReceiptIdentity, Reply, Request};
 use std::{
@@ -185,6 +186,22 @@ fn run_native(
     }
     match work {
         Work::ChoosePackage(component) => choose_package(component, catalog, cancelled),
+        Work::ImportRelease(entry) => import_release(*entry, cancelled),
+        Work::OpenSource(entry) => {
+            gulikit_platform::download::open_official_source(&entry)
+                .map_err(|error| error.to_string())?;
+            Ok(Event::CatalogAction(
+                "Requested the official GuliKit release page in your browser.".into(),
+            ))
+        }
+        Work::OpenChangelog(entry) => {
+            gulikit_platform::download::open_official_changelog(&entry)
+                .map_err(|error| error.to_string())?;
+            Ok(Event::CatalogAction(
+                "Requested the official release notes in your browser.".into(),
+            ))
+        }
+        Work::DownloadRelease(entry) => download_release(*entry, cancelled),
         Work::OpenAttempt => open_attempt(),
         Work::Inspect {
             component,
@@ -218,6 +235,74 @@ fn run_native(
             Err("Simulated device operations are unavailable in native mode.".into())
         }
         Work::Shutdown => Ok(Event::Cancelled),
+    }
+}
+
+fn entry_component(entry: &Entry) -> Result<Component, String> {
+    match entry.component() {
+        "main" => Ok(Component::Main),
+        "bluetooth" => Ok(Component::Bluetooth),
+        _ => Err("Catalog release uses an unsupported component.".into()),
+    }
+}
+
+fn import_release(entry: Entry, cancelled: &AtomicBool) -> Result<Event, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title(format!("Choose {} firmware ZIP", entry.version()))
+        .add_filter("Firmware ZIP", &["zip"])
+        .pick_file()
+    else {
+        return Ok(Event::Cancelled);
+    };
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(Event::Cancelled);
+    }
+    let component = entry_component(&entry)?;
+    let catalog = Catalog::from_entry(entry);
+    inspect_selected_package_from_catalog(&path, component, Some(&catalog))
+}
+
+fn download_release(entry: Entry, cancelled: &AtomicBool) -> Result<Event, String> {
+    if entry.availability() == gulikit_catalog::DownloadAvailability::Unavailable {
+        return Err(gulikit_platform::download::DownloadError::Unavailable.to_string());
+    }
+    if entry.download_url().is_none() {
+        gulikit_platform::download::open_official_source(&entry)
+            .map_err(|error| error.to_string())?;
+        return Ok(Event::CatalogAction(
+            "Requested the official release page. Download the archive manually from that page."
+                .into(),
+        ));
+    }
+    let Some(path) = rfd::FileDialog::new()
+        .set_title(format!("Save {} firmware archive", entry.version()))
+        .set_file_name(entry.archive())
+        .save_file()
+    else {
+        return Ok(Event::Cancelled);
+    };
+    let mut is_cancelled = || cancelled.load(Ordering::Acquire);
+    match gulikit_platform::download::download_release(&entry, &path, &mut is_cancelled)
+        .map_err(|error| error.to_string())?
+    {
+        gulikit_platform::download::DownloadResult::ManualRequired { source_url: _ } => {
+            gulikit_platform::download::open_official_source(&entry)
+                .map_err(|error| error.to_string())?;
+            Ok(Event::CatalogAction(
+                "Requested the official release page. Download the archive manually from that page.".into(),
+            ))
+        }
+        gulikit_platform::download::DownloadResult::Downloaded { path } => {
+            if entry.software_support() != SoftwareSupport::Supported {
+                return Ok(Event::CatalogAction(format!(
+                    "Downloaded {}. This release is metadata only and was not inspected for update use.",
+                    path.display()
+                )));
+            }
+            let component = entry_component(&entry)?;
+            let catalog = Catalog::from_entry(entry);
+            inspect_selected_package_from_catalog(&path, component, Some(&catalog))
+        }
     }
 }
 

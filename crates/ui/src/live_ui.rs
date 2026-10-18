@@ -1,4 +1,4 @@
-use super::{AppWindow, Page};
+use super::{AppWindow, Page, Palette};
 use gulikit_core::{package::Component, update::Progress};
 use gulikit_ui::{
     Page as ModelPage,
@@ -51,6 +51,7 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     let v = app.view();
     ui.set_model_confirmed(v.confirmed);
     ui.set_same_controller(v.same_controller);
+    ui.set_rollback_allowed(v.allow_rollback);
     let can_update = v.can_update && ui.get_demo_mode();
     ui.set_primary_enabled(v.can_primary && (v.page != ModelPage::Ready || can_update));
     let mut primary_label = ui.get_primary_label();
@@ -109,6 +110,31 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     state.connected = v.connected;
     state.identity_known = v.confirmed && v.connected;
     state.warning = !can_update && v.page != ModelPage::Verified;
+    state.catalog_products = string_model(&v.catalog_products);
+    state.catalog_product_index = v.catalog_product_index;
+    state.catalog_components = string_model(&v.catalog_components);
+    state.catalog_component_index = v.catalog_component_index;
+    state.catalog_versions = string_model(&v.catalog_versions);
+    state.catalog_version_index = v.catalog_version_index;
+    update_text(&mut state.catalog_source_url, v.catalog_source_url);
+    update_text(&mut state.catalog_changelog_url, v.catalog_changelog_url);
+    update_text(&mut state.catalog_archive, v.catalog_archive);
+    update_text(
+        &mut state.catalog_software_support,
+        v.catalog_software_support,
+    );
+    update_text(&mut state.catalog_parser_id, v.catalog_parser_id);
+    update_text(
+        &mut state.catalog_hardware_acceptance,
+        v.catalog_hardware_acceptance,
+    );
+    update_text(&mut state.catalog_hardware_scope, v.catalog_hardware_scope);
+    update_text(&mut state.catalog_availability, v.catalog_availability);
+    state.catalog_can_import = v.catalog_can_import;
+    state.catalog_can_open_source = v.catalog_can_open_source;
+    state.catalog_can_open_changelog = v.catalog_can_open_changelog;
+    state.catalog_can_download = v.catalog_can_download;
+    state.can_allow_rollback = v.can_allow_rollback;
     let notice = if v.can_update && !ui.get_demo_mode() {
         NATIVE_UPDATE_UNAVAILABLE
     } else {
@@ -119,6 +145,15 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     update_text(&mut state.status, status);
     update_log(&mut state.log, v.log);
     ui.set_state(state);
+}
+
+fn string_model(values: &[String]) -> slint::ModelRc<slint::SharedString> {
+    slint::ModelRc::new(slint::VecModel::from(
+        values
+            .iter()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 #[expect(
@@ -184,6 +219,70 @@ fn act(
     }
 }
 
+fn bind_catalog_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>) {
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_select_catalog_product(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            act(&weak, &driver, |app| {
+                app.select_catalog_product(index);
+                None
+            });
+        });
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_select_catalog_component(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            act(&weak, &driver, |app| {
+                app.select_catalog_component(index);
+                None
+            });
+        });
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_select_catalog_version(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            act(&weak, &driver, |app| {
+                app.select_catalog_version(index);
+                None
+            });
+        });
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_import_release(move || act(&weak, &driver, LiveApp::import_release));
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_open_source(move || act(&weak, &driver, LiveApp::open_source));
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_open_changelog(move || act(&weak, &driver, LiveApp::open_changelog));
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_download_release(move || act(&weak, &driver, LiveApp::download_release));
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_allow_rollback(move |enabled| {
+            act(&weak, &driver, |app| {
+                app.set_allow_rollback(enabled);
+                None
+            });
+        });
+    }
+}
+
 fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
     {
         let (weak, driver) = (ui.as_weak(), driver.clone());
@@ -234,6 +333,7 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
         let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_choose_file(move || act(&weak, &driver, LiveApp::choose_package));
     }
+    bind_catalog_actions(ui, driver);
     if demo || cfg!(target_os = "macos") {
         let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_open_attempt(move || act(&weak, &driver, LiveApp::open_attempt));
@@ -282,16 +382,25 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
     }
 }
 
-pub fn create_mode(
+pub fn create_mode_with_catalog(
     requests: Sender<Work>,
     events: Receiver<Event>,
     cancelled: Arc<AtomicBool>,
     demo: bool,
+    catalog: Option<gulikit_catalog::Catalog>,
 ) -> Result<(AppWindow, slint::Timer), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    // Application surfaces use a fixed light palette; native widgets must match
+    // it even when the operating system requests dark appearance.
+    ui.global::<Palette>()
+        .set_color_scheme(slint::language::ColorScheme::Light);
     ui.set_demo_mode(demo);
+    let mut app = LiveApp::default();
+    if let Some(catalog) = catalog {
+        app.set_catalog(catalog);
+    }
     let driver = Rc::new(RefCell::new(Driver {
-        app: LiveApp::default(),
+        app,
         requests,
         cancelled,
     }));

@@ -1,5 +1,8 @@
 //! UI intents and backend observations; no native I/O runs in this model.
 use crate::Page;
+use gulikit_catalog::{
+    Catalog, DownloadAvailability, Entry, HardwareAcceptance, ParserId, SoftwareSupport,
+};
 use gulikit_core::{
     package::{Component, Model, PackageInfo, catalog},
     update::{Outcome, Progress, verify_restart},
@@ -17,6 +20,10 @@ pub enum Work {
         confirmed: bool,
     },
     ChoosePackage(Component),
+    ImportRelease(Box<Entry>),
+    OpenSource(Box<Entry>),
+    OpenChangelog(Box<Entry>),
+    DownloadRelease(Box<Entry>),
     Update {
         path: PathBuf,
         component: Component,
@@ -45,6 +52,7 @@ pub enum Event {
     Transferred { record: PathBuf, result: Attempt },
     Verified(Readback),
     Prior { path: PathBuf, prior: PriorAttempt },
+    CatalogAction(String),
     Progress(Progress),
     Cancelled,
     Error(String),
@@ -58,6 +66,8 @@ enum Job {
     Transfer,
     Verify,
     Receipt,
+    CatalogAction,
+    Download,
 }
 
 struct Selected {
@@ -107,6 +117,27 @@ pub struct View<'a> {
     pub can_choose_package: bool,
     pub can_open_attempt: bool,
     pub can_switch_component: bool,
+    pub catalog_products: Vec<String>,
+    pub catalog_product_index: i32,
+    pub catalog_components: Vec<String>,
+    pub catalog_component_index: i32,
+    pub catalog_versions: Vec<String>,
+    pub catalog_version_index: i32,
+    pub catalog_source_url: &'a str,
+    pub catalog_changelog_url: &'a str,
+    pub catalog_archive: &'a str,
+    pub catalog_software_support: &'a str,
+    pub catalog_parser_id: &'a str,
+    pub catalog_hardware_acceptance: &'a str,
+    pub catalog_hardware_scope: &'a str,
+    pub catalog_availability: &'a str,
+    pub catalog_available: bool,
+    pub catalog_can_import: bool,
+    pub catalog_can_open_source: bool,
+    pub catalog_can_open_changelog: bool,
+    pub catalog_can_download: bool,
+    pub allow_rollback: bool,
+    pub can_allow_rollback: bool,
     pub can_troubleshoot: bool,
     pub can_primary: bool,
     pub primary_label: Cow<'a, str>,
@@ -114,6 +145,8 @@ pub struct View<'a> {
     pub log: &'a [String],
 }
 
+// Independent operator attestations and connection/rollback state.
+#[allow(clippy::struct_excessive_bools)]
 pub struct LiveApp {
     component: Component,
     confirmed: bool,
@@ -126,6 +159,11 @@ pub struct LiveApp {
     receipt: Option<Receipt>,
     progress: Progress,
     retry_block: Option<RetryBlock>,
+    catalog: Option<Catalog>,
+    catalog_product_index: Option<usize>,
+    catalog_component_index: Option<usize>,
+    catalog_version_index: Option<usize>,
+    allow_rollback: bool,
     connected: bool,
     notice: String,
     log: Vec<String>,
@@ -148,6 +186,11 @@ impl Default for LiveApp {
                 total: 0,
             },
             retry_block: None,
+            catalog: None,
+            catalog_product_index: None,
+            catalog_component_index: None,
+            catalog_version_index: None,
+            allow_rollback: false,
             connected: false,
             notice: "Check the physical NS39 label and Max controls.".into(),
             log: vec![],
@@ -162,7 +205,199 @@ fn index(component: Component) -> usize {
     }
 }
 
+fn parse_component(value: &str) -> Option<Component> {
+    match value {
+        "main" => Some(Component::Main),
+        "bluetooth" => Some(Component::Bluetooth),
+        _ => None,
+    }
+}
+
+fn version_key(value: &str) -> (u16, u16) {
+    let (major, minor) = value.split_once('.').unwrap_or(("0", "0"));
+    let parse = |value: &str| value.parse::<u16>().unwrap_or(0);
+    (parse(major), parse(minor))
+}
+
 impl LiveApp {
+    /// Configure an optional descriptive catalog before the UI starts.
+    ///
+    /// Calls made while an operation, pending receipt or uncertain outcome is
+    /// active are ignored so catalog changes cannot disturb recovery state.
+    pub fn set_catalog(&mut self, catalog: Catalog) {
+        if !self.can_select_catalog() {
+            return;
+        }
+        self.catalog = Some(catalog);
+        self.catalog_product_index = (!self.catalog_products().is_empty()).then_some(0);
+        let components = self.catalog_components();
+        self.catalog_component_index = components
+            .iter()
+            .position(|value| parse_component(value) == Some(self.component))
+            .or_else(|| (!components.is_empty()).then_some(0));
+        self.catalog_version_index = (!self.catalog_versions().is_empty()).then_some(0);
+        self.clear_selected_package();
+    }
+
+    #[must_use]
+    pub fn catalog_products(&self) -> Vec<String> {
+        let Some(catalog) = &self.catalog else {
+            return Vec::new();
+        };
+        let mut products: Vec<_> = catalog
+            .entries()
+            .iter()
+            .map(|entry| entry.product().to_owned())
+            .collect();
+        products.sort();
+        products.dedup();
+        products
+    }
+
+    #[must_use]
+    pub fn catalog_components(&self) -> Vec<String> {
+        let Some(product) = self.selected_product() else {
+            return Vec::new();
+        };
+        let Some(catalog) = &self.catalog else {
+            return Vec::new();
+        };
+        let mut components: Vec<_> = catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.product() == product)
+            .map(|entry| entry.component().to_owned())
+            .collect();
+        components.sort();
+        components.dedup();
+        components
+    }
+
+    #[must_use]
+    pub fn catalog_versions(&self) -> Vec<String> {
+        let (Some(product), Some(component), Some(catalog)) = (
+            self.selected_product(),
+            self.selected_component(),
+            self.catalog.as_ref(),
+        ) else {
+            return Vec::new();
+        };
+        let mut versions: Vec<_> = catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.product() == product && entry.component() == component)
+            .map(|entry| entry.version().to_owned())
+            .collect();
+        versions.sort_by_key(|value| std::cmp::Reverse(version_key(value)));
+        versions.dedup();
+        versions
+    }
+
+    #[must_use]
+    pub fn selected_release(&self) -> Option<&Entry> {
+        let product = self.selected_product()?;
+        let component = self.selected_component()?;
+        let version = self
+            .catalog_versions()
+            .get(self.catalog_version_index?)?
+            .clone();
+        self.catalog.as_ref()?.entries().iter().find(|entry| {
+            entry.product() == product
+                && entry.component() == component
+                && entry.version() == version
+        })
+    }
+
+    #[must_use]
+    pub fn catalog_product_index(&self) -> i32 {
+        self.catalog_product_index
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(-1)
+    }
+
+    #[must_use]
+    pub fn catalog_component_index(&self) -> i32 {
+        self.catalog_component_index
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(-1)
+    }
+
+    #[must_use]
+    pub fn catalog_version_index(&self) -> i32 {
+        self.catalog_version_index
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(-1)
+    }
+
+    pub fn select_catalog_product(&mut self, index: usize) {
+        if !self.can_select_catalog() || index >= self.catalog_products().len() {
+            return;
+        }
+        self.catalog_product_index = Some(index);
+        let components = self.catalog_components();
+        self.catalog_component_index = components
+            .iter()
+            .position(|value| parse_component(value) == Some(self.component))
+            .or_else(|| (!components.is_empty()).then_some(0));
+        self.catalog_version_index = (!self.catalog_versions().is_empty()).then_some(0);
+        if let Some(component) = self
+            .selected_component()
+            .as_deref()
+            .and_then(parse_component)
+        {
+            let _ = self.select_component(component);
+        }
+        self.clear_selected_package();
+    }
+
+    pub fn select_catalog_component(&mut self, index: usize) {
+        if !self.can_select_catalog() || index >= self.catalog_components().len() {
+            return;
+        }
+        self.catalog_component_index = Some(index);
+        self.catalog_version_index = (!self.catalog_versions().is_empty()).then_some(0);
+        if let Some(component) = self
+            .selected_component()
+            .as_deref()
+            .and_then(parse_component)
+        {
+            let _ = self.select_component(component);
+        }
+        self.clear_selected_package();
+    }
+
+    pub fn select_catalog_version(&mut self, index: usize) {
+        if !self.can_select_catalog() || index >= self.catalog_versions().len() {
+            return;
+        }
+        self.catalog_version_index = Some(index);
+        self.clear_selected_package();
+    }
+
+    fn selected_product(&self) -> Option<String> {
+        self.catalog_products()
+            .get(self.catalog_product_index?)
+            .cloned()
+    }
+
+    fn selected_component(&self) -> Option<String> {
+        self.catalog_components()
+            .get(self.catalog_component_index?)
+            .cloned()
+    }
+
+    fn can_select_catalog(&self) -> bool {
+        self.pending.is_none() && self.retry_block.is_none() && !self.has_unverified_receipt()
+    }
+
+    fn clear_selected_package(&mut self) {
+        self.package = None;
+        self.allow_rollback = false;
+        self.notice =
+            "Selected release changed. Import that exact archive before considering an update."
+                .into();
+    }
+
     #[must_use]
     pub fn is_busy(&self) -> bool {
         self.pending.is_some()
@@ -212,7 +447,9 @@ impl LiveApp {
             return None;
         }
         self.component = component;
+        self.sync_catalog_component();
         self.package = None;
+        self.allow_rollback = false;
         self.receipt = None;
         self.same_controller = false;
         self.attachment = None;
@@ -227,12 +464,102 @@ impl LiveApp {
         self.notice = "Main and Bluetooth use different procedures. Exit the current mode before entering the other mode and inspecting again.".into();
         None
     }
+
+    fn sync_catalog_component(&mut self) {
+        if self.catalog.is_none() {
+            return;
+        }
+        self.catalog_component_index = self
+            .catalog_components()
+            .iter()
+            .position(|value| parse_component(value) == Some(self.component));
+        self.catalog_version_index = (!self.catalog_versions().is_empty()).then_some(0);
+    }
     pub fn choose_package(&mut self) -> Option<Work> {
         if !self.can_choose_package() {
             return None;
         }
+        if let Some(entry) = self.selected_release().cloned() {
+            return self.import_release_for(entry);
+        }
+        if self.catalog.is_some() {
+            return None;
+        }
         self.pending = Some(Job::Package);
         Some(Work::ChoosePackage(self.component))
+    }
+
+    fn import_release_for(&mut self, entry: Entry) -> Option<Work> {
+        if !self.can_choose_package() || !self.catalog_can_import_entry(&entry) {
+            return None;
+        }
+        self.allow_rollback = false;
+        self.pending = Some(Job::Package);
+        Some(Work::ImportRelease(Box::new(entry)))
+    }
+
+    pub fn import_release(&mut self) -> Option<Work> {
+        self.import_release_for(self.selected_release()?.clone())
+    }
+
+    pub fn open_source(&mut self) -> Option<Work> {
+        if !self.can_catalog_action() {
+            return None;
+        }
+        let entry = self.selected_release()?.clone();
+        self.pending = Some(Job::CatalogAction);
+        Some(Work::OpenSource(Box::new(entry)))
+    }
+
+    pub fn open_changelog(&mut self) -> Option<Work> {
+        if !self.can_catalog_action() {
+            return None;
+        }
+        let entry = self.selected_release()?.clone();
+        entry.changelog_url()?;
+        self.pending = Some(Job::CatalogAction);
+        Some(Work::OpenChangelog(Box::new(entry)))
+    }
+
+    pub fn download_release(&mut self) -> Option<Work> {
+        if !self.can_catalog_action() {
+            return None;
+        }
+        let entry = self.selected_release()?.clone();
+        if entry.availability() == DownloadAvailability::Unavailable {
+            return None;
+        }
+        self.pending = Some(Job::Download);
+        Some(Work::DownloadRelease(Box::new(entry)))
+    }
+
+    fn can_catalog_action(&self) -> bool {
+        self.pending.is_none() && self.retry_block.is_none() && !self.has_unverified_receipt()
+    }
+
+    fn catalog_can_import_entry(&self, entry: &Entry) -> bool {
+        entry.product() == "kk3-max"
+            && parse_component(entry.component()) == Some(self.component)
+            && entry.software_support() == SoftwareSupport::Supported
+            && self.can_choose_package()
+    }
+
+    pub fn set_allow_rollback(&mut self, allow: bool) {
+        if !allow {
+            self.allow_rollback = false;
+        } else if self.can_allow_rollback() {
+            self.allow_rollback = true;
+        }
+    }
+
+    fn can_allow_rollback(&self) -> bool {
+        self.page == Page::Ready
+            && self.pending.is_none()
+            && self.retry_block.is_none()
+            && !self.has_unverified_receipt()
+            && self.package.is_some()
+            && self.selected_decision_with_policy(gulikit_core::version::VersionPolicy::UpgradeOnly)
+                == Some(VersionDecision::NewerThanSupported)
     }
     fn can_choose_package(&self) -> bool {
         self.pending.is_none()
@@ -291,13 +618,22 @@ impl LiveApp {
             && self.selected_decision() == Some(VersionDecision::Eligible)
     }
     fn selected_decision(&self) -> Option<VersionDecision> {
+        let policy = if self.allow_rollback {
+            gulikit_core::version::VersionPolicy::AllowDowngrade
+        } else {
+            gulikit_core::version::VersionPolicy::UpgradeOnly
+        };
+        self.selected_decision_with_policy(policy)
+    }
+    fn selected_decision_with_policy(
+        &self,
+        policy: gulikit_core::version::VersionPolicy,
+    ) -> Option<VersionDecision> {
         let installed = &self.versions[index(self.component)]
             .as_ref()?
             .installed_version;
         let package = &self.package.as_ref()?.info;
-        package
-            .decision_for_installed(installed, gulikit_core::version::VersionPolicy::UpgradeOnly)
-            .ok()
+        package.decision_for_installed(installed, policy).ok()
     }
     pub fn start(&mut self) -> Option<Work> {
         if !self.can_update() {
@@ -366,6 +702,12 @@ impl LiveApp {
         self.notice.clone_from(&error);
         self.log.push(error);
     }
+    fn catalog_action_failed(&mut self, error: String) {
+        self.pending = None;
+        self.notice.clone_from(&error);
+        self.log.push(error);
+    }
+
     pub fn accept(&mut self, event: Event) {
         match event {
             Event::Progress(progress) if self.pending == Some(Job::Transfer) => {
@@ -387,10 +729,20 @@ impl LiveApp {
             }
             Event::Progress(_) => return,
             Event::WorkerFailed(error) if self.pending.is_some() => {
+                if matches!(self.pending, Some(Job::CatalogAction | Job::Download)) {
+                    self.catalog_action_failed(error);
+                    return;
+                }
                 if self.pending == Some(Job::Transfer) {
                     self.retry_block = Some(RetryBlock::UncertainOutcome);
                 }
                 self.fail(error);
+            }
+            Event::Error(error)
+                if self.pending == Some(Job::CatalogAction)
+                    || self.pending == Some(Job::Download) =>
+            {
+                self.catalog_action_failed(error);
             }
             Event::Error(error) if self.pending.is_some() => self.fail(error),
             Event::Cancelled
@@ -412,8 +764,22 @@ impl LiveApp {
             {
                 self.inspected(inspection);
             }
-            Event::Package { path, info } if self.pending == Some(Job::Package) => {
-                self.selected(path, info);
+            Event::Package { path, info }
+                if matches!(self.pending, Some(Job::Package | Job::Download)) =>
+            {
+                let matches_catalog = self.selected_release().is_none_or(|entry| {
+                    gulikit_core::package::catalog_package_info(entry)
+                        .is_ok_and(|expected| expected == info)
+                });
+                if matches_catalog {
+                    self.selected(path, info);
+                } else {
+                    self.pending = None;
+                    self.package = None;
+                    self.fail(
+                        "Imported archive does not match the selected catalog version.".into(),
+                    );
+                }
             }
             Event::Transferred { record, result } if self.pending == Some(Job::Transfer) => {
                 self.transferred(record, result);
@@ -421,6 +787,18 @@ impl LiveApp {
             Event::Verified(result) if self.pending == Some(Job::Verify) => self.verified(result),
             Event::Prior { path, prior } if self.pending == Some(Job::Receipt) => {
                 self.loaded(path, &prior);
+            }
+            Event::CatalogAction(message) if self.pending == Some(Job::CatalogAction) => {
+                self.pending = None;
+                self.notice.clone_from(&message);
+                self.log.push(message);
+            }
+            Event::CatalogAction(message)
+                if matches!(self.pending, Some(Job::Package | Job::Download)) =>
+            {
+                self.pending = None;
+                self.notice.clone_from(&message);
+                self.log.push(message);
             }
             _ => {
                 if self.pending.is_some() {
@@ -461,6 +839,7 @@ impl LiveApp {
             self.notice = "Package does not match this controller component.".into();
         } else {
             self.receipt = None;
+            self.allow_rollback = false;
             self.package = Some(Selected {
                 path,
                 payload_label: format!("{} bytes", info.payload_size),
@@ -748,6 +1127,26 @@ impl LiveApp {
     }
     #[must_use]
     pub fn view(&self) -> View<'_> {
+        let entry = self.selected_release();
+        let hardware_evidence = entry.and_then(Entry::hardware_evidence);
+        let parser_id = entry.map_or("", |entry| match entry.parser_id() {
+            ParserId::None => "none",
+            ParserId::Kk3MainBinaryV1 => "kk3_main_binary_v1",
+            ParserId::Kk3BluetoothPeV1 => "kk3_bluetooth_pe_v1",
+        });
+        let hardware_acceptance = entry.map_or("", |entry| match entry.hardware_acceptance() {
+            HardwareAcceptance::Qualified => "qualified",
+            HardwareAcceptance::Unqualified => "unqualified",
+        });
+        let software_support = entry.map_or("", |entry| match entry.software_support() {
+            SoftwareSupport::Supported => "supported",
+            SoftwareSupport::MetadataOnly => "metadata only",
+        });
+        let availability = entry.map_or("", |entry| match entry.availability() {
+            DownloadAvailability::Unknown => "unknown",
+            DownloadAvailability::Available => "available",
+            DownloadAvailability::Unavailable => "unavailable",
+        });
         View {
             page: self.page,
             component: self.component,
@@ -776,6 +1175,32 @@ impl LiveApp {
             can_choose_package: self.can_choose_package(),
             can_open_attempt: self.can_open_attempt(),
             can_switch_component: self.can_switch_component(),
+            catalog_products: self.catalog_products(),
+            catalog_product_index: self.catalog_product_index(),
+            catalog_components: self.catalog_components(),
+            catalog_component_index: self.catalog_component_index(),
+            catalog_versions: self.catalog_versions(),
+            catalog_version_index: self.catalog_version_index(),
+            catalog_source_url: entry.map_or("", Entry::source_url),
+            catalog_changelog_url: entry.and_then(Entry::changelog_url).unwrap_or(""),
+            catalog_archive: entry.map_or("", Entry::archive),
+            catalog_software_support: software_support,
+            catalog_parser_id: parser_id,
+            catalog_hardware_acceptance: hardware_acceptance,
+            catalog_hardware_scope: hardware_evidence.map_or("", |evidence| evidence.scope()),
+            catalog_availability: availability,
+            catalog_available: entry
+                .is_some_and(|entry| entry.availability() == DownloadAvailability::Available),
+            catalog_can_import: entry.is_some_and(|entry| self.catalog_can_import_entry(entry)),
+            catalog_can_open_source: self.can_catalog_action()
+                && entry.is_some_and(|entry| !entry.source_url().is_empty()),
+            catalog_can_open_changelog: self.can_catalog_action()
+                && entry.is_some_and(|entry| entry.changelog_url().is_some()),
+            catalog_can_download: self.can_catalog_action()
+                && entry
+                    .is_some_and(|entry| entry.availability() != DownloadAvailability::Unavailable),
+            allow_rollback: self.allow_rollback,
+            can_allow_rollback: self.can_allow_rollback(),
             can_troubleshoot: self.pending.is_none()
                 && self.retry_block.is_none()
                 && !self.has_unverified_receipt(),

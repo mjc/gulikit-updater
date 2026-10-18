@@ -321,6 +321,12 @@ impl Device for DemoDevice {
             } => self.observe(component, confirmed).map(Event::Inspected),
             Work::ChoosePackage(component) => self.select(component, SamplePackage::Matching),
             Work::ChooseSample { component, sample } => self.select(component, sample),
+            Work::ImportRelease(_)
+            | Work::OpenSource(_)
+            | Work::OpenChangelog(_)
+            | Work::DownloadRelease(_) => {
+                Err("Catalog actions are unavailable in simulated mode.".into())
+            }
             Work::ConfigureDemo(profile) => {
                 self.profile = profile;
                 self.selected = None;

@@ -1,4 +1,4 @@
-import { ScrollView } from "std-widgets.slint";
+import { CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
 export { Palette } from "std-widgets.slint";
 
 export enum Page { connect, ready, writing, restart, verified, failed }
@@ -28,6 +28,25 @@ export struct ViewState {
     status: string,
     error: string,
     log: string,
+    catalog-products: [string],
+    catalog-product-index: int,
+    catalog-components: [string],
+    catalog-component-index: int,
+    catalog-versions: [string],
+    catalog-version-index: int,
+    catalog-source-url: string,
+    catalog-changelog-url: string,
+    catalog-archive: string,
+    catalog-software-support: string,
+    catalog-parser-id: string,
+    catalog-hardware-acceptance: string,
+    catalog-hardware-scope: string,
+    catalog-availability: string,
+    catalog-can-import: bool,
+    catalog-can-open-source: bool,
+    catalog-can-open-changelog: bool,
+    catalog-can-download: bool,
+    can-allow-rollback: bool,
 }
 
 component Label inherits Text { font-size: 13px; color: #64715f; wrap: word-wrap; }
@@ -123,6 +142,14 @@ export component AppWindow inherits Window {
     in property <ViewState> state;
     callback select-component(bool);
     callback select-package(int);
+    callback select-catalog-product(int);
+    callback select-catalog-component(int);
+    callback select-catalog-version(int);
+    callback import-release();
+    callback open-source();
+    callback open-changelog();
+    callback download-release();
+    callback allow-rollback(bool);
     callback primary-action();
     callback scenario-selected(int);
     callback confirm-model(bool);
@@ -132,9 +159,11 @@ export component AppWindow inherits Window {
     callback open-attempt();
     callback cancel-operation();
     in-out property <bool> details-open: false;
+    in-out property <bool> catalog-details-open: false;
     in-out property <bool> log-open: false;
+    in-out property <bool> rollback-allowed: false;
     property <length> sidebar-width: 280px;
-    property <string> screen-title: root.state.page == Page.connect ? "Connect controller" : root.state.page == Page.ready ? root.state.component-name : root.state.page == Page.writing ? "Updating…" : root.state.page == Page.restart ? "Restart controller" : root.state.page == Page.verified ? "Update verified" : "Update stopped";
+    property <string> screen-title: root.state.page == Page.connect ? (root.state.catalog-products.length > 0 ? "Firmware" : "Connect controller") : root.state.page == Page.ready ? root.state.component-name : root.state.page == Page.writing ? "Updating…" : root.state.page == Page.restart ? "Restart controller" : root.state.page == Page.verified ? "Update verified" : "Update stopped";
     forward-focus: primary;
 
     VerticalLayout {
@@ -179,12 +208,16 @@ export component AppWindow inherits Window {
             Rectangle {
                 background: #fbfcf8;
                 VerticalLayout {
-                    padding: 30px; spacing: 18px;
-                    procedure-reminder := Notice {
+                    padding: root.state.catalog-products.length > 0 ? 14px : 30px; spacing: 14px;
+                    if root.state.catalog-products.length == 0: procedure-reminder := Notice {
                         warning: true;
                         text: "Main and Bluetooth use different update and restart procedures.";
                         accessible-role: text; accessible-label: self.text;
                         vertical-stretch: 0;
+                    }
+                    if root.state.catalog-products.length > 0: Label {
+                        text: "Main and Bluetooth firmware use different update and restart procedures.";
+                        color: #64715f;
                     }
                     Text { text: root.screen-title; font-size: 28px; font-weight: 600; color: #24382f; wrap: word-wrap; vertical-stretch: 0; accessible-role: text; accessible-live-region: polite; }
                     ScrollView {
@@ -193,21 +226,77 @@ export component AppWindow inherits Window {
                         horizontal-scrollbar-policy: always-off;
                         VerticalLayout {
                             spacing: 20px; alignment: start;
+                    if root.state.catalog-products.length > 0: VerticalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            background: #edf2e6; border-width: 1px; border-color: #b8c9ad; border-radius: 8px;
+                            VerticalLayout {
+                                padding: 12px; spacing: 9px;
+                                Text { text: "Select a release"; color: #293e2d; font-size: 18px; font-weight: 600; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; min-width: 0px;
+                                        Label { text: "Product"; font-size: 11px; }
+                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog product"; model: root.state.catalog-products; current-index: root.state.catalog-product-index; selected(value) => { root.select-catalog-product(self.current-index); } }
+                                    }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; min-width: 0px;
+                                        Label { text: "Component"; font-size: 11px; }
+                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog component"; model: root.state.catalog-components; current-index: root.state.catalog-component-index; selected(value) => { root.select-catalog-component(self.current-index); } }
+                                    }
+                                    VerticalLayout { spacing: 3px; horizontal-stretch: 1; min-width: 0px;
+                                        Label { text: "Version"; font-size: 11px; }
+                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog version"; model: root.state.catalog-versions; current-index: root.state.catalog-version-index; selected(value) => { root.select-catalog-version(self.current-index); } }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    ActionButton { text: "Download"; accessible-label: "Open official download page"; primary: true; horizontal-stretch: 1; enabled: root.state.catalog-can-download && !root.state.busy; clicked => { root.download-release(); } }
+                                    ActionButton { text: "Import ZIP…"; accessible-label: "Import downloaded ZIP…"; horizontal-stretch: 1; enabled: root.state.catalog-can-import && !root.state.busy; clicked => { root.import-release(); } }
+                                }
+                                Label {
+                                    text: "Software compatibility: " + (root.state.catalog-software-support == "supported" ? "can inspect this firmware" : root.state.catalog-software-support == "metadata only" ? "archive only" : "unknown");
+                                    color: #405538;
+                                }
+                                Label {
+                                    text: "Hardware test: " + (root.state.catalog-hardware-acceptance == "qualified" ? "recorded test; see details" : "no recorded device test");
+                                    color: #405538;
+                                }
+                                Label {
+                                    text: "Official download: " + (root.state.catalog-availability == "available" ? "available from GuliKit" : root.state.catalog-availability == "unavailable" ? "unavailable" : "check the source page");
+                                    font-size: 12px;
+                                }
+                                if root.state.can-allow-rollback || root.rollback-allowed: CheckBox {
+                                    text: "Allow rollback to an older selected version";
+                                    checked: root.rollback-allowed;
+                                    enabled: root.state.can-allow-rollback && !root.state.busy;
+                                    toggled => { root.rollback-allowed = self.checked; root.allow-rollback(self.checked); }
+                                }
+                                ActionButton { text: (root.catalog-details-open ? "▾ " : "▸ ") + "Release details"; accessible-label: "Release details"; quiet: true; horizontal-stretch: 1; clicked => { root.catalog-details-open = !root.catalog-details-open; } }
+                                if root.catalog-details-open: VerticalLayout {
+                                    spacing: 7px;
+                                    Label { text: "Catalog hashes check consistency with supplied metadata; publisher authenticity is not established."; color: #526842; wrap: word-wrap; }
+                                    Label { text: "Archive: " + root.state.catalog-archive; wrap: char-wrap; }
+                                    Label { text: "Parser: " + root.state.catalog-parser-id; wrap: char-wrap; }
+                                    Label { text: "Hardware acceptance: " + root.state.catalog-hardware-acceptance + (root.state.catalog-hardware-scope == "" ? "" : " · " + root.state.catalog-hardware-scope); wrap: char-wrap; }
+                                    Label { text: "Official source: " + root.state.catalog-source-url; wrap: char-wrap; }
+                                    ActionButton { text: "Open official source"; accessible-label: "Open official source"; quiet: true; horizontal-stretch: 1; enabled: root.state.catalog-can-open-source && !root.state.busy; clicked => { root.open-source(); } }
+                                    if root.state.catalog-changelog-url != "": ActionButton { text: "Open release notes"; quiet: true; horizontal-stretch: 1; enabled: root.state.catalog-can-open-changelog && !root.state.busy; clicked => { root.open-changelog(); } }
+                                    if root.state.catalog-changelog-url != "": Label { text: "Release notes: " + root.state.catalog-changelog-url; wrap: char-wrap; }
+                                }
+                            }
+                        }
+                    }
                     if root.state.page == Page.connect || root.state.page == Page.ready || root.state.page == Page.restart || root.state.page == Page.failed: VerticalLayout {
                         spacing: 8px;
-                        ActionButton {
-                            text: (root.model-confirmed ? "☑ " : "☐ ") + "I checked the NS39 label and Max controls";
-                            accessible-label: "I checked the NS39 label and Max controls";
-                            accessible-role: checkbox; accessible-checked: root.model-confirmed;
-                            horizontal-stretch: 1; enabled: !root.state.busy;
-                            clicked => { root.model-confirmed = !root.model-confirmed; root.confirm-model(root.model-confirmed); }
+                        CheckBox {
+                            text: "I checked the NS39 label and Max controls";
+                            checked: root.model-confirmed; enabled: !root.state.busy;
+                            toggled => { root.model-confirmed = self.checked; root.confirm-model(self.checked); }
                         }
-                        if root.state.page == Page.restart: ActionButton {
-                            text: (root.same-controller ? "☑ " : "☐ ") + "I reconnected the same controller";
-                            accessible-label: "I reconnected the same controller";
-                            accessible-role: checkbox; accessible-checked: root.same-controller;
-                            horizontal-stretch: 1; enabled: !root.state.busy;
-                            clicked => { root.same-controller = !root.same-controller; root.confirm-same(root.same-controller); }
+                        if root.state.page == Page.restart: CheckBox {
+                            text: "I reconnected the same controller";
+                            checked: root.same-controller; enabled: !root.state.busy;
+                            toggled => { root.same-controller = self.checked; root.confirm-same(self.checked); }
                         }
                     }
                     if root.state.page == Page.connect && root.state.can-troubleshoot: VerticalLayout {
@@ -217,7 +306,7 @@ export component AppWindow inherits Window {
                         ModeInstruction { bluetooth: root.state.bluetooth; }
                         ModeInstruction { bluetooth: root.state.bluetooth; keep-held: true; }
                         RightmostA { }
-                        ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
+                        if root.state.catalog-products.length == 0: ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
                     }
                     if root.state.page == Page.ready: VerticalLayout {
                         spacing: 16px;
@@ -289,13 +378,13 @@ export component AppWindow inherits Window {
                         Notice { text: root.state.error; warning: true; }
                         if root.state.can-troubleshoot: Label { text: "Check the connection before continuing."; }
                         if !root.state.can-troubleshoot: Label { text: "Keep the controller connected and unchanged."; }
-                        ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
+                        if root.state.catalog-products.length == 0: ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
                     }
                         }
                     }
                     HorizontalLayout {
                         spacing: 16px;
-                        if root.state.page == Page.ready: ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
+                        if root.state.page == Page.ready && root.state.catalog-products.length == 0: ActionButton { text: "Choose file…"; quiet: true; enabled: root.state.can-choose-package; clicked => { if root.demo-mode { files.show(); } else { root.choose-file(); } } }
                         if root.state.page == Page.writing: ActionButton { text: "Cancel"; quiet: true; clicked => { root.cancel-operation(); } }
                         if root.state.page == Page.failed: ActionButton { text: "View log"; quiet: true; clicked => { root.log-open = true; } }
                         if root.state.page == Page.connect || root.state.page == Page.restart: ActionButton { text: "Connection help"; quiet: true; enabled: root.state.can-troubleshoot; clicked => { help.show(); } }

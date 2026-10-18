@@ -199,6 +199,184 @@ fn native_primary_callback_cannot_queue_an_unavailable_update() {
     assert!(!app.ui.get_state().busy);
 }
 
+#[test]
+fn catalog_controls_render_and_select_reviewed_historical_release_without_controller() {
+    let catalog = gulikit_catalog::Catalog::parse(include_bytes!("../../../catalog/official.json"))
+        .expect("reviewed catalog parses");
+    let app = LiveHarness::new_catalog(catalog);
+
+    assert!(app.work.try_recv().is_err());
+    assert!(!app.ui.get_state().connected);
+    assert_eq!(app.ui.get_state().page, Page::Connect);
+    assert!(!app.ui.get_rollback_allowed());
+    element(&app.ui, "Firmware");
+    for size in [(760., 600.), (1000., 660.)] {
+        app.ui
+            .window()
+            .set_size(slint::LogicalSize::new(size.0, size.1));
+        layout(&app.ui);
+        for label in [
+            "Catalog product",
+            "Catalog component",
+            "Catalog version",
+            "Open official download page",
+            "Import downloaded ZIP…",
+        ] {
+            inside_window(&app.ui, &element(&app.ui, label));
+        }
+    }
+    app.ui
+        .window()
+        .set_size(slint::LogicalSize::new(760., 600.));
+    layout(&app.ui);
+    assert!(
+        ElementHandle::find_by_accessible_label(&app.ui, "Catalog hashes check consistency with supplied metadata; publisher authenticity is not established.")
+            .next()
+            .is_none(),
+        "technical provenance is collapsed by default"
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&app.ui, "Open official source")
+            .next()
+            .is_none(),
+        "source action is in release details"
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(
+            &app.ui,
+            "Allow rollback to an older selected version"
+        )
+        .next()
+        .is_none(),
+        "rollback consent is hidden until a downgrade is available"
+    );
+
+    for label in ["Catalog product", "Catalog component", "Catalog version"] {
+        assert_selector_text_visible(&app.ui, label);
+    }
+
+    choose_combo_option(&app.ui, "Catalog product", "kk3-max");
+    choose_combo_option(&app.ui, "Catalog component", "bluetooth");
+    choose_combo_option(&app.ui, "Catalog version", "3.23");
+
+    let state = app.ui.get_state();
+    assert!(state.catalog_hardware_acceptance.contains("qualified"));
+    assert!(state.catalog_hardware_scope.contains("Single KK3 Max NS39"));
+    assert_eq!(state.catalog_parser_id, "kk3_bluetooth_pe_v1");
+    assert!(state.catalog_software_support.contains("supported"));
+    assert!(state.catalog_source_url.contains("filedownload/123020"));
+    assert_eq!(state.page, Page::Connect);
+    assert!(!state.connected);
+    assert!(app.work.try_recv().is_err());
+
+    click(&app.ui, "Release details");
+    element(
+        &app.ui,
+        "Catalog hashes check consistency with supplied metadata; publisher authenticity is not established.",
+    );
+    element(&app.ui, "Parser: kk3_bluetooth_pe_v1");
+    click(&app.ui, "Import downloaded ZIP…");
+    match app.work.try_recv().expect("import request emitted") {
+        gulikit_ui::live::Work::ImportRelease(entry) => assert_eq!(entry.version(), "3.23"),
+        other => panic!("unexpected catalog action: {other:?}"),
+    }
+}
+
+fn assert_selector_text_visible(ui: &AppWindow, label: &str) {
+    let control = element(ui, label);
+    let position = control.absolute_position();
+    let size = control.size();
+    let snapshot = ui.window().take_snapshot().unwrap();
+    let width = usize::try_from(snapshot.width()).unwrap();
+    // Exclude borders and the disclosure arrow: selected text must supply ink.
+    let horizontal = f64::from(position.x + 8.)..f64::from(position.x + size.width - 24.);
+    let vertical = f64::from(position.y + 2.)..f64::from(position.y + size.height - 2.);
+    let mut ink = 0;
+    for (y, row) in snapshot.as_slice().chunks_exact(width).enumerate() {
+        if !vertical.contains(&f64::from(u32::try_from(y).unwrap())) {
+            continue;
+        }
+        for (x, pixel) in row.iter().enumerate() {
+            if horizontal.contains(&f64::from(u32::try_from(x).unwrap()))
+                && pixel.r < 128
+                && pixel.g < 150
+                && pixel.b < 128
+            {
+                ink += 1;
+            }
+        }
+    }
+    assert!(ink > 8, "selected text must be readable in {label}");
+}
+
+#[test]
+fn catalog_source_changelog_and_download_actions_use_the_selected_entry() {
+    let catalog = catalog_with_links();
+    let app = LiveHarness::new_catalog(catalog);
+    choose_combo_option(&app.ui, "Catalog component", "bluetooth");
+    choose_combo_option(&app.ui, "Catalog version", "3.23");
+
+    click(&app.ui, "Release details");
+    scroll_catalog(&app.ui, -350.);
+    click(&app.ui, "Open official source");
+    assert!(matches!(
+        app.work.try_recv().unwrap(),
+        gulikit_ui::live::Work::OpenSource(entry)
+            if entry.version() == "3.23" && entry.source_url().contains("filedownload/123020")
+    ));
+    app.send(gulikit_ui::live::Event::CatalogAction(
+        "Source launch requested".into(),
+    ));
+    click(&app.ui, "Open release notes");
+    assert!(matches!(
+        app.work.try_recv().unwrap(),
+        gulikit_ui::live::Work::OpenChangelog(entry)
+            if entry.version() == "3.23" && entry.changelog_url().is_some()
+    ));
+    app.send(gulikit_ui::live::Event::CatalogAction(
+        "Release notes launch requested".into(),
+    ));
+    scroll_catalog(&app.ui, 1000.);
+    click(&app.ui, "Open official download page");
+    assert!(matches!(
+        app.work.try_recv().unwrap(),
+        gulikit_ui::live::Work::DownloadRelease(entry)
+            if entry.version() == "3.23" && entry.download_url().is_some()
+    ));
+}
+
+fn scroll_catalog(ui: &AppWindow, delta_y: f32) {
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: slint::LogicalPosition::new(520., 350.),
+        delta_x: 0.,
+        delta_y,
+    });
+    layout(ui);
+}
+
+fn choose_combo_option(ui: &AppWindow, control: &str, option: &str) {
+    click(ui, control);
+    click(ui, option);
+}
+
+fn catalog_with_links() -> gulikit_catalog::Catalog {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../../catalog/official.json"))
+            .expect("official catalog JSON parses");
+    let entries = value["entries"]
+        .as_array_mut()
+        .expect("catalog entries are an array");
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry["version"] == "3.23")
+        .expect("historical release exists");
+    entry["download_url"] = "https://www.gulikit.com/download/firmware.zip".into();
+    entry["availability"] = "available".into();
+    entry["changelog_url"] = "https://www.gulikit.com/newsinfo/887152.html".into();
+    gulikit_catalog::Catalog::parse(&serde_json::to_vec(&value).expect("catalog JSON serializes"))
+        .expect("catalog with optional links parses")
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn loaded_pending_receipt_disables_record_replacement_in_native_controls() {
@@ -319,11 +497,19 @@ impl LiveHarness {
         Self::new_mode(false)
     }
     fn new_mode(demo: bool) -> Self {
+        Self::new_with_catalog(demo, None)
+    }
+    fn new_catalog(catalog: gulikit_catalog::Catalog) -> Self {
+        Self::new_with_catalog(false, Some(catalog))
+    }
+    fn new_with_catalog(demo: bool, catalog: Option<gulikit_catalog::Catalog>) -> Self {
         init_backend();
         let (requests, work) = std::sync::mpsc::channel();
         let (events, replies) = std::sync::mpsc::channel();
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (ui, timer) = live_ui::create_mode(requests, replies, cancelled.clone(), demo).unwrap();
+        let (ui, timer) =
+            live_ui::create_mode_with_catalog(requests, replies, cancelled.clone(), demo, catalog)
+                .unwrap();
         ui.show().unwrap();
         ui.window().set_size(slint::LogicalSize::new(760., 600.));
         layout(&ui);

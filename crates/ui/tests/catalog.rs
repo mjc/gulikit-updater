@@ -92,6 +92,72 @@ fn controller_uses_selected_catalog_target_instead_of_compiled_target() {
 }
 
 #[test]
+fn catalog_choice_pins_imported_release_and_rollback_is_explicit() {
+    let (_directory, path, catalog) = fixture();
+    let inspected =
+        inspect_selected_package_from_catalog(&path, Component::Main, Some(&catalog)).unwrap();
+    let mut app = LiveApp::default();
+    app.set_catalog(catalog);
+    app.confirm_model(true);
+    let selected = app.selected_release().unwrap();
+    assert_eq!(selected.version(), "6.1");
+    assert_eq!(
+        selected.hardware_acceptance(),
+        gulikit_catalog::HardwareAcceptance::Unqualified
+    );
+    assert!(matches!(
+        app.choose_package(),
+        Some(gulikit_ui::live::Work::ImportRelease(entry)) if entry.version() == "6.1"
+    ));
+    app.accept(Event::Cancelled);
+
+    // A pre-existing archive inspected against a different catalog target cannot
+    // be silently accepted when the user chooses/imports the selected release.
+    assert!(app.connect().is_some());
+    let target = gulikit_platform::discovery::NativeCandidate {
+        ancestor: 42,
+        generation: 8,
+        main_volume_candidate: true,
+        bluetooth_transport_candidate: false,
+        observed_profile: true,
+        conflicting_model: false,
+        storage_identities: vec![],
+        disks: vec![],
+        mount: None,
+    };
+    app.accept(Event::Inspected(gulikit_updater::updater::Inspection {
+        component: Component::Main,
+        installed_version: "6.2".into(),
+        decision: VersionDecision::NewerThanSupported,
+        raw_version_bytes: b"www.gulikit.com\nversion 6.2".to_vec(),
+        qualified_bot_lun: None,
+        cleanup_errors: vec![],
+        target,
+        identity_provenance: "synthetic controller observation",
+    }));
+    assert!(app.import_release().is_some());
+    app.accept(inspected);
+    assert!(app.view().can_allow_rollback);
+    app.set_allow_rollback(true);
+    assert!(app.view().allow_rollback);
+    assert!(app.can_update());
+}
+
+#[test]
+fn default_model_accepts_catalog_and_sidebar_component_cannot_leave_stale_release() {
+    let (_directory, _path, catalog) = fixture();
+    let mut app = LiveApp::default();
+    app.set_catalog(catalog);
+    assert_eq!(app.catalog_products(), vec!["kk3-max"]);
+    assert_eq!(app.selected_release().unwrap().component(), "main");
+
+    app.select_component(Component::Bluetooth);
+    assert_eq!(app.catalog_component_index(), -1);
+    assert!(app.selected_release().is_none());
+    assert!(app.choose_package().is_none());
+}
+
+#[test]
 fn catalog_receipt_reopens_with_original_target_and_confirmation_identity() {
     use gulikit_core::update::{Outcome, TransferRecord};
     use gulikit_updater::updater::{Attempt, PriorAttempt, ReceiptIdentity};
@@ -148,4 +214,38 @@ fn catalog_receipt_reopens_with_original_target_and_confirmation_identity() {
         panic!("expected fresh verification request")
     };
     assert_eq!(expected_receipt, identity);
+}
+
+#[test]
+fn imported_archive_cannot_retarget_the_selected_version() {
+    let (_directory, path, catalog) = fixture();
+    let inspected =
+        inspect_selected_package_from_catalog(&path, Component::Main, Some(&catalog)).unwrap();
+    let mut other: serde_json::Value = serde_json::to_value(&catalog).unwrap();
+    other["entries"][0]["version"] = "6.2".into();
+    let other = Catalog::parse(&serde_json::to_vec(&other).unwrap()).unwrap();
+    let mut app = LiveApp::default();
+    app.set_catalog(other);
+    assert!(app.import_release().is_some());
+    app.accept(inspected);
+    assert_eq!(app.selected_release().unwrap().version(), "6.2");
+    assert_eq!(app.view().filename, "No firmware selected");
+    assert!(!app.can_update());
+    assert!(app.view().notice.contains("does not match"));
+}
+
+#[test]
+fn catalog_changes_and_browser_actions_cannot_interrupt_pending_work() {
+    let (_directory, _path, catalog) = fixture();
+    let mut app = LiveApp::default();
+    app.set_catalog(catalog.clone());
+    assert!(app.import_release().is_some());
+    app.set_catalog(catalog);
+    app.select_catalog_product(9);
+    app.select_catalog_component(9);
+    app.select_catalog_version(9);
+    assert_eq!(app.selected_release().unwrap().version(), "6.1");
+    assert!(app.open_source().is_none());
+    assert!(app.download_release().is_none());
+    assert!(app.is_busy());
 }

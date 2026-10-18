@@ -36,6 +36,12 @@ struct RawEntry {
     payload_size: u64,
     payload_sha256: String,
     source_url: String,
+    #[serde(default)]
+    download_url: Option<String>,
+    #[serde(default)]
+    availability: DownloadAvailability,
+    #[serde(default)]
+    changelog_url: Option<String>,
     parser_id: String,
     software_support: String,
     hardware_acceptance: String,
@@ -72,6 +78,12 @@ pub struct Entry {
     payload_size: u64,
     payload_sha256: Sha256Digest,
     source_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    download_url: Option<String>,
+    #[serde(default, skip_serializing_if = "DownloadAvailability::is_unknown")]
+    availability: DownloadAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changelog_url: Option<String>,
     parser_id: ParserId,
     software_support: SoftwareSupport,
     hardware_acceptance: HardwareAcceptance,
@@ -104,6 +116,27 @@ pub enum SoftwareSupport {
 pub enum HardwareAcceptance {
     Qualified,
     Unqualified,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+/// Availability reported for a direct vendor ZIP link.
+pub enum DownloadAvailability {
+    #[default]
+    Unknown,
+    Available,
+    Unavailable,
+}
+
+impl DownloadAvailability {
+    // Serde skip_serializing_if predicates receive a reference.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    const fn is_unknown(&self) -> bool {
+        match self {
+            Self::Unknown => true,
+            Self::Available | Self::Unavailable => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -180,6 +213,15 @@ impl Catalog {
         })
     }
 
+    /// Build a catalog containing only one previously parsed record.
+    #[must_use]
+    pub fn from_entry(entry: Entry) -> Self {
+        Self {
+            schema_version: 1,
+            entries: vec![entry],
+        }
+    }
+
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
@@ -207,6 +249,28 @@ impl Entry {
             return Err(invalid(
                 index,
                 "source_url",
+                "expected a stable HTTPS URL on gulikit.com",
+            ));
+        }
+        if raw
+            .download_url
+            .as_deref()
+            .is_some_and(|url| !stable_download_url(url))
+        {
+            return Err(invalid(
+                index,
+                "download_url",
+                "expected a stable HTTPS GuliKit ZIP URL",
+            ));
+        }
+        if raw
+            .changelog_url
+            .as_deref()
+            .is_some_and(|url| !stable_source_url(url))
+        {
+            return Err(invalid(
+                index,
+                "changelog_url",
                 "expected a stable HTTPS URL on gulikit.com",
             ));
         }
@@ -241,6 +305,9 @@ impl Entry {
             payload_size: raw.payload_size,
             payload_sha256: hashes.payload,
             source_url: raw.source_url,
+            download_url: raw.download_url,
+            availability: raw.availability,
+            changelog_url: raw.changelog_url,
             parser_id,
             software_support,
             hardware_acceptance,
@@ -303,6 +370,18 @@ impl Entry {
     #[must_use]
     pub fn source_url(&self) -> &str {
         &self.source_url
+    }
+    #[must_use]
+    pub fn download_url(&self) -> Option<&str> {
+        self.download_url.as_deref()
+    }
+    #[must_use]
+    pub fn availability(&self) -> DownloadAvailability {
+        self.availability
+    }
+    #[must_use]
+    pub fn changelog_url(&self) -> Option<&str> {
+        self.changelog_url.as_deref()
     }
     #[must_use]
     pub fn parser_id(&self) -> ParserId {
@@ -679,6 +758,14 @@ fn stable_source_url(value: &str) -> bool {
         })
 }
 
+fn stable_download_url(value: &str) -> bool {
+    stable_source_url(value)
+        && value
+            .rsplit('/')
+            .next()
+            .is_some_and(|filename| filename.to_ascii_lowercase().ends_with(".zip"))
+}
+
 fn stable_evidence_url(value: &str) -> bool {
     let Some(identifier) = value.strip_prefix("https://lific.mjc.lol/GULI/pages/") else {
         return false;
@@ -987,6 +1074,59 @@ mod tests {
             Err(CatalogError::EntryInputTooLarge)
         ));
         assert!(Entry::parse(br#"{"product":"kk3-max"}"#).is_err());
+    }
+
+    #[test]
+    fn optional_download_metadata_is_backward_compatible_and_validated() {
+        let legacy = Catalog::parse(SEED.as_bytes()).expect("legacy seed parses");
+        let legacy_entry = &legacy.entries()[0];
+        assert_eq!(legacy_entry.download_url(), None);
+        assert_eq!(legacy_entry.availability(), DownloadAvailability::Unknown);
+        assert_eq!(legacy_entry.changelog_url(), None);
+        let serialized = serde_json::to_value(legacy_entry).unwrap();
+        assert!(serialized.get("download_url").is_none());
+        assert!(serialized.get("availability").is_none());
+        assert!(serialized.get("changelog_url").is_none());
+
+        let mut raw: serde_json::Value = serde_json::from_str(&one_entry()).unwrap();
+        raw["entries"][0]["download_url"] = "https://www.gulikit.com/download/firmware.zip".into();
+        raw["entries"][0]["availability"] = "available".into();
+        raw["entries"][0]["changelog_url"] = "https://www.gulikit.com/newsinfo/887152.html".into();
+        let catalog = Catalog::parse(raw.to_string().as_bytes()).unwrap();
+        let entry = &catalog.entries()[0];
+        assert_eq!(
+            entry.download_url(),
+            Some("https://www.gulikit.com/download/firmware.zip")
+        );
+        assert_eq!(entry.availability(), DownloadAvailability::Available);
+        assert_eq!(
+            entry.changelog_url(),
+            Some("https://www.gulikit.com/newsinfo/887152.html")
+        );
+        let one_entry_catalog =
+            Catalog::parse(&serde_json::to_vec(&Catalog::from_entry(entry.clone())).unwrap())
+                .unwrap();
+        assert_eq!(one_entry_catalog.entries(), std::slice::from_ref(entry));
+
+        for (field, value) in [
+            (
+                "download_url",
+                "http://www.gulikit.com/download/firmware.zip",
+            ),
+            (
+                "download_url",
+                "https://www.gulikit.com/download/firmware.exe",
+            ),
+            (
+                "download_url",
+                "https://www.gulikit.com/download/fw.zip?token=temporary",
+            ),
+            ("changelog_url", "https://example.com/release"),
+        ] {
+            let mut invalid = raw.clone();
+            invalid["entries"][0][field] = value.into();
+            assert!(Catalog::parse(invalid.to_string().as_bytes()).is_err());
+        }
     }
 
     #[test]

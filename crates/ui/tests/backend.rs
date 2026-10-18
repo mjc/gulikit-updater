@@ -297,3 +297,17 @@ fn paced_demo_exposes_progress_and_accepts_cancellation_before_completion() {
     assert!(!app.view().can_primary);
     drop(worker);
 }
+
+#[test]
+fn unavailable_download_is_refused_before_browser_or_file_dialog() {
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../../catalog/official.json")).unwrap();
+    raw["entries"][0]["availability"] = "unavailable".into();
+    let catalog = gulikit_catalog::Catalog::parse(&serde_json::to_vec(&raw).unwrap()).unwrap();
+    let result = NativeDevice.run(
+        Work::DownloadRelease(Box::new(catalog.entries()[0].clone())),
+        &AtomicBool::new(false),
+        &mut |_| panic!("no device events"),
+    );
+    assert!(result.unwrap_err().contains("unavailable"));
+}

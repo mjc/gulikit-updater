@@ -118,6 +118,50 @@ enum CatalogCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List catalog releases, including official source and support status.
+    Releases {
+        #[arg(long)]
+        catalog: Option<PathBuf>,
+        #[arg(long)]
+        product: Option<String>,
+        #[arg(long)]
+        component: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the selected release's official page in the default browser.
+    Source {
+        #[command(flatten)]
+        selection: ReleaseSelection,
+        #[arg(long)]
+        changelog: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Obtain a reviewed direct download, or show the official manual-download page.
+    Download {
+        #[command(flatten)]
+        selection: ReleaseSelection,
+        #[arg(long)]
+        output: PathBuf,
+        /// Open the default browser when the download requires a manual step.
+        #[arg(long)]
+        open: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct ReleaseSelection {
+    #[arg(long)]
+    catalog: Option<PathBuf>,
+    #[arg(long)]
+    product: String,
+    #[arg(long)]
+    component: String,
+    #[arg(long)]
+    version: String,
 }
 
 #[derive(Subcommand)]

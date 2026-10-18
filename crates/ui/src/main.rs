@@ -26,20 +26,29 @@ fn launch(args: &[std::ffi::OsString]) -> Result<Launch, slint::PlatformError> {
 
 fn main() -> Result<(), slint::PlatformError> {
     use gulikit_ui::{
-        backend::{CatalogDevice, NativeDevice, Worker},
+        backend::{CatalogDevice, Worker},
         demo::DemoDevice,
     };
     let launch = launch(&std::env::args_os().skip(1).collect::<Vec<_>>())?;
     let demo = launch == Launch::Demo;
-    let (worker, events) = match launch {
+    let (worker, events, catalog) = match launch {
         Launch::Help => {
             println!(
                 "GuliKit updater\n\n{USAGE}\n\n--demo uses a simulated device. --catalog selects release metadata for local ZIP inspection."
             );
             return Ok(());
         }
-        Launch::Demo => Worker::spawn(DemoDevice::default()),
-        Launch::Native(None) => Worker::spawn(NativeDevice),
+        Launch::Demo => {
+            let (worker, events) = Worker::spawn(DemoDevice::default());
+            (worker, events, None)
+        }
+        Launch::Native(None) => {
+            let catalog =
+                gulikit_catalog::Catalog::parse(include_bytes!("../../../catalog/official.json"))
+                    .map_err(|error| slint::PlatformError::Other(error.to_string()))?;
+            let (worker, events) = Worker::spawn(CatalogDevice::new(catalog.clone()));
+            (worker, events, Some(catalog))
+        }
         Launch::Native(Some(path)) => {
             let rejected = |error: String| slint::PlatformError::Other(error);
             let bytes = gulikit_platform::catalog::read_catalog_file(
@@ -49,14 +58,16 @@ fn main() -> Result<(), slint::PlatformError> {
             .map_err(|error| rejected(error.to_string()))?;
             let catalog = gulikit_catalog::Catalog::parse(&bytes)
                 .map_err(|error| rejected(error.to_string()))?;
-            Worker::spawn(CatalogDevice::new(catalog))
+            let (worker, events) = Worker::spawn(CatalogDevice::new(catalog.clone()));
+            (worker, events, Some(catalog))
         }
     };
-    let (ui, timer) = live_ui::create_mode(
+    let (ui, timer) = live_ui::create_mode_with_catalog(
         worker.requests.clone(),
         events,
         worker.cancelled.clone(),
         demo,
+        catalog,
     )?;
     let result = ui.run();
     drop(timer);
