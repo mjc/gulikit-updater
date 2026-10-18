@@ -14,6 +14,7 @@
     with pkgs;
     [
       cargo-nextest
+      gnupg
       python3
       uv
     ]
@@ -78,5 +79,6 @@
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
     cargo nextest run --workspace --all-features --locked
     RUSTDOCFLAGS="-D warnings" cargo test --workspace --doc --all-features --locked
+    python3 -O -m unittest discover -s tools/tests -p 'test_*.py'
   '';
 }

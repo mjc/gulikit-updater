@@ -80,6 +80,13 @@ It does not check a signature, change the supported package inventory, or access
 a controller. The seed in `catalog/official.json` describes the four compiled
 releases; signed refresh and runtime catalog selection remain tracked work.
 
+The optional archive importer is available through
+`python3 tools/firmware_archive.py --help`. It requires an isolated bare
+repository, an explicit branch ref and full GPG fingerprint, reviewed archive
+size/SHA-256, and provenance. It appends signed commits without changing the
+source checkout. Its tests use synthetic ZIPs; no vendor firmware is included
+in source Git.
+
 `--json` produces schema version 1. Package information and completed attempt or
 verification records go to stdout. An attempt can report refusal, uncertainty or
 cleanup failure and still produce its structured record there. Errors before a

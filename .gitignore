@@ -4,3 +4,4 @@
 /.devenv/
 /.pre-commit-config.yaml
 /research/__pycache__/
+/tools/**/__pycache__/
