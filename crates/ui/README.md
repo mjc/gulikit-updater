@@ -81,6 +81,8 @@ xvfb-run -a env GULIKIT_PROFILE_LIFECYCLE_MS=1000 pyroclast memory --out artifac
 ```
 
 Keep Linux virtual-display results separate from native macOS measurements.
+The Linux profiling environment includes heaptrack's recorder and text analyzer;
+it does not build the Qt/KDE GUI.
 
 The controller illustration uses a pre-rendered image through 2× display scale
 and the vector source above that scale. Regenerate the image from its retained

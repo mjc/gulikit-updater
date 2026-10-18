@@ -76,6 +76,48 @@ fn normal_startup_never_presents_a_simulated_controller() {
 }
 
 #[test]
+fn desktop_renders_both_components_and_routes_confirmed_inspection() {
+    use gulikit_ui::live::Work;
+
+    let app = LiveHarness::new();
+    assert!(app.work.try_recv().is_err());
+    for size in [(760., 600.), (1000., 660.)] {
+        app.ui
+            .window()
+            .set_size(slint::LogicalSize::new(size.0, size.1));
+        app.ui.invoke_select_component(false);
+        layout(&app.ui);
+        let main = app.ui.window().take_snapshot().unwrap();
+        assert!(!app.ui.get_state().bluetooth);
+        assert!(
+            main.as_slice()
+                .iter()
+                .filter(|pixel| pixel.r < 100 && pixel.g < 130 && pixel.b < 100)
+                .count()
+                > 1000,
+            "the desktop must render content at each supported window size"
+        );
+        app.ui.invoke_select_component(true);
+        layout(&app.ui);
+        let bluetooth = app.ui.window().take_snapshot().unwrap();
+        assert!(app.ui.get_state().bluetooth);
+        assert_eq!(main.width(), bluetooth.width());
+        assert_eq!(main.height(), bluetooth.height());
+        assert_ne!(main.as_bytes(), bluetooth.as_bytes());
+    }
+    assert!(app.work.try_recv().is_err());
+    app.ui.invoke_confirm_model(true);
+    app.ui.invoke_inspect_controller();
+    assert!(matches!(
+        app.work.try_recv().unwrap(),
+        Work::Inspect {
+            component: Component::Bluetooth,
+            confirmed: true
+        }
+    ));
+}
+
+#[test]
 fn controller_and_button_guidance_survive_display_scale_changes() {
     let app = LiveHarness::new();
     for scale in [1., 2., 3.] {

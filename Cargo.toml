@@ -41,3 +41,7 @@ ctrlc = "3.5.2"
 [dev-dependencies]
 assert_cmd = "2"
 tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"

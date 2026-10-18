@@ -46,7 +46,22 @@
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (
       with pkgs;
       [
-        heaptrack
+        (heaptrack.overrideAttrs (old: {
+          cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DHEAPTRACK_BUILD_GUI=OFF" ];
+          nativeBuildInputs = [ cmake ];
+          buildInputs = [
+            zlib
+            boost
+            libunwind
+            sparsehash
+            zstd
+            rustc-demangle
+            elfutils
+          ];
+          meta = old.meta // {
+            mainProgram = "heaptrack";
+          };
+        }))
         linuxPackages.perf
         xvfb-run
       ]
