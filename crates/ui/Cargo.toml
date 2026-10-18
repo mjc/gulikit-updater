@@ -13,7 +13,13 @@ gulikit-platform = { path = "../platform" }
 gulikit-updater = { path = "../.." }
 rfd = "=0.17.2"
 serde_json = "1"
-slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "accessibility", "compat-1-18"] }
+slint = { version = "=1.18.1", default-features = false, features = [
+  "std",
+  "backend-winit",
+  "renderer-software",
+  "accessibility",
+  "compat-1-18",
+] }
 
 [build-dependencies]
 slint-build = "=1.18.1"
@@ -21,4 +27,6 @@ slint-build = "=1.18.1"
 [dev-dependencies]
 tempfile = "3"
 # Slint's preliminary testing API requires the exact same version as Slint.
-i-slint-backend-testing = { version = "=1.18.1", features = ["renderer-software"] }
+i-slint-backend-testing = { version = "=1.18.1", features = [
+  "renderer-software",
+] }

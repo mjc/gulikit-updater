@@ -132,6 +132,7 @@ pub struct PriorAttempt {
 }
 
 impl PriorAttempt {
+    #[must_use]
     pub fn identity(&self) -> ReceiptIdentity {
         ReceiptIdentity {
             component: self.component,
@@ -142,6 +143,10 @@ impl PriorAttempt {
     }
 
     /// Refuse a replaced receipt before opening a controller session.
+    ///
+    /// # Errors
+    /// Returns an error if the component, outcome, generation or expected version
+    /// differs from the receipt the user confirmed.
     pub fn require_identity(&self, expected: &ReceiptIdentity) -> Result<(), String> {
         if self.component == expected.component
             && self.outcome == expected.outcome
@@ -155,6 +160,10 @@ impl PriorAttempt {
     }
 
     /// Check the receipt before acquiring a new controller session.
+    ///
+    /// # Errors
+    /// Rejects outcomes that do not await restart verification and receipts whose
+    /// finalization marker does not establish a successfully finalized result.
     pub fn require_verifiable(&self) -> Result<(), String> {
         if self.outcome.awaits_restart_verification()
             && self
@@ -168,6 +177,11 @@ impl PriorAttempt {
         }
     }
 
+    /// Parse the final attempt result and any following sync acknowledgement.
+    ///
+    /// # Errors
+    /// Rejects invalid UTF-8 or JSON, invalid finalization acknowledgements,
+    /// missing attempt results and unrecognized package, outcome or generation data.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
         // Validate every record, retaining only the final one for verification.
@@ -246,6 +260,7 @@ pub struct ApplicationError {
     pub cleanup_errors: Vec<String>,
 }
 impl ApplicationError {
+    #[must_use]
     pub fn new(kind: &'static str, code: u8, message: String) -> Self {
         Self {
             kind,
@@ -254,9 +269,11 @@ impl ApplicationError {
             cleanup_errors: Vec::new(),
         }
     }
+    #[must_use]
     pub fn host_io(message: String) -> Self {
         Self::new("host_record_io", 4, message)
     }
+    #[must_use]
     pub fn with_cleanup(mut self, cleanup_errors: Vec<String>) -> Self {
         if !cleanup_errors.is_empty() {
             self.code = 8;
@@ -284,6 +301,10 @@ mod native;
 
 /// Run a desktop request through shared transactions and native resource ownership.
 /// Installation is verified only by a fresh version readback.
+///
+/// # Errors
+/// Rejects desktop writes, unavailable native access and failed request preflight,
+/// device or host-record operations. Also rejects malformed native replies.
 pub fn execute(
     request: Request,
     cancelled: &mut dyn FnMut() -> bool,
@@ -382,6 +403,11 @@ fn field<T: serde::de::DeserializeOwned>(
 }
 
 /// CLI operation boundary. Main transfers are dispatched through its guardian first.
+///
+/// # Errors
+/// Rejects unsupported hosts, invalid or unconfirmed requests, unavailable resources
+/// and host-file failures that prevent a reply. Recorded transfer and cleanup
+/// outcomes remain in the returned value.
 pub fn execute_raw(
     request: Request,
     cancelled: &mut dyn FnMut() -> bool,
@@ -398,6 +424,12 @@ pub fn execute_raw(
     }
 }
 #[cfg(target_os = "macos")]
+/// Execute a supervised Main update while retaining the guardian's lease.
+///
+/// # Errors
+/// Rejects requests other than Main updates and preflight, resource acquisition
+/// or host-file failures that prevent a reply. Recorded transfer and cleanup
+/// outcomes remain in the returned value.
 pub fn execute_main_worker(
     request: Request,
     lease: gulikit_platform::lock::ProcessLock,
@@ -410,6 +442,10 @@ pub fn execute_main_worker(
     }
 }
 
+/// Require the inspected attachment when the caller supplies one.
+///
+/// # Errors
+/// Returns an error if the ancestor or generation changed since inspection.
 pub fn check_attachment(
     expected: Option<Attachment>,
     target: &NativeCandidate,
@@ -429,6 +465,7 @@ fn same_unit_association(confirmed: bool) -> &'static str {
     }
 }
 
+#[must_use]
 pub fn operator_action(component: Component, outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::TransferCompletedAwaitingVerification

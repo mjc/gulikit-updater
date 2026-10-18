@@ -1,4 +1,5 @@
 """Embedded-resource selection must stay unambiguous before hash validation."""
+
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -33,9 +34,13 @@ class EmbeddedDllTests(unittest.TestCase):
         for offsets in [[], [100, 200]]:
             with self.subTest(offsets=offsets):
                 pe = MagicMock()
-                pe.DIRECTORY_ENTRY_RESOURCE.entries = [resource("IDR_DLL", 0x82, offsets)]
+                pe.DIRECTORY_ENTRY_RESOURCE.entries = [
+                    resource("IDR_DLL", 0x82, offsets)
+                ]
                 with patch.object(prepare, "checked") as checked:
-                    with self.assertRaisesRegex(ValueError, "ambiguous embedded DeviceUsb.dll"):
+                    with self.assertRaisesRegex(
+                        ValueError, "ambiguous embedded DeviceUsb.dll"
+                    ):
                         prepare.extract_device_usb(pe)
                 checked.assert_not_called()
 

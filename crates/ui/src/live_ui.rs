@@ -1,5 +1,5 @@
 use super::{AppWindow, Page};
-use gulikit_core::package::Component;
+use gulikit_core::{package::Component, update::Progress};
 use gulikit_ui::{
     Page as ModelPage,
     backend::NATIVE_UPDATE_UNAVAILABLE,
@@ -93,11 +93,7 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     update_text(&mut state.filename, &v.filename);
     update_text(&mut state.payload, v.payload);
     update_text(&mut state.digest, v.digest);
-    state.progress = if v.progress.total == 0 {
-        0.
-    } else {
-        v.progress.confirmed as f32 / v.progress.total as f32
-    };
+    state.progress = progress_fraction(v.progress);
     state.transfer_label = slint::format!(
         "{} / {} bytes confirmed",
         v.progress.confirmed,
@@ -123,6 +119,18 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     update_text(&mut state.status, status);
     update_log(&mut state.log, v.log);
     ui.set_state(state);
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Slint renders an f32 fraction; the model and byte-count label retain exact usize counts."
+)]
+fn progress_fraction(progress: Progress) -> f32 {
+    if progress.total == 0 {
+        0.
+    } else {
+        progress.confirmed as f32 / progress.total as f32
+    }
 }
 
 fn update_text(text: &mut slint::SharedString, value: &str) {
@@ -183,7 +191,7 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
             act(&weak, &driver, |app| {
                 app.confirm_model(confirmed);
                 None
-            })
+            });
         });
     }
     {
@@ -192,7 +200,7 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
             act(&weak, &driver, |app| {
                 app.confirm_same_controller(confirmed);
                 None
-            })
+            });
         });
     }
     {
@@ -203,7 +211,7 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
                     return None;
                 }
                 app.primary()
-            })
+            });
         });
     }
     {
@@ -219,7 +227,7 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
                 } else {
                     Component::Main
                 })
-            })
+            });
         });
     }
     {
@@ -238,19 +246,25 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
         use gulikit_ui::demo::{Profile, SamplePackage};
         let (weak, model) = (ui.as_weak(), driver.clone());
         ui.on_select_package(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
             if let Some(sample) = [
                 SamplePackage::Matching,
                 SamplePackage::WrongModel,
                 SamplePackage::WrongComponent,
                 SamplePackage::LongFilename,
             ]
-            .get(index as usize)
+            .get(index)
             {
                 act(&weak, &model, |app| app.choose_sample(*sample));
             }
         });
         let (weak, model) = (ui.as_weak(), driver.clone());
         ui.on_scenario_selected(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
             if let Some(profile) = [
                 Profile::Normal,
                 Profile::Current,
@@ -260,7 +274,7 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
                 Profile::VerificationFailure,
                 Profile::UnknownVersion,
             ]
-            .get(index as usize)
+            .get(index)
             {
                 act(&weak, &model, |app| app.configure_demo(*profile));
             }
@@ -325,9 +339,9 @@ mod tests {
     fn log_rendering_preserves_entries_and_reuses_unchanged_storage() {
         let mut rendered = slint::SharedString::default();
         for entries in [
-            vec!["".into()],
-            vec!["".into(), "".into()],
-            vec!["é 🚲\n\n嵌入".into(), "".into(), "tail\n".into()],
+            vec![String::new()],
+            vec![String::new(), String::new()],
+            vec!["é 🚲\n\n嵌入".into(), String::new(), "tail\n".into()],
             (0..200).map(|i| format!("entry {i}\nline 2")).collect(),
             vec!["replacement".into()],
             vec![],

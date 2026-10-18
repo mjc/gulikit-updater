@@ -125,7 +125,9 @@ fn exact_bot_stages_and_zero_tail_cdb_are_shared() {
 #[test]
 fn out_data_is_exact_and_private_at_the_firmware_buffer_boundary() {
     for length in [0, 1, 511, 512, 513, 1024] {
-        let payload: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+        let payload: Vec<u8> = (0..length)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
         let mut fake = io();
         fake.reads = VecDeque::from([b"USBS\x01\0\0\0\0\0\0\0\0".to_vec()]);
         fake.mutate_out = true;
@@ -144,7 +146,7 @@ fn out_data_is_exact_and_private_at_the_firmware_buffer_boundary() {
             payload
                 .iter()
                 .enumerate()
-                .all(|(index, byte)| *byte == (index % 251) as u8)
+                .all(|(index, byte)| *byte == u8::try_from(index % 251).unwrap())
         );
         let evidence = session.take_evidence().unwrap();
         assert_eq!(evidence.data_actual, Some(length));
@@ -477,7 +479,10 @@ fn first_csw_stall_clears_once_and_retries_only_the_original_status() {
 fn f2_short_status_uses_the_received_byte_with_exact_transport_residue() {
     for length in [1, 4, 19] {
         let mut fake = io();
-        fake.reads = VecDeque::from([vec![0; length], status(1, 20 - length as u32, 0)]);
+        fake.reads = VecDeque::from([
+            vec![0; length],
+            status(1, 20 - u32::try_from(length).unwrap(), 0),
+        ]);
         let mut session = Session::new(fake);
         assert_eq!(
             session
@@ -651,7 +656,7 @@ fn partial_status_stall_timeout_and_expired_budget_are_not_recovered() {
             }
             _ => {
                 session.io_mut().costs =
-                    VecDeque::from([Duration::ZERO, Duration::ZERO, Duration::from_secs(5)])
+                    VecDeque::from([Duration::ZERO, Duration::ZERO, Duration::from_secs(5)]);
             }
         }
         assert!(session.command(&f2(), Direction::In, &[], 20).is_err());

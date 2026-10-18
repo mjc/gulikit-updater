@@ -91,9 +91,7 @@ impl Device for ScriptedDevice {
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
         let index = self.0.fetch_add(1, Ordering::AcqRel);
-        if index == 0 {
-            panic!("simulated device worker panic");
-        }
+        assert!(index != 0, "simulated device worker panic");
         assert!(matches!(work, Work::ChoosePackage(Component::Main)));
         emit(Event::Error("progress event before result".into()));
         Err("second operation completed".into())
@@ -130,12 +128,13 @@ fn one_worker_serializes_device_operations_and_reports_panics_before_next_result
 #[test]
 #[ignore = "requires original vendor archives in ignored cache"]
 fn selected_vendor_archives_are_inspectable_and_changed_archives_are_rejected() {
-    let vendor = std::env::var_os("GULIKIT_VENDOR_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
+    let vendor = std::env::var_os("GULIKIT_VENDOR_DIR").map_or_else(
+        || {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../artifacts/vendor/kk3/packages")
-        });
+        },
+        std::path::PathBuf::from,
+    );
     for (component, archive, version, size) in [
         (Component::Main, "KK3_NS38_NS39_V5.9.zip", "5.9", 51_500),
         (

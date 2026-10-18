@@ -5,11 +5,10 @@ use gulikit_core::package::{Component, Model, VerifiedPackage};
 use std::path::PathBuf;
 
 fn archive(name: &str) -> Vec<u8> {
-    let directory = std::env::var_os("GULIKIT_VENDOR_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/vendor/kk3/packages")
-        });
+    let directory = std::env::var_os("GULIKIT_VENDOR_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/vendor/kk3/packages"),
+        PathBuf::from,
+    );
     std::fs::read(directory.join(name))
         .expect("supply intact official archives via GULIKIT_VENDOR_DIR")
 }
@@ -60,7 +59,7 @@ fn selects_the_reviewed_324_release_and_its_706_block_payload() {
     let bytes = archive("NS38_NS39_BT_V3.24.zip");
     let package = VerifiedPackage::inspect(&bytes, Model::Kk3Max, Component::Bluetooth).unwrap();
     assert_eq!(package.info().version, "3.24");
-    assert_eq!(package.payload().len(), 361472);
+    assert_eq!(package.payload().len(), 361_472);
     assert_eq!(
         package.info().payload_sha256,
         "e540b990cd07df2deb91ac90d20428ddf7788a15f55d84aaaf88cdd99ea71606"

@@ -14,7 +14,7 @@ use gulikit_updater::updater::{
     VerificationTransfer,
 };
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -168,7 +168,7 @@ impl DemoDevice {
     }
     fn transfer(
         &mut self,
-        path: PathBuf,
+        path: &Path,
         component: Component,
         attachment: Attachment,
         confirmed: bool,
@@ -182,7 +182,7 @@ impl DemoDevice {
         let (_, package) = self
             .selected
             .as_ref()
-            .filter(|(selected, info)| *selected == path && info.component == component)
+            .filter(|(selected, info)| selected.as_path() == path && info.component == component)
             .ok_or("Select a simulated package first")?;
         let transfer = simulate_transfer(
             package.payload_size,
@@ -227,7 +227,7 @@ impl DemoDevice {
         path: PathBuf,
         confirmed: bool,
         same_controller: bool,
-        expected_receipt: ReceiptIdentity,
+        expected_receipt: &ReceiptIdentity,
     ) -> Result<Event, String> {
         let (_, attempt) = self
             .attempt
@@ -235,7 +235,7 @@ impl DemoDevice {
             .filter(|(record, _)| *record == path)
             .ok_or("No matching simulated attempt")?;
         attempt.require_verifiable()?;
-        attempt.require_identity(&expected_receipt)?;
+        attempt.require_identity(expected_receipt)?;
         // A new simulated attachment models the user's explicit reconnect in demo mode.
         self.generation += 1;
         let read = self.observe(attempt.component, confirmed)?;
@@ -337,13 +337,13 @@ impl Device for DemoDevice {
                 component,
                 attachment,
                 confirmed,
-            } => self.transfer(path, component, attachment, confirmed, cancelled, emit),
+            } => self.transfer(&path, component, attachment, confirmed, cancelled, emit),
             Work::Verify {
                 attempt,
                 confirmed,
                 same_controller,
                 expected_receipt,
-            } => self.verify(attempt, confirmed, same_controller, expected_receipt),
+            } => self.verify(attempt, confirmed, same_controller, &expected_receipt),
             Work::OpenAttempt => {
                 let (path, result) = self
                     .attempt

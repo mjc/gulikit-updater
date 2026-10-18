@@ -21,6 +21,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    #[must_use]
     pub fn awaits_restart_verification(self) -> bool {
         match self {
             Self::TransferCompletedAwaitingVerification
@@ -50,6 +51,7 @@ pub struct CompletionObservation {
     pub usb_arrivals: u64,
 }
 impl CompletionObservation {
+    #[must_use]
     pub fn decision(&self) -> CompletionDecision {
         if !self.discovery_complete || self.other_candidate_present || self.usb_arrivals != 0 {
             return CompletionDecision::Invalidated;
@@ -65,6 +67,11 @@ impl CompletionObservation {
     }
     /// At the deadline, one-sided removal evidence is an invalidated session,
     /// not an ordinary wait for a controller that has not restarted yet.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incomplete/ambiguous discovery, intervening arrivals or inconsistent
+    /// removal notifications instead of treating them as expected completion.
     pub fn at_deadline(&self) -> Result<bool, &'static str> {
         match self.decision() {
             CompletionDecision::ExpectedDetach => Ok(true),
@@ -91,6 +98,7 @@ pub struct Verification {
     /// Target version from the validated package metadata in the original attempt.
     pub expected_version: String,
 }
+#[must_use]
 pub fn verify_restart(previous: Outcome, observation: &Verification) -> Outcome {
     if previous.awaits_restart_verification()
         && observation.generation != observation.previous_generation
@@ -220,16 +228,41 @@ pub trait BluetoothPort {
         None
     }
     /// Refuse unsupported/unqualified writes before any submission is recorded.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unqualified addressing, stale attachment/identity evidence or an
+    /// adapter that cannot safely submit this firmware transaction.
     fn prepare_write(&mut self) -> Result<(), String>;
+    /// Revalidate attachment ownership before the next transaction operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when ownership, topology or attachment-bound evidence has changed.
     fn check_session(&mut self) -> Result<(), String>;
+    /// Submit one authorized vendor command and retain its submission disposition.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unauthorized commands before submission or reports transport/status
+    /// and audit failures, distinguishing known non-submission from uncertainty.
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError>;
     /// Observe only the selected device's removal, with complete discovery and
     /// no intervening USB arrival or additional recognized update candidate.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the host cannot establish a complete, attachment-bound observation.
     fn completion_detached(&mut self) -> Result<bool, String> {
         Ok(false)
     }
     /// Release claims on every exit; report restoration or preservation pending.
     /// No-reset surrender after F0 may deliberately leave storage drivers detached.
+    ///
+    /// # Errors
+    ///
+    /// Reports cleanup failure or pending driver restoration without resetting a
+    /// controller after firmware may have been submitted.
     fn finish(&mut self) -> Result<(), String>;
 }
 
@@ -487,16 +520,68 @@ impl From<String> for DestinationCreationError {
 }
 
 pub trait MainPort {
+    /// Check that the selected filesystem path supports a safe update.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsupported write handling or invalidated attachment evidence.
     fn prepare_write(&mut self) -> Result<(), String>;
+    /// Read the actual controller version file without synthesizing missing bytes.
+    ///
+    /// # Errors
+    ///
+    /// Reports file access, bounded-read or attachment validation failures.
     fn read_version(&mut self) -> Result<Vec<u8>, String>;
+    /// Revalidate ownership and the mounted destination's physical attachment.
+    ///
+    /// # Errors
+    ///
+    /// Refuses stale ownership, changed topology or a replaced device/volume.
     fn check_session(&mut self) -> Result<(), String>;
+    /// Exclusively create the controller's firmware destination.
+    ///
+    /// # Errors
+    ///
+    /// Reports creation or audit failure while retaining whether the destination
+    /// was actually created, even when no payload bytes were written.
     fn create_destination(&mut self) -> Result<(), DestinationCreationError>;
+    /// Write a payload slice and report the actual accepted byte count.
+    ///
+    /// # Errors
+    ///
+    /// Reports write/audit errors with known successful counts or possible
+    /// submission, preserving uncertainty rather than replaying bytes.
     fn write(&mut self, bytes: &[u8]) -> Result<usize, SubmissionError>;
+    /// Sync the open firmware file after all payload bytes were accepted.
+    ///
+    /// # Errors
+    ///
+    /// Reports file synchronization or attachment validation failure.
     fn flush(&mut self) -> Result<(), String>;
+    /// Close the destination while retaining any host close error.
+    ///
+    /// # Errors
+    ///
+    /// Reports close or attachment validation failure; successful writes remain recorded.
     fn close(&mut self) -> Result<(), String>;
+    /// Perform the adapter's qualified volume durability step.
+    ///
+    /// # Errors
+    ///
+    /// Reports volume synchronization or required durability-evidence failure.
     fn volume_flush(&mut self) -> Result<(), String>;
     /// Bounded host wait for automatic controller detach, never an eject/reset.
+    ///
+    /// # Errors
+    ///
+    /// Reports cancellation, observation failure or unexpected topology changes;
+    /// ordinary expiry without completion returns `Ok(false)`.
     fn wait_for_completion(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<bool, String>;
+    /// Release host filesystem resources and report remaining cleanup work.
+    ///
+    /// # Errors
+    ///
+    /// Reports checked close, restoration or host-audit failures during cleanup.
     fn finish(&mut self) -> Result<(), String>;
 }
 
@@ -834,7 +919,7 @@ mod tests {
         let mut progress = Vec::new();
         let record = run_bluetooth_transaction(
             &mut port,
-            &vec![0; 345088],
+            &vec![0; 345_088],
             507,
             VersionPolicy::UpgradeOnly,
             || false,
@@ -848,7 +933,7 @@ mod tests {
             &Progress {
                 submitted: 1024,
                 confirmed: 512,
-                total: 345088
+                total: 345_088
             }
         );
         assert!(port.cleanup);
@@ -960,6 +1045,10 @@ mod tests {
     }
 
     #[derive(Default)]
+    #[expect(
+        clippy::struct_excessive_bools,
+        reason = "Independent fake transport, audit, cleanup and detach failures are tested in combination."
+    )]
     struct Fake {
         calls: Vec<u8>,
         bytes: Vec<u8>,
@@ -1029,6 +1118,10 @@ mod tests {
         }
     }
     #[test]
+    #[expect(
+        clippy::naive_bytecount,
+        reason = "Counting a bounded fake command log does not warrant an additional dependency."
+    )]
     fn only_a_fully_sent_last_block_can_await_restart_without_its_status() {
         for (at, audit, expected) in [
             (2, false, Outcome::OutcomeUnknown),
@@ -1044,7 +1137,7 @@ mod tests {
             };
             let record = bluetooth_release(
                 &mut port,
-                &vec![0x5a; 361472],
+                &vec![0x5a; 361_472],
                 324,
                 VersionPolicy::UpgradeOnly,
                 || false,
@@ -1056,8 +1149,8 @@ mod tests {
             assert_eq!(port.calls.last(), Some(&0xf0));
             assert!(port.cleanup);
             if at == 708 && !audit {
-                assert_eq!(record.bytes_submitted, 361472);
-                assert_eq!(record.bytes_confirmed, 360960);
+                assert_eq!(record.bytes_submitted, 361_472);
+                assert_eq!(record.bytes_confirmed, 360_960);
                 assert!(record.error.is_none());
                 assert_eq!(port.calls.iter().filter(|&&op| op == 0xf2).count(), 1);
             }
@@ -1074,14 +1167,14 @@ mod tests {
         };
         let record = bluetooth_release(
             &mut port,
-            &vec![0; 361472],
+            &vec![0; 361_472],
             324,
             VersionPolicy::UpgradeOnly,
             || false,
         );
         assert_eq!(record.outcome, Outcome::OutcomeUnknown);
-        assert_eq!(record.bytes_submitted, 361472);
-        assert_eq!(record.bytes_confirmed, 360960);
+        assert_eq!(record.bytes_submitted, 361_472);
+        assert_eq!(record.bytes_confirmed, 360_960);
     }
 
     #[test]
@@ -1101,7 +1194,7 @@ mod tests {
             };
             let record = bluetooth_release(
                 &mut port,
-                &vec![0; 361472],
+                &vec![0; 361_472],
                 324,
                 VersionPolicy::UpgradeOnly,
                 || false,
@@ -1110,7 +1203,7 @@ mod tests {
                 record.outcome, expected,
                 "after={after_command} present={still_present}"
             );
-            let confirmed = if after_command >= 708 { 361472 } else { 1024 };
+            let confirmed = if after_command >= 708 { 361_472 } else { 1024 };
             assert_eq!(record.bytes_confirmed, confirmed);
             assert_eq!(record.bytes_submitted, confirmed);
             assert_eq!(port.calls.len(), after_command);
@@ -1129,7 +1222,7 @@ mod tests {
                 missing_status: Some(708),
                 ..Fake::default()
             };
-            let record = bluetooth_release(&mut port, &vec![0; 361472], target, policy, || false);
+            let record = bluetooth_release(&mut port, &vec![0; 361_472], target, policy, || false);
             assert_eq!(record.outcome, Outcome::TransferSubmittedPendingCompletion);
             let mut observation = Verification {
                 component: Component::Bluetooth,
@@ -1164,7 +1257,7 @@ mod tests {
         };
         let record = bluetooth_release(
             &mut port,
-            &vec![0; 361472],
+            &vec![0; 361_472],
             324,
             VersionPolicy::UpgradeOnly,
             || false,
@@ -1192,7 +1285,7 @@ mod tests {
             };
             let record = bluetooth_release(
                 &mut port,
-                &vec![0; 361472],
+                &vec![0; 361_472],
                 324,
                 VersionPolicy::UpgradeOnly,
                 || false,
@@ -1211,7 +1304,7 @@ mod tests {
         };
         let record = bluetooth_release(
             &mut port,
-            &vec![0; 361472],
+            &vec![0; 361_472],
             324,
             VersionPolicy::UpgradeOnly,
             || false,
@@ -1243,7 +1336,9 @@ mod tests {
     }
     #[test]
     fn selected_324_release_uses_its_target_and_all_706_blocks() {
-        let payload: Vec<u8> = (0..361472).map(|index| (index % 251) as u8).collect();
+        let payload: Vec<u8> = (0..361_472)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
         let mut port = Fake {
             version: 323,
             ..Fake::default()
@@ -1256,7 +1351,7 @@ mod tests {
             record.outcome,
             Outcome::TransferCompletedAwaitingVerification
         );
-        assert_eq!(record.bytes_confirmed, 361472);
+        assert_eq!(record.bytes_confirmed, 361_472);
         assert_eq!(port.bytes, payload);
         let mut expected = vec![0xf1, 0xf0, 0xf2];
         expected.extend(std::iter::repeat_n(0xf0, 705));
@@ -1318,7 +1413,7 @@ mod tests {
             };
             let record = bluetooth_release(
                 &mut port,
-                &vec![0; 361472],
+                &vec![0; 361_472],
                 324,
                 VersionPolicy::UpgradeOnly,
                 || false,
@@ -1334,7 +1429,7 @@ mod tests {
             assert_eq!(port.calls.len(), failure);
             assert!(port.cleanup);
         }
-        for length in [0, 511, 513, 361471, 361473] {
+        for length in [0, 511, 513, 361_471, 361_473] {
             let mut port = Fake {
                 version: 323,
                 ..Fake::default()
@@ -1356,7 +1451,7 @@ mod tests {
         };
         let record = bluetooth_release(
             &mut port,
-            &vec![0; 361472],
+            &vec![0; 361_472],
             324,
             VersionPolicy::AllowDowngrade,
             || false,
@@ -1365,11 +1460,13 @@ mod tests {
             record.outcome,
             Outcome::TransferCompletedAwaitingVerification
         );
-        assert_eq!(record.bytes_confirmed, 361472);
+        assert_eq!(record.bytes_confirmed, 361_472);
     }
     #[test]
     fn exact_bluetooth_transcript_and_payload_no_installed_success() {
-        let payload: Vec<_> = (0..345088).map(|n| (n % 251) as u8).collect();
+        let payload: Vec<_> = (0..345_088)
+            .map(|n| u8::try_from(n % 251).unwrap())
+            .collect();
         let mut port = Fake {
             version: 506,
             ..Fake::default()
@@ -1384,7 +1481,7 @@ mod tests {
         assert!(port.calls[3..676].iter().all(|b| *b == 0xf0));
         assert_eq!(port.calls[676], 0xf2);
         assert_eq!(port.bytes, payload);
-        assert_eq!(record.bytes_confirmed, 345088);
+        assert_eq!(record.bytes_confirmed, 345_088);
         assert!(port.cleanup);
     }
     #[test]
@@ -1395,14 +1492,14 @@ mod tests {
             (506, Some(1), Outcome::Refused),
         ] {
             let mut port = Fake {
-                version,
                 fail,
+                version,
                 ..Fake::default()
             };
             assert_eq!(
                 bluetooth(
                     &mut port,
-                    &vec![0; 345088],
+                    &vec![0; 345_088],
                     VersionPolicy::UpgradeOnly,
                     || false
                 )
@@ -1423,7 +1520,7 @@ mod tests {
         };
         let record = bluetooth(
             &mut port,
-            &vec![0; 345088],
+            &vec![0; 345_088],
             VersionPolicy::UpgradeOnly,
             || false,
         );
@@ -1442,7 +1539,7 @@ mod tests {
             };
             let record = bluetooth(
                 &mut port,
-                &vec![0; 345088],
+                &vec![0; 345_088],
                 VersionPolicy::UpgradeOnly,
                 || false,
             );
@@ -1460,7 +1557,7 @@ mod tests {
         };
         let record = bluetooth(
             &mut port,
-            &vec![0; 345088],
+            &vec![0; 345_088],
             VersionPolicy::UpgradeOnly,
             || false,
         );
@@ -1473,7 +1570,7 @@ mod tests {
         assert_eq!(
             bluetooth(
                 &mut port,
-                &vec![0; 345088],
+                &vec![0; 345_088],
                 VersionPolicy::UpgradeOnly,
                 || true
             )
@@ -1484,7 +1581,7 @@ mod tests {
         assert!(port.cleanup);
     }
     #[test]
-    fn downgrade_permission_never_bypasses_version_or_adapter_preflight() {
+    fn main_downgrade_permission_never_bypasses_version_or_adapter_preflight() {
         let mut main = main_port();
         main.version = b"www.gulikit.com\nversion 5.10";
         let default = main_transfer(
@@ -1537,6 +1634,10 @@ mod tests {
             Outcome::Refused
         );
         assert!(!main.events.contains(&"create"));
+    }
+
+    #[test]
+    fn bluetooth_downgrade_permission_never_bypasses_version_or_adapter_preflight() {
         let mut bt = Fake {
             version: 508,
             ..Fake::default()
@@ -1544,7 +1645,7 @@ mod tests {
         assert_eq!(
             bluetooth(
                 &mut bt,
-                &vec![0; 345088],
+                &vec![0; 345_088],
                 VersionPolicy::UpgradeOnly,
                 || false
             )
@@ -1559,7 +1660,7 @@ mod tests {
         assert_eq!(
             bluetooth(
                 &mut bt,
-                &vec![0; 345088],
+                &vec![0; 345_088],
                 VersionPolicy::AllowDowngrade,
                 || false
             )
@@ -1572,14 +1673,14 @@ mod tests {
             (508, None, true, Outcome::Refused),
         ] {
             let mut bt = Fake {
-                version,
                 fail,
+                version,
                 refuse_write,
                 ..Fake::default()
             };
             let result = bluetooth(
                 &mut bt,
-                &vec![0; 345088],
+                &vec![0; 345_088],
                 VersionPolicy::AllowDowngrade,
                 || false,
             );

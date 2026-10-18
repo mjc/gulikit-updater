@@ -5,6 +5,10 @@ use serde::Serialize;
 
 /// Current attachment evidence. These keys are session identities, never serial numbers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent discovery observations may coexist; they are not exclusive states."
+)]
 pub struct Candidate {
     pub ancestor: u64,
     pub generation: u64,
@@ -39,6 +43,12 @@ pub enum DiscoveryError {
 }
 
 impl Discovery {
+    /// Select one physically correlated attachment for the requested component.
+    ///
+    /// # Errors
+    ///
+    /// Refuses multiple ancestors before incomplete or mixed-generation evidence,
+    /// then refuses a missing device, unconfirmed/conflicting model or missing access.
     pub fn select(
         &self,
         user_confirmed_ns39: bool,
@@ -54,6 +64,11 @@ impl Discovery {
 
     /// Select candidates without allocating a temporary collection.
     /// Cloned iterators must yield the same discovery snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Applies the same ordered identity, completeness, model and access checks as
+    /// [`Self::select`], refusing evidence that cannot identify one eligible attachment.
     pub fn select_from(
         mut candidates: impl Iterator<Item = Candidate> + Clone,
         incomplete: bool,

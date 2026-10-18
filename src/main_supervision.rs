@@ -126,7 +126,7 @@ fn worker(channel: &mut Channel) -> Result<(), AppError> {
     channel.send(&Message::Result(value))?;
     Ok(())
 }
-pub fn internal(command: Command) -> ExitCode {
+pub fn internal(command: &Command) -> ExitCode {
     let result = match command {
         Command::MainGuardian => {
             Channel::from_stdin()

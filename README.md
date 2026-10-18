@@ -8,11 +8,11 @@ transport and supervised Main filesystem updates. Actual-device acceptance is
 tracked separately from portable tests and offline instruction emulation.
 
 | Component | Selected release | Firmware bytes | Bluetooth blocks |
-| --- | --- | ---: | ---: |
-| Main | 5.9 | 51,500 | — |
-| Bluetooth | 3.23 | 361,472 | 706 |
-| Bluetooth | 3.24 | 361,472 | 706 |
-| Bluetooth | 5.07 | 345,088 | 674 |
+| --------- | ---------------- | -------------: | ---------------: |
+| Main      | 5.9              |         51,500 |                — |
+| Bluetooth | 3.23             |        361,472 |              706 |
+| Bluetooth | 3.24             |        361,472 |              706 |
+| Bluetooth | 5.07             |        345,088 |              674 |
 
 KK3 Max Bluetooth 3.23 → 3.24 → 3.23 has passed hardware acceptance using
 original manufacturer archives. Fresh F1 readbacks confirmed both 3.24 after
@@ -56,8 +56,16 @@ devenv tasks run check:all
 
 The shell pins Rust 1.98.1 and supplies nextest, Python and uv. On a machine
 without Nix, install the toolchain specified in `rust-toolchain.toml` and use
-the same Cargo commands. Shell activation does not install application
-dependencies or run checks. `Cargo.lock` and `devenv.lock` pin resolved inputs.
+the same Cargo commands. Shell entry installs treefmt and Clippy commit hooks
+for the current worktree; it does not run checks or rewrite source files.
+`Cargo.lock` and `devenv.lock` pin resolved inputs.
+
+Run `treefmt` to format the source tree. Commits fail if formatting changes are
+needed or strict Clippy reports a warning. Clippy checks the whole workspace,
+all targets and all features, including the workspace's pedantic and selected
+nursery rules. The hooks use the pinned Rust toolchain. Clippy runs on every commit,
+including manifest and toolchain changes. `devenv tasks run check:all` runs formatting,
+build, Clippy, tests and documentation checks before publication.
 
 The inspector checks the complete original archive digest before parsing it,
 then checks the selected member and payload. Bluetooth extraction uses a PE

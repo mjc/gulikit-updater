@@ -28,6 +28,12 @@ pub enum SenseError {
     #[error("Sense response does not contain its declared bytes and required fields")]
     Length,
 }
+/// Decode only fields present in a fixed or descriptor-format sense response.
+///
+/// # Errors
+///
+/// Returns an error for a header shorter than eight bytes, an unsupported response
+/// code or fixed-format data without its required key/ASC/ASCQ fields.
 pub fn decode_sense(bytes: &[u8]) -> Result<Sense, SenseError> {
     if bytes.len() < 8 {
         return Err(SenseError::Header);

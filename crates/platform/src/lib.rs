@@ -28,6 +28,10 @@ pub enum InspectError {
 }
 
 /// Read a bounded local package without opening a controller or running an EXE.
+///
+/// # Errors
+///
+/// Returns an error if the input is not a readable regular file, exceeds the archive bound, or fails reviewed package validation.
 pub fn inspect_package(
     path: &Path,
     model: Model,

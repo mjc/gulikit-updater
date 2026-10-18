@@ -20,6 +20,10 @@ pub struct Volume {
 }
 impl Volume {
     /// Bind an opened directory to the OS device number of its selected filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the root cannot be opened safely, belongs to another device, or changes during acquisition.
     pub fn open_on_device(path: &Path, device: u64) -> Result<Self, String> {
         let volume = Self::open(path)?;
         if volume.device != device {
@@ -27,6 +31,10 @@ impl Volume {
         }
         Ok(volume)
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected root cannot be opened safely or its directory identity changes.
     pub fn open(path: &Path) -> Result<Self, String> {
         let root = File::from(
             open(
@@ -47,6 +55,10 @@ impl Volume {
         volume.check_root()?;
         Ok(volume)
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected path no longer identifies the held directory and filesystem.
     pub fn check_root(&self) -> Result<(), String> {
         let metadata = std::fs::symlink_metadata(&self.path).map_err(|e| e.to_string())?;
         if !metadata.is_dir() || metadata.dev() != self.device || metadata.ino() != self.inode {
@@ -54,6 +66,10 @@ impl Volume {
         }
         Ok(())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the root changed, the version file is not a readable regular file, or its contents exceed 4096 bytes.
     pub fn read_version(&self) -> Result<Vec<u8>, String> {
         self.check_root()?;
         let file = File::from(
@@ -77,6 +93,10 @@ impl Volume {
         }
         Ok(bytes)
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the root changed, a destination is already open, or exclusive destination creation fails.
     pub fn create(&mut self) -> Result<(), String> {
         self.check_root()?;
         if self.destination.is_some() {
@@ -97,6 +117,10 @@ impl Volume {
         ));
         Ok(())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no destination is open or the filesystem write fails; the submission error retains uncertainty.
     pub fn write(&mut self, bytes: &[u8]) -> Result<usize, gulikit_core::update::SubmissionError> {
         self.check_root()
             .map_err(gulikit_core::update::SubmissionError::before)?;
@@ -106,6 +130,10 @@ impl Volume {
             .write(bytes)
             .map_err(|error| error.to_string().into())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no destination is open or syncing the destination fails.
     pub fn flush(&mut self) -> Result<(), String> {
         self.destination
             .as_ref()
@@ -113,6 +141,10 @@ impl Volume {
             .sync_all()
             .map_err(|e| e.to_string())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checked descriptor close fails.
     pub fn close(&mut self) -> Result<(), String> {
         if let Some(file) = self.destination.take() {
             nix::unistd::close(file).map_err(|e| e.to_string())?;

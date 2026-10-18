@@ -15,6 +15,11 @@ use std::{
 
 /// Native and demo devices execute requests on the same serialized worker.
 pub trait Device: Send {
+    /// Execute one request and emit observations before its terminal event.
+    ///
+    /// # Errors
+    /// Returns an error when the request is unsupported, its inputs are invalid,
+    /// or the requested record, package, or device operation fails.
     fn run(
         &mut self,
         work: Work,
@@ -48,7 +53,7 @@ impl Worker {
         let (events, replies) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
-        let handle = thread::spawn(move || serve_requests(device, work, events, &flag));
+        let handle = thread::spawn(move || serve_requests(device, work, &events, &flag));
         (
             Self {
                 requests,
@@ -63,7 +68,7 @@ impl Worker {
 fn serve_requests(
     mut device: impl Device,
     work: Receiver<Work>,
-    events: Sender<Event>,
+    events: &Sender<Event>,
     cancelled: &AtomicBool,
 ) {
     let mut emit = |event| {
@@ -108,6 +113,10 @@ impl Drop for Worker {
 }
 
 /// Reading a selected archive never opens a device or runs the embedded executable.
+///
+/// # Errors
+/// Returns an error if the path cannot be read within the package size limit or
+/// the archive does not match a reviewed KK3 Max release for the requested component.
 pub fn inspect_selected_package(path: &Path, component: Component) -> Result<Event, String> {
     let package = gulikit_platform::inspect_package(path, Model::Kk3Max, component)
         .map_err(|e| e.to_string())?;
