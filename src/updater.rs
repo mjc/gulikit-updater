@@ -146,7 +146,7 @@ impl PriorAttempt {
             .last()
             .filter(|v| v["event"] == "attempt_result")
             .ok_or(
-                "Attempt has no complete result; use probe for an independent version observation",
+                "Attempt has no complete result. Keep the controller connected and unchanged; a missing final receipt does not establish that no firmware was submitted. Do not probe or reset until recovery is separately qualified.",
             )?;
         let component = prior["package"]["component"]
             .as_str()

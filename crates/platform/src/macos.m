@@ -5,6 +5,7 @@
 #import <IOKit/usb/USB.h>
 #import <DiskArbitration/DiskArbitration.h>
 #include <stdatomic.h>
+#include <time.h>
 
 // The pinned build SDK predates this public method. Match the current Apple
 // header's NSUInteger ABI and require runtime support before any capture.
@@ -119,11 +120,14 @@ char *gu_snapshot(uint64_t bound_id) {
         if (IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOMedia"),&iterator)) [errors addObject:@"Media enumeration failed"];
         while (iterator && (service=IOIteratorNext(iterator))) {
             NSDictionary *p=properties(service);
+            uint64_t id=usb_ancestor(service);
+            // A captured USB transport still inventories every USB candidate,
+            // but internal media cannot belong to any physical USB ancestor.
+            if (bound_id && !id) {IOObjectRelease(service);continue;}
             NSString *bsd=p[@"BSD Name"];
             DADiskRef disk=session && bsd ? DADiskCreateFromBSDName(kCFAllocatorDefault,session,bsd.UTF8String) : NULL;
             NSDictionary *description=disk ? CFBridgingRelease(DADiskCopyDescription(disk)) : nil;
             NSString *label=description[(__bridge NSString *)kDADiskDescriptionVolumeNameKey];
-            uint64_t id=usb_ancestor(service);
             BOOL recognized=[label caseInsensitiveCompare:@"GuliKit"]==NSOrderedSame && label!=nil;
             NSMutableDictionary *c=devices[@(id)];
             if (recognized && !id) [errors addObject:@"GuliKit volume has no physical USB ancestor"];
@@ -182,19 +186,36 @@ void gu_watch_close(void *context) {
 @property IOUSBHostPipe *output;
 @property uint8_t inputAddress;
 @property uint8_t outputAddress;
+@property BOOL trace;
+@property NSUInteger transferSequence;
 @end
 @implementation GuTransport
 @end
 static void error_text(char *buffer,size_t size,NSString *text) { if(size)snprintf(buffer,size,"%s",text.UTF8String ?: "unknown IOUSBHost error"); }
+static double trace_time(void) {
+    struct timespec value;clock_gettime(CLOCK_MONOTONIC,&value);
+    return (double)value.tv_sec+(double)value.tv_nsec/1e9;
+}
+static BOOL trace_enabled(void) {
+    const char *value=getenv("GULIKIT_USB_TRACE");return value && strcmp(value,"1")==0;
+}
+static IOUSBHostInterestHandler trace_interest(const char *scope) {
+    if(!trace_enabled())return nil;
+    return ^(IOUSBHostObject *object,uint32_t type,void *argument) {
+        (void)object;(void)argument;
+        fprintf(stderr,"USB_INTEREST mono=%.6f scope=%s message=0x%08x\n",trace_time(),scope,type);
+    };
+}
 void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
     @autoreleasepool {
         if(![IOUSBHostDevice instancesRespondToSelector:@selector(destroyWithOptions:)]) {error_text(message,capacity,@"Native ownership requires documented DeviceSurrender support; capture refused");return NULL;}
         io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IORegistryEntryIDMatching(id));
         if (!service) {error_text(message,capacity,@"Selected USB attachment disappeared");return NULL;}
-        NSError *error=nil;GuTransport *transport=[GuTransport new];
+        NSError *error=nil;GuTransport *transport=[GuTransport new];transport.trace=trace_enabled();
+        if(transport.trace)fprintf(stderr,"USB_CAPTURE_BEGIN mono=%.6f ancestor=%llu\n",trace_time(),(unsigned long long)id);
         // Modern Capture includes MSC interfaces. Ordinary destroy resets/rematches;
         // Rust selects explicit DeviceSurrender after any possible firmware submission.
-        transport.device=[[IOUSBHostDevice alloc] initWithIOService:service options:IOUSBHostObjectInitOptionsDeviceCapture queue:nil error:&error interestHandler:nil];
+        transport.device=[[IOUSBHostDevice alloc] initWithIOService:service options:IOUSBHostObjectInitOptionsDeviceCapture queue:nil error:&error interestHandler:trace_interest("device")];
         if (!transport.device) {IOObjectRelease(service);error_text(message,capacity,error.description);return NULL;}
         mach_timespec_t deadline={5,0};
         kern_return_t quiet=IOServiceWaitQuiet(service,&deadline);
@@ -208,7 +229,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
             if (!owned_descendant(id,usb_ancestor(child))) {IOObjectRelease(child);continue;}
             if (IOObjectConformsTo(child,"IOUSBHostInterface") && bot_profile(properties(child))) {
                 matches++;
-                if(matches==1) transport.interface=[[IOUSBHostInterface alloc] initWithIOService:child options:0 queue:nil error:&error interestHandler:nil];
+                if(matches==1) transport.interface=[[IOUSBHostInterface alloc] initWithIOService:child options:0 queue:nil error:&error interestHandler:trace_interest("interface")];
             }
             IOObjectRelease(child);
         }
@@ -233,6 +254,7 @@ void *gu_usb_open(uint64_t id,char *message,size_t capacity) {
         if(valid && input && output){transport.input=[transport.interface copyPipeWithAddress:input error:&error];transport.output=[transport.interface copyPipeWithAddress:output error:&error];}
         if(!transport.input || !transport.output || ![transport.input respondsToSelector:@selector(clearStallWithError:)]){error_text(message,capacity,error.description ?: @"Invalid bulk endpoint descriptors");[transport.interface destroy];[transport.device destroy];return NULL;}
         transport.inputAddress=input;transport.outputAddress=output;
+        if(transport.trace)fprintf(stderr,"USB_CAPTURE_READY mono=%.6f in=0x%02x out=0x%02x\n",trace_time(),input,output);
         return (__bridge_retained void *)transport;
     }
 }
@@ -248,7 +270,10 @@ int gu_usb_transfer(void *context,int input,uint8_t *bytes,size_t length,double 
         NSMutableData *data=[NSMutableData dataWithLength:length];
         if(!input)memcpy(data.mutableBytes,bytes,length);
         NSError *error=nil;NSUInteger count=0;
+        NSUInteger sequence=++transport.transferSequence;double started=trace_time();
+        if(transport.trace)fprintf(stderr,"USB_STAGE_BEGIN mono=%.6f sequence=%lu direction=%s requested=%zu\n",started,(unsigned long)sequence,input?"in":"out",length);
         BOOL result=[(input ? transport.input : transport.output) sendIORequestWithData:data bytesTransferred:&count completionTimeout:timeout error:&error];
+        if(transport.trace)fprintf(stderr,"USB_STAGE_END mono=%.6f sequence=%lu elapsed=%.6f actual=%lu success=%d code=0x%08x\n",trace_time(),(unsigned long)sequence,trace_time()-started,(unsigned long)count,(int)result,(unsigned)(int32_t)error.code);
         *actual=count;
         *failure_kind=!result && [error.domain isEqualToString:IOUSBHostErrorDomain] ? gu_usb_failure_kind((int32_t)error.code) : 0;
         if(input)memcpy(bytes,data.bytes,MIN(count,length));
@@ -270,9 +295,11 @@ int gu_usb_clear_stall(void *context,char *message,size_t capacity) {
 void gu_usb_close(void *context,int surrender) {
     @autoreleasepool {
         GuTransport *transport=CFBridgingRelease(context);
+        if(transport.trace)fprintf(stderr,"USB_CLOSE_BEGIN mono=%.6f surrender=%d\n",trace_time(),surrender);
         [transport.interface destroy];
         // DeviceSurrender is bit0 in the current public Apple SDK.
         [transport.device destroyWithOptions:surrender ? 1U : 0U];
+        if(transport.trace)fprintf(stderr,"USB_CLOSE_END mono=%.6f surrender=%d\n",trace_time(),surrender);
     }
 }
 int gu_max_lun_result(int succeeded,size_t actual,int32_t code) {
