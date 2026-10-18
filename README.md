@@ -41,6 +41,22 @@ cargo run --bin gulikit-updater -- package inspect /path/to/KK3_NS38_NS39_V5.9.z
 cargo run --bin gulikit-updater -- --help
 ```
 
+## Compare firmware changes
+
+Open **Changelog** in the desktop app, choose Main or Bluetooth, and enter the
+**From version** and **To version**. This works before connecting a controller.
+The same comparison is available in the CLI:
+
+```sh
+cargo run --bin gulikit-updater -- changelog --component bluetooth --from 3.23 --to 5.07
+```
+
+Add `--json` for structured notes and source links. Upgrades show recorded changes
+after From through To; downgrades show the changes removed, in reverse order.
+The history includes intermediate releases even when their packages are not
+available for installation. Historical notes may be incomplete; an empty interval
+does not prove there were no firmware changes. Version selection is manual.
+
 ## Update with the CLI on macOS
 
 Use one controller, check its NS39 label and Max controls, and select the correct

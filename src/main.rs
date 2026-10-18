@@ -74,6 +74,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show recorded firmware changes between two versions without accessing a controller.
+    Changelog {
+        #[arg(long, default_value = "kk3-max")]
+        model: Model,
+        #[arg(long)]
+        component: Component,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate a package without accessing a controller.
     Package {
         #[command(subcommand)]
@@ -157,6 +170,13 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
             };
             write_native_result(native_command(command), json, out, err)
         }
+        Command::Changelog {
+            model,
+            component,
+            from,
+            to,
+            json,
+        } => changelog_cli::write_comparison(model, component, &from, &to, json, out, err),
         Command::Packages { json } => {
             if json {
                 write_json(out, serde_json::json!({"packages": catalog()}))?;
@@ -291,6 +311,7 @@ fn outcome_code(value: &serde_json::Value) -> u8 {
     }
 }
 
+mod changelog_cli;
 #[cfg(target_os = "macos")]
 mod main_supervision;
 mod native;

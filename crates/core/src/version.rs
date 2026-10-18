@@ -45,28 +45,37 @@ pub(crate) fn release_decision(
     target: &str,
     policy: VersionPolicy,
 ) -> Result<VersionDecision, UnknownVersion> {
-    let parts = |text: &str| -> Result<(u16, u16), UnknownVersion> {
-        let (major, minor) = text.split_once('.').ok_or(UnknownVersion)?;
-        let part = |value: &str| -> Result<u16, UnknownVersion> {
-            if !(1..=4).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(UnknownVersion);
-            }
-            value.parse().map_err(|_| UnknownVersion)
-        };
-        let value = (part(major)?, part(minor)?);
-        if component == crate::package::Component::Bluetooth
-            && (minor.len() != 2
-                || value
-                    .0
-                    .checked_mul(100)
-                    .and_then(|major| major.checked_add(value.1))
-                    .is_none())
-        {
+    Ok(decision(
+        release_version(component, installed)?,
+        release_version(component, target)?,
+        policy,
+    ))
+}
+
+/// Parse component-specific release labels for numeric comparisons.
+pub(crate) fn release_version(
+    component: crate::package::Component,
+    text: &str,
+) -> Result<(u16, u16), UnknownVersion> {
+    let (major, minor) = text.split_once('.').ok_or(UnknownVersion)?;
+    let part = |value: &str| -> Result<u16, UnknownVersion> {
+        if !(1..=4).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(UnknownVersion);
         }
-        Ok(value)
+        value.parse().map_err(|_| UnknownVersion)
     };
-    Ok(decision(parts(installed)?, parts(target)?, policy))
+    let value = (part(major)?, part(minor)?);
+    if component == crate::package::Component::Bluetooth
+        && (minor.len() != 2
+            || value
+                .0
+                .checked_mul(100)
+                .and_then(|major| major.checked_add(value.1))
+                .is_none())
+    {
+        return Err(UnknownVersion);
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
