@@ -27,6 +27,10 @@ public class RecoverCallbackContext extends GhidraScript {
         Set<Address> s=new TreeSet<>();FunctionIterator i=currentProgram.getFunctionManager().getFunctions(true);
         while(i.hasNext())s.add(i.next().getEntryPoint());return s;
     }
+    private long functionCount() {
+        long count=0;FunctionIterator i=currentProgram.getFunctionManager().getFunctions(true);
+        while(i.hasNext()){i.next();count++;}return count;
+    }
     public void run() throws Exception {
         String[] args=getScriptArgs();if(args.length<1)throw new IllegalArgumentException("RecoverCallbackContext.java OUTPUT_DIRECTORY");
         Path out=Paths.get(args[0]);Files.createDirectories(out);Files.createDirectories(out.resolve("decompiled"));
@@ -113,7 +117,7 @@ public class RecoverCallbackContext extends GhidraScript {
                     }
                 }
                 for(Map.Entry<Address,String> e:targets.entrySet()) {
-                    if(monitor.isCancelled() || functions().size()-before.size()>=1000)break;
+                    if(monitor.isCancelled() || functionCount()-before.size()>=1000)break;
                     closureAttempts++;Address a=e.getKey();boolean decoded=disassemble(a);Function f=fm.getFunctionAt(a);
                     if(f==null && decoded)f=createFunction(a,null);
                     w.write(obj("round",round,"target",a,"edge",e.getValue(),"disassembled",decoded,"created_or_found",f!=null,"confidence","static immediate-code-pointer/direct-call edge; callback role requires review"));w.newLine();

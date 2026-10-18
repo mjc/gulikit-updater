@@ -97,7 +97,7 @@ pub enum PackageError {
     EmbeddedMetadata,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PackageInfo {
     pub model: Model,
     pub component: Component,
@@ -184,6 +184,27 @@ pub struct Release {
     bluetooth_version: Option<u16>,
 }
 
+impl Release {
+    /// Apply version direction policy to the selected reviewed release.
+    pub fn decision_for_installed(
+        &self,
+        installed: &str,
+        policy: crate::version::VersionPolicy,
+    ) -> Result<crate::version::VersionDecision, crate::version::UnknownVersion> {
+        crate::version::release_decision(self.component, installed, self.version, policy)
+    }
+
+    /// Exact payload length pinned to this reviewed release.
+    pub fn payload_size(&self) -> usize {
+        self.payload_size
+    }
+
+    /// SHA-256 of the payload pinned to this reviewed release.
+    pub fn payload_sha256(&self) -> &'static str {
+        self.payload_sha256
+    }
+}
+
 const MAIN_HASH: &str = "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4";
 
 static RELEASES: [Release; 4] = [
@@ -258,25 +279,30 @@ fn release_from_archive(
     model: Model,
     component: Component,
 ) -> Result<&'static Release, PackageError> {
-    let candidates: Vec<_> = RELEASES
+    let mut candidates = RELEASES
         .iter()
-        .filter(|release| release.model == model && release.component == component)
-        .collect();
+        .filter(|release| release.model == model && release.component == component);
     if !candidates
-        .iter()
+        .clone()
         .any(|release| bytes.len() == release.archive_size)
     {
         return Err(PackageError::Size {
             kind: "archive",
-            expected: candidates[0].archive_size,
+            expected: candidates.clone().next().unwrap().archive_size,
             actual: bytes.len(),
         });
     }
-    let digest = hex::encode(Sha256::digest(bytes));
+    let digest = Sha256::digest(bytes);
     candidates
-        .into_iter()
-        .find(|release| bytes.len() == release.archive_size && digest == release.archive_sha256)
+        .find(|release| {
+            bytes.len() == release.archive_size && digest_matches(&digest, release.archive_sha256)
+        })
         .ok_or(PackageError::Digest { kind: "archive" })
+}
+
+fn digest_matches(actual: &[u8], expected_hex: &str) -> bool {
+    let mut expected = [0; 32];
+    hex::decode_to_slice(expected_hex, &mut expected).is_ok() && actual == expected
 }
 
 fn verify_bytes(
@@ -292,7 +318,7 @@ fn verify_bytes(
             actual: bytes.len(),
         });
     }
-    if hex::encode(Sha256::digest(bytes)) != digest {
+    if !digest_matches(&Sha256::digest(bytes), digest) {
         return Err(PackageError::Digest { kind });
     }
     Ok(())

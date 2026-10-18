@@ -43,6 +43,7 @@ def emulate(first_error=0, final_error=0):
 
     length = get(0x5732E4)
     original = bytes(u.mem_read(0x5732F0, length))
+    original_view = memoryview(original)
     identity = bytes(u.mem_read(0x5732D0, 16))
     put(ebp - 0x2BC, length)
     put(ebp - 0x2B4, obj + 0x1000)
@@ -55,10 +56,14 @@ def emulate(first_error=0, final_error=0):
         put(slot, target)
     for address, pops in [(0x40A96E, 0), (0x40A959, 0), (0x401BF0, 0), (0x40EB01, 12), (0x40ED98, 4), (0x401D50, 0), (0x503B50, 0)]:
         stubs[address] = ("memcpy" if address == 0x503B50 else "ui", pops)
-    calls, writes = [], []
+    calls = []
+    write_count = 0
+    streamed_length = 0
+    stream_matches_payload = True
     outcome = {"exit_va": None}
 
     def hook(cpu, address, size, userdata):
+        nonlocal write_count, streamed_length, stream_matches_payload
         if address in (0x4029B1, 0x402965, 0x4028FC, 0x4029BF, 0x402721):
             outcome["exit_va"] = hex(address)
             cpu.emu_stop()
@@ -86,10 +91,14 @@ def emulate(first_error=0, final_error=0):
                 cpu.mem_write(data, identity + struct.pack("<HH", 331, 0))
             elif cdb[0] == 0xF0:
                 require(direction == 0 and 0 < n <= 512, "invalid F0 request")
-                writes.append(bytes(cpu.mem_read(data, n)))
+                chunk = bytes(cpu.mem_read(data, n))
+                expected = original_view[streamed_length:streamed_length + n]
+                stream_matches_payload = stream_matches_payload and chunk == expected
+                write_count += 1
+                streamed_length += len(chunk)
             elif cdb[0] == 0xF2:
                 require(direction == 1 and n == 20, "invalid F2 request")
-                status = first_error if len(writes) == 1 else final_error
+                status = first_error if write_count == 1 else final_error
                 cpu.mem_write(data, bytes([status]) + bytes(19))
             else:
                 raise RuntimeError(f"Unexpected CDB: {cdb.hex()}")
@@ -99,8 +108,8 @@ def emulate(first_error=0, final_error=0):
 
     u.hook_add(UC_HOOK_CODE, hook)
     u.emu_start(0x4025CD, 0x402A33, count=2000000)
-    streamed = b"".join(writes)
-    outcome.update(payload_length=length, write_count=len(writes), streamed_length=len(streamed), stream_matches_payload=streamed == original, payload_sha256=hashlib.sha256(original).hexdigest(), first_calls=calls[:3], last_call=calls[-1] if calls else None)
+    stream_matches_payload = stream_matches_payload and streamed_length == len(original)
+    outcome.update(payload_length=length, write_count=write_count, streamed_length=streamed_length, stream_matches_payload=stream_matches_payload, payload_sha256=hashlib.sha256(original).hexdigest(), first_calls=calls[:3], last_call=calls[-1] if calls else None)
     return outcome
 
 

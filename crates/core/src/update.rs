@@ -276,7 +276,7 @@ pub fn update_bluetooth_with_progress(
         }
         return record;
     };
-    bluetooth_observed(port, package.payload(), target, policy, cancelled, progress)
+    run_bluetooth_transaction(port, package.payload(), target, policy, cancelled, progress)
 }
 
 #[cfg(test)]
@@ -296,9 +296,9 @@ fn bluetooth_release(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    bluetooth_observed(port, payload, target, policy, cancelled, |_| {})
+    run_bluetooth_transaction(port, payload, target, policy, cancelled, |_| {})
 }
-fn bluetooth_observed(
+fn run_bluetooth_transaction(
     port: &mut impl BluetoothPort,
     payload: &[u8],
     target: u16,
@@ -316,7 +316,8 @@ fn bluetooth_observed(
             return Ok(());
         }
         port.check_session()?;
-        let response = command(port, &mut record, 0xf1, &[]).map_err(|error| error.message)?;
+        let response = record_bluetooth_command(port, &mut record, 0xf1, &[])
+            .map_err(|error| error.message)?;
         let version = bluetooth_info(&response).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
         match version.decision_for(target, policy) {
@@ -333,67 +334,8 @@ fn bluetooth_observed(
         if payload.is_empty() || !payload.len().is_multiple_of(512) {
             return Err("Bluetooth payload must contain complete 512-byte blocks".into());
         }
-        let block_count = payload.len() / 512;
         port.prepare_write()?;
-        for (index, block) in payload.as_chunks::<512>().0.iter().enumerate() {
-            if cancelled() {
-                if record.bytes_submitted == 0 {
-                    record.outcome = Outcome::CancelledBeforeWrite;
-                    return Ok(());
-                }
-                return Err(
-                    "Cancelled after firmware submission; no rollback or resume is available"
-                        .into(),
-                );
-            }
-            port.check_session()?;
-            let result = command(port, &mut record, 0xf0, block);
-            publish_progress(&record, payload.len(), &mut progress);
-            if let Err(error) = result {
-                if index > 0
-                    && index + 1 == block_count
-                    && record.bytes_submitted == payload.len()
-                    && record.bytes_confirmed + block.len() == payload.len()
-                    && error.completion == SubmissionCompletion::DataSentStatusMissing
-                    && !error.audit_failure
-                {
-                    // Hardware can restart after accepting the last DATA OUT,
-                    // before returning its CSW. Preserve that command's error
-                    // and unconfirmed block; only a fresh F1 can prove install.
-                    if port.completion_detached()? {
-                        record.outcome = Outcome::TransferSubmittedPendingCompletion;
-                        return Ok(());
-                    }
-                }
-                return Err(error.message);
-            }
-            record.bytes_confirmed += block.len();
-            publish_progress(&record, payload.len(), &mut progress);
-            if index == 0 || index + 1 == block_count {
-                if cancelled() {
-                    return Err("Cancelled after firmware submission".into());
-                }
-                if let Err(error) = port.check_session() {
-                    if index + 1 == block_count && port.completion_detached()? {
-                        record.outcome = Outcome::TransferSubmittedPendingCompletion;
-                        return Ok(());
-                    }
-                    return Err(error);
-                }
-                let status =
-                    command(port, &mut record, 0xf2, &[]).map_err(|error| error.message)?;
-                if status[0] != 0 {
-                    return Err(format!("DeviceStatusError({})", status[0]));
-                }
-            }
-        }
-        if let Err(error) = port.check_session()
-            && !port.completion_detached()?
-        {
-            return Err(error);
-        }
-        record.outcome = Outcome::TransferCompletedAwaitingVerification;
-        Ok(())
+        stream_bluetooth_payload(port, payload, &mut record, &mut cancelled, &mut progress)
     })();
     if let Err(error) = result {
         record.error = Some(error);
@@ -409,7 +351,75 @@ fn bluetooth_observed(
     record
 }
 
-fn command(
+fn stream_bluetooth_payload(
+    port: &mut impl BluetoothPort,
+    payload: &[u8],
+    record: &mut TransferRecord,
+    cancelled: &mut impl FnMut() -> bool,
+    progress: &mut impl FnMut(Progress),
+) -> Result<(), String> {
+    let block_count = payload.len() / 512;
+    for (index, block) in payload.as_chunks::<512>().0.iter().enumerate() {
+        if cancelled() {
+            if record.bytes_submitted == 0 {
+                record.outcome = Outcome::CancelledBeforeWrite;
+                return Ok(());
+            }
+            return Err(
+                "Cancelled after firmware submission; no rollback or resume is available".into(),
+            );
+        }
+        port.check_session()?;
+        let result = record_bluetooth_command(port, record, 0xf0, block);
+        publish_progress(record, payload.len(), progress);
+        if let Err(error) = result {
+            if index > 0
+                && index + 1 == block_count
+                && record.bytes_submitted == payload.len()
+                && record.bytes_confirmed + block.len() == payload.len()
+                && error.completion == SubmissionCompletion::DataSentStatusMissing
+                && !error.audit_failure
+            {
+                // Hardware can restart after accepting the last DATA OUT,
+                // before returning its CSW. Preserve that command's error
+                // and unconfirmed block; only a fresh F1 can prove install.
+                if port.completion_detached()? {
+                    record.outcome = Outcome::TransferSubmittedPendingCompletion;
+                    return Ok(());
+                }
+            }
+            return Err(error.message);
+        }
+        record.bytes_confirmed += block.len();
+        publish_progress(record, payload.len(), progress);
+        if index == 0 || index + 1 == block_count {
+            if cancelled() {
+                return Err("Cancelled after firmware submission".into());
+            }
+            if let Err(error) = port.check_session() {
+                if index + 1 == block_count && port.completion_detached()? {
+                    record.outcome = Outcome::TransferSubmittedPendingCompletion;
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            let status =
+                record_bluetooth_command(port, record, 0xf2, &[]).map_err(|error| error.message)?;
+            if status[0] != 0 {
+                return Err(format!("DeviceStatusError({})", status[0]));
+            }
+        }
+    }
+    if let Err(error) = port.check_session()
+        && !port.completion_detached()?
+    {
+        return Err(error);
+    }
+    record.outcome = Outcome::TransferCompletedAwaitingVerification;
+    Ok(())
+}
+
+fn record_bluetooth_command(
     port: &mut impl BluetoothPort,
     record: &mut TransferRecord,
     opcode: u8,
@@ -516,7 +526,7 @@ pub fn update_main_with_progress(
         }
         return record;
     }
-    main_observed(port, package.payload(), policy, cancelled, progress)
+    run_main_transaction(port, package.payload(), policy, cancelled, progress)
 }
 
 #[cfg(test)]
@@ -526,9 +536,9 @@ fn main_transfer(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    main_observed(port, payload, policy, cancelled, |_| {})
+    run_main_transaction(port, payload, policy, cancelled, |_| {})
 }
-fn main_observed(
+fn run_main_transaction(
     port: &mut impl MainPort,
     payload: &[u8],
     policy: VersionPolicy,
@@ -573,53 +583,7 @@ fn main_observed(
             return Err(error.error);
         }
         record.main_destination_created = true;
-        let mut offset = 0;
-        while offset < payload.len() {
-            if cancelled() {
-                if offset == 0 {
-                    return Err("Cancelled after destination creation; the empty firmware file remains and requires inspection before another attempt".into());
-                }
-                return Err("Cancelled after firmware submission".into());
-            }
-            port.check_session()?;
-            let bytes = &payload[offset..(offset + 4096).min(payload.len())];
-            let count = match port.write(bytes) {
-                Ok(count) if count <= bytes.len() => {
-                    record.bytes_submitted += count;
-                    count
-                }
-                Ok(_) => {
-                    record.bytes_submitted += bytes.len();
-                    publish_progress(&record, payload.len(), &mut progress);
-                    return Err("Invalid filesystem write count".into());
-                }
-                Err(error) => {
-                    if let Some(count) = error
-                        .known_write_count
-                        .filter(|count| *count <= bytes.len())
-                    {
-                        record.bytes_submitted += count;
-                        record.bytes_confirmed += count;
-                    } else if error.may_have_been_submitted {
-                        record.bytes_submitted += bytes.len();
-                    }
-                    if error.audit_failure {
-                        record
-                            .cleanup_errors
-                            .push(format!("Host audit failure: {}", error.message));
-                    }
-                    publish_progress(&record, payload.len(), &mut progress);
-                    return Err(error.message);
-                }
-            };
-            publish_progress(&record, payload.len(), &mut progress);
-            if count == 0 {
-                return Err("Zero-progress filesystem write".into());
-            }
-            offset += count;
-            record.bytes_confirmed += count;
-            publish_progress(&record, payload.len(), &mut progress);
-        }
+        write_main_payload(port, payload, &mut record, &mut cancelled, &mut progress)?;
         port.flush()?;
         port.close()?;
         port.volume_flush()?;
@@ -644,6 +608,63 @@ fn main_observed(
         record.cleanup_errors.push(error);
     }
     record
+}
+
+fn write_main_payload(
+    port: &mut impl MainPort,
+    payload: &[u8],
+    record: &mut TransferRecord,
+    cancelled: &mut impl FnMut() -> bool,
+    progress: &mut impl FnMut(Progress),
+) -> Result<(), String> {
+    let mut offset = 0;
+    while offset < payload.len() {
+        if cancelled() {
+            if offset == 0 {
+                return Err("Cancelled after destination creation; the empty firmware file remains and requires inspection before another attempt".into());
+            }
+            return Err("Cancelled after firmware submission".into());
+        }
+        port.check_session()?;
+        let bytes = &payload[offset..(offset + 4096).min(payload.len())];
+        let count = match port.write(bytes) {
+            Ok(count) if count <= bytes.len() => {
+                record.bytes_submitted += count;
+                count
+            }
+            Ok(_) => {
+                record.bytes_submitted += bytes.len();
+                publish_progress(record, payload.len(), progress);
+                return Err("Invalid filesystem write count".into());
+            }
+            Err(error) => {
+                if let Some(count) = error
+                    .known_write_count
+                    .filter(|count| *count <= bytes.len())
+                {
+                    record.bytes_submitted += count;
+                    record.bytes_confirmed += count;
+                } else if error.may_have_been_submitted {
+                    record.bytes_submitted += bytes.len();
+                }
+                if error.audit_failure {
+                    record
+                        .cleanup_errors
+                        .push(format!("Host audit failure: {}", error.message));
+                }
+                publish_progress(record, payload.len(), progress);
+                return Err(error.message);
+            }
+        };
+        publish_progress(record, payload.len(), progress);
+        if count == 0 {
+            return Err("Zero-progress filesystem write".into());
+        }
+        offset += count;
+        record.bytes_confirmed += count;
+        publish_progress(record, payload.len(), progress);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -776,7 +797,7 @@ mod tests {
     fn progress_reports_confirmed_short_writes_and_never_guesses_completion() {
         let mut port = main_port();
         let mut progress = Vec::new();
-        let result = main_observed(
+        let result = run_main_transaction(
             &mut port,
             &vec![0; 51500],
             VersionPolicy::UpgradeOnly,
@@ -810,7 +831,7 @@ mod tests {
             ..Fake::default()
         };
         let mut progress = Vec::new();
-        let record = bluetooth_observed(
+        let record = run_bluetooth_transaction(
             &mut port,
             &vec![0; 345088],
             507,

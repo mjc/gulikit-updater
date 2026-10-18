@@ -1,6 +1,22 @@
 #[cfg(target_os = "macos")]
 use super::{ApplicationError as AppError, Request, check_attachment};
+#[cfg(target_os = "macos")]
+use gulikit_core::{
+    package::Component,
+    update::{
+        BluetoothPort, MainPort, TransferRecord, Verification, update_bluetooth_with_progress,
+        update_main_with_progress, verify_restart,
+    },
+    version::{MainVersion, bluetooth_info},
+};
+#[cfg(target_os = "macos")]
+use gulikit_platform::journal::{Recorded, finalize_record, write_event};
+#[cfg(target_os = "macos")]
+use gulikit_platform::macos::{Session, discover};
 use serde_json::Value;
+#[cfg(target_os = "macos")]
+use serde_json::json;
+
 #[cfg(target_os = "macos")]
 pub(super) fn execute(
     request: Request,
@@ -8,17 +24,6 @@ pub(super) fn execute(
     cancelled: &mut dyn FnMut() -> bool,
     progress: &mut dyn FnMut(gulikit_core::update::Progress),
 ) -> Result<Value, AppError> {
-    use gulikit_core::{
-        package::Component,
-        update::{
-            BluetoothPort, MainPort, TransferRecord, Verification, update_bluetooth_with_progress,
-            update_main_with_progress, verify_restart,
-        },
-        version::{MainVersion, bluetooth_info},
-    };
-    use gulikit_platform::journal::{Recorded, finalize_record, write_event};
-    use gulikit_platform::macos::{Session, discover};
-    use serde_json::json;
     match request {
         Request::Devices => Ok(
             json!({"discovery":discover()?,"coverage":"Observed GuliKit update profiles and correlated GuliKit volumes. Put only one device in update mode; future unknown identities may not be recognized."}),
@@ -26,55 +31,7 @@ pub(super) fn execute(
         Request::Probe {
             component,
             confirm_ns39,
-            ..
-        } => {
-            let (target, raw, version, qualified_lun, cleanup_errors) = match component {
-                Component::Main => {
-                    let mut port = Session::open(confirm_ns39, Component::Main)?.main()?;
-                    let target = port.target().clone();
-                    let (raw, cleanup) = read_with_cleanup(
-                        &mut port,
-                        MainPort::read_version,
-                        MainPort::finish,
-                        &mut *cancelled,
-                    );
-                    let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
-                    let raw = raw.map_err(|error| {
-                        AppError::from(error).with_cleanup(cleanup_errors.clone())
-                    })?;
-                    let version = MainVersion::parse(&raw).map_err(|error| {
-                        AppError::from(error.to_string()).with_cleanup(cleanup_errors.clone())
-                    })?;
-                    (target, raw, version.to_string(), None, cleanup_errors)
-                }
-                Component::Bluetooth => {
-                    let mut port =
-                        Session::open(confirm_ns39, Component::Bluetooth)?.bluetooth()?;
-                    let target = port.target().clone();
-                    let qualified_lun = port.qualified_lun();
-                    let (raw, cleanup) = read_with_cleanup(
-                        &mut port,
-                        |port| port.read_info(),
-                        BluetoothPort::finish,
-                        &mut *cancelled,
-                    );
-                    let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
-                    let raw = raw.map_err(|error| {
-                        AppError::from(error).with_cleanup(cleanup_errors.clone())
-                    })?;
-                    let version = bluetooth_info(&raw)
-                        .map_err(|e| {
-                            AppError::from(format!("{e}; raw={raw:02x?}"))
-                                .with_cleanup(cleanup_errors.clone())
-                        })?
-                        .to_string();
-                    (target, raw, version, qualified_lun, cleanup_errors)
-                }
-            };
-            Ok(
-                json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"qualified_bot_lun":qualified_lun,"cleanup_errors":cleanup_errors,"target":target,"identity_provenance":"user-confirmed NS39; observed update profile"}),
-            )
-        }
+        } => probe(component, confirm_ns39, cancelled),
         Request::Update {
             package,
             confirm_ns39,
@@ -96,37 +53,8 @@ pub(super) fn execute(
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
             let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
             write_event(&mut journal, &header).map_err(AppError::host_io)?;
-            let result = match component {
-                Component::Main => match session.main() {
-                    Ok(port) => update_main_with_progress(
-                        &mut Recorded::new(port, &mut journal),
-                        &package,
-                        policy,
-                        &mut *cancelled,
-                        &mut *progress,
-                    ),
-                    Err(error) => TransferRecord {
-                        version_policy: policy,
-                        error: Some(error),
-                        ..TransferRecord::default()
-                    },
-                },
-                Component::Bluetooth => match session.bluetooth() {
-                    Ok(port) => update_bluetooth_with_progress(
-                        &mut Recorded::new(port, &mut journal),
-                        &package,
-                        policy,
-                        &mut *cancelled,
-                        &mut *progress,
-                    ),
-                    Err(error) => TransferRecord {
-                        version_policy: policy,
-                        error: Some(error.error),
-                        cleanup_errors: error.cleanup_errors,
-                        ..TransferRecord::default()
-                    },
-                },
-            };
+            let result =
+                transfer_package(session, &package, policy, &mut journal, cancelled, progress);
             let action = super::operator_action(component, result.outcome);
             let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"transfer":result,"operator_action":action});
             Ok(finalize_record(&mut journal, value))
@@ -136,72 +64,180 @@ pub(super) fn execute(
             record,
             confirm_ns39,
             confirm_same_controller,
-            ..
-        } => {
-            let bytes =
-                gulikit_platform::journal::read_attempt(&attempt).map_err(AppError::host_io)?;
-            let prior = super::PriorAttempt::parse(&bytes)?;
-            prior.require_verifiable()?;
-            let component = prior.component;
-            let expected_version = prior.expected_version;
-            let previous = prior.outcome;
-            let generation = prior.generation;
-            let prior = prior.record;
-            let mut session = Session::open(confirm_ns39, component)?;
-            let target = session.target.clone();
-            let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
-            write_event(
-                &mut journal,
-                &json!({"event":"verification_started","schema_version":1,"source_attempt":record_path(&attempt),"prior_result":prior,"target":target,"same_unit_association":super::same_unit_association(confirm_same_controller)}),
-            ).map_err(AppError::host_io)?;
-            let (readback, cleanup, qualified_lun) = match component {
-                Component::Main => match session.main() {
-                    Ok(mut port) => {
-                        let (raw, cleanup) = read_with_cleanup(
-                            &mut port,
-                            MainPort::read_version,
-                            MainPort::finish,
-                            &mut *cancelled,
-                        );
-                        (raw, cleanup, None)
-                    }
-                    Err(error) => (Err(error), Ok(()), None),
-                },
-                Component::Bluetooth => match session.bluetooth() {
-                    Ok(mut port) => {
-                        let qualified_lun = port.qualified_lun();
-                        let (raw, cleanup) = read_with_cleanup(
-                            &mut port,
-                            |port| port.read_info(),
-                            BluetoothPort::finish,
-                            &mut *cancelled,
-                        );
-                        (raw, cleanup, qualified_lun)
-                    }
-                    Err(error) => (
-                        Err(error.error),
-                        if error.cleanup_errors.is_empty() {
-                            Ok(())
-                        } else {
-                            Err(error.cleanup_errors.join("; "))
-                        },
-                        None,
-                    ),
-                },
+            expected_receipt,
+        } => verify_attempt(
+            &attempt,
+            &record,
+            confirm_ns39,
+            confirm_same_controller,
+            expected_receipt.as_ref(),
+            cancelled,
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn transfer_package(
+    session: Session,
+    package: &gulikit_core::package::VerifiedPackage,
+    policy: gulikit_core::version::VersionPolicy,
+    journal: &mut std::fs::File,
+    cancelled: &mut dyn FnMut() -> bool,
+    progress: &mut dyn FnMut(gulikit_core::update::Progress),
+) -> TransferRecord {
+    match package.info().component {
+        Component::Main => match session.main() {
+            Ok(port) => update_main_with_progress(
+                &mut Recorded::new(port, &mut *journal),
+                package,
+                policy,
+                &mut *cancelled,
+                &mut *progress,
+            ),
+            Err(error) => TransferRecord {
+                version_policy: policy,
+                error: Some(error),
+                ..TransferRecord::default()
+            },
+        },
+        Component::Bluetooth => match session.bluetooth() {
+            Ok(port) => update_bluetooth_with_progress(
+                &mut Recorded::new(port, &mut *journal),
+                package,
+                policy,
+                &mut *cancelled,
+                &mut *progress,
+            ),
+            Err(error) => TransferRecord {
+                version_policy: policy,
+                error: Some(error.error),
+                cleanup_errors: error.cleanup_errors,
+                ..TransferRecord::default()
+            },
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn probe(
+    component: gulikit_core::package::Component,
+    confirm_ns39: bool,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Value, AppError> {
+    let (target, raw, version, qualified_lun, cleanup_errors) = match component {
+        Component::Main => {
+            let mut port = Session::open(confirm_ns39, Component::Main)?.main()?;
+            let target = port.target().clone();
+            let (raw, cleanup) = read_with_cleanup(
+                &mut port,
+                MainPort::read_version,
+                MainPort::finish,
+                &mut *cancelled,
+            );
+            let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
+            let raw = match raw {
+                Ok(raw) => raw,
+                Err(error) => return Err(AppError::from(error).with_cleanup(cleanup_errors)),
             };
-            let version = readback
-                .as_ref()
-                .map_err(Clone::clone)
-                .and_then(|raw| match component {
-                    Component::Main => MainVersion::parse(raw)
-                        .map(|version| version.to_string())
-                        .map_err(|e| e.to_string()),
-                    Component::Bluetooth => bluetooth_info(raw)
-                        .map(|version| version.to_string())
-                        .map_err(|e| e.to_string()),
-                });
-            let error = version.as_ref().err().cloned();
-            let observation = version.ok().map(|version| Verification {
+            let version = match MainVersion::parse(&raw) {
+                Ok(version) => version,
+                Err(error) => {
+                    return Err(AppError::from(error.to_string()).with_cleanup(cleanup_errors));
+                }
+            };
+            (target, raw, version.to_string(), None, cleanup_errors)
+        }
+        Component::Bluetooth => {
+            let mut port = Session::open(confirm_ns39, Component::Bluetooth)?.bluetooth()?;
+            let target = port.target().clone();
+            let qualified_lun = port.qualified_lun();
+            let (raw, cleanup) = read_with_cleanup(
+                &mut port,
+                |port| port.read_info(),
+                BluetoothPort::finish,
+                &mut *cancelled,
+            );
+            let mut cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
+            let raw = match raw {
+                Ok(raw) => raw,
+                Err(error) => return Err(AppError::from(error).with_cleanup(cleanup_errors)),
+            };
+            let version = match bluetooth_info(&raw) {
+                Ok(version) => version.to_string(),
+                Err(error) => {
+                    return Err(AppError::from(format!("{error}; raw={raw:02x?}"))
+                        .with_cleanup(cleanup_errors));
+                }
+            };
+            // Read-only cleanup may reset USB and restart driver matching.
+            // Discover again before returning an attachment for later operations.
+            let target = match discover()
+                .and_then(|snapshot| post_cleanup_target(&target, snapshot, confirm_ns39))
+            {
+                Ok(current) => current,
+                Err(error) => {
+                    cleanup_errors
+                        .push(format!("Attachment after cleanup is unconfirmed: {error}"));
+                    target
+                }
+            };
+            (target, raw, version, qualified_lun, cleanup_errors)
+        }
+    };
+    Ok(
+        json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"qualified_bot_lun":qualified_lun,"cleanup_errors":cleanup_errors,"target":target,"identity_provenance":"user-confirmed NS39; observed update profile"}),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn verify_attempt(
+    attempt: &std::path::Path,
+    record: &std::path::Path,
+    confirm_ns39: bool,
+    confirm_same_controller: bool,
+    expected_receipt: Option<&super::ReceiptIdentity>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Value, AppError> {
+    let prior = read_verification_receipt(attempt, expected_receipt)?;
+    let component = prior.component;
+    let expected_version = prior.expected_version;
+    let previous = prior.outcome;
+    let generation = prior.generation;
+    let prior = prior.record;
+    let mut session = Session::open(confirm_ns39, component)?;
+    let target = session.target.clone();
+    let mut journal = session.create_record(record).map_err(AppError::host_io)?;
+    write_event(
+        &mut journal,
+        &json!({
+            "event": "verification_started", "schema_version": 1,
+            "source_attempt": record_path(attempt), "prior_result": prior, "target": target,
+            "same_unit_association": super::same_unit_association(confirm_same_controller)
+        }),
+    )
+    .map_err(AppError::host_io)?;
+    let VersionReadback {
+        raw: readback,
+        cleanup,
+        qualified_lun,
+    } = read_verification_version(session, component, cancelled);
+    let (version, raw_version_bytes) = match readback {
+        Ok(raw) => {
+            let version = match component {
+                Component::Main => MainVersion::parse(&raw)
+                    .map(|version| version.to_string())
+                    .map_err(|error| error.to_string()),
+                Component::Bluetooth => bluetooth_info(&raw)
+                    .map(|version| version.to_string())
+                    .map_err(|error| error.to_string()),
+            };
+            (version, Some(raw))
+        }
+        Err(error) => (Err(error), None),
+    };
+    let (observation, error) = match version {
+        Ok(version) => (
+            Some(Verification {
                 component,
                 previous_generation: generation,
                 generation: target.generation,
@@ -209,22 +245,100 @@ pub(super) fn execute(
                 model_confirmed: confirm_ns39,
                 version,
                 expected_version,
-            });
-            let outcome = observation.as_ref().map_or(previous, |observation| {
-                verify_restart(previous, observation)
-            });
-            let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
-            Ok(finalize_record(
-                &mut journal,
-                json!({
-                    "event":"verification_result", "schema_version":1,
-                    "source_attempt":record_path(&attempt), "verification":observation,
-                    "raw_version_bytes":readback.ok(), "qualified_bot_lun":qualified_lun, "target":target,
-                    "same_unit_association":super::same_unit_association(confirm_same_controller),
-                    "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
-                }),
-            ))
-        }
+            }),
+            None,
+        ),
+        Err(error) => (None, Some(error)),
+    };
+    let outcome = observation.as_ref().map_or(previous, |observation| {
+        verify_restart(previous, observation)
+    });
+    let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
+    Ok(finalize_record(
+        &mut journal,
+        json!({
+            "event":"verification_result", "schema_version":1,
+            "source_attempt":record_path(attempt), "verification":observation,
+            "raw_version_bytes":raw_version_bytes, "qualified_bot_lun":qualified_lun, "target":target,
+            "same_unit_association":super::same_unit_association(confirm_same_controller),
+            "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
+        }),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn read_verification_receipt(
+    attempt: &std::path::Path,
+    expected: Option<&super::ReceiptIdentity>,
+) -> Result<super::PriorAttempt, AppError> {
+    let bytes = gulikit_platform::journal::read_attempt(attempt).map_err(AppError::host_io)?;
+    let prior = super::PriorAttempt::parse(&bytes)?;
+    prior.require_verifiable()?;
+    if let Some(expected) = expected {
+        prior.require_identity(expected)?;
+    }
+    Ok(prior)
+}
+
+#[cfg(target_os = "macos")]
+struct VersionReadback {
+    raw: Result<Vec<u8>, String>,
+    cleanup: Result<(), String>,
+    qualified_lun: Option<u8>,
+}
+
+#[cfg(target_os = "macos")]
+fn read_verification_version(
+    session: Session,
+    component: Component,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> VersionReadback {
+    match component {
+        Component::Main => match session.main() {
+            Ok(mut port) => {
+                let (raw, cleanup) = read_with_cleanup(
+                    &mut port,
+                    MainPort::read_version,
+                    MainPort::finish,
+                    &mut *cancelled,
+                );
+                VersionReadback {
+                    raw,
+                    cleanup,
+                    qualified_lun: None,
+                }
+            }
+            Err(error) => VersionReadback {
+                raw: Err(error),
+                cleanup: Ok(()),
+                qualified_lun: None,
+            },
+        },
+        Component::Bluetooth => match session.bluetooth() {
+            Ok(mut port) => {
+                let qualified_lun = port.qualified_lun();
+                let (raw, cleanup) = read_with_cleanup(
+                    &mut port,
+                    |port| port.read_info(),
+                    BluetoothPort::finish,
+                    &mut *cancelled,
+                );
+                VersionReadback {
+                    raw,
+                    cleanup,
+                    qualified_lun,
+                }
+            }
+            Err(error) => VersionReadback {
+                raw: Err(error.error),
+                cleanup: if error.cleanup_errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(error.cleanup_errors.join("; "))
+                },
+                qualified_lun: None,
+            },
+        },
     }
 }
 
@@ -241,19 +355,17 @@ pub(super) fn attempt_target(
         .ok_or("Missing package version")?;
     let package = &prior["package"];
     let recognized = gulikit_core::package::catalog().iter().any(|release| {
-        let metadata = serde_json::to_value(release).expect("catalog metadata serializes");
-        [
-            "model",
-            "component",
-            "version",
-            "payload_size",
-            "payload_sha256",
-            "archive_sha256",
-            "member",
-            "source_url",
-        ]
-        .iter()
-        .all(|field| package[*field] == metadata[*field])
+        let model = match release.model {
+            gulikit_core::package::Model::Kk3Max => "kk3-max",
+        };
+        package["model"].as_str() == Some(model)
+            && release.component == component
+            && release.version == version
+            && package["payload_size"].as_u64() == Some(release.payload_size() as u64)
+            && package["payload_sha256"].as_str() == Some(release.payload_sha256())
+            && package["archive_sha256"].as_str() == Some(release.archive_sha256)
+            && package["member"].as_str() == Some(release.member)
+            && package["source_url"].as_str() == Some(release.source_url)
     });
     if !recognized {
         return Err(
@@ -277,6 +389,21 @@ pub(super) fn record_path(path: &std::path::Path) -> Value {
             serde_json::json!(path.as_os_str().encode_wide().collect::<Vec<_>>());
     }
     value
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn post_cleanup_target(
+    original: &gulikit_platform::discovery::NativeCandidate,
+    snapshot: gulikit_platform::discovery::Snapshot,
+    confirmed: bool,
+) -> Result<gulikit_platform::discovery::NativeCandidate, String> {
+    let current = snapshot.select(confirmed, gulikit_core::package::Component::Bluetooth)?;
+    if current.ancestor != original.ancestor {
+        return Err(
+            "The physical attachment changed during cleanup. Confirm and inspect it again.".into(),
+        );
+    }
+    Ok(current)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -306,6 +433,87 @@ fn read_with_cleanup<P>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replaced_receipt_is_rejected_at_the_pre_session_read_boundary() {
+        let mut record = serde_json::json!({
+            "event":"attempt_result", "schema_version":1,
+            "package":gulikit_core::package::catalog()[2],
+            "transfer":{"outcome":"transfer_completed_awaiting_verification", "cleanup_errors":[]},
+            "target":{"generation":7}
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("attempt.jsonl");
+        let persist = |record| {
+            let mut file = std::fs::File::create(&path).unwrap();
+            gulikit_platform::journal::finalize_record(&mut file, record)
+        };
+        persist(record.clone());
+        let opened = read_verification_receipt(&path, None).unwrap().identity();
+        record["package"] = serde_json::to_value(&gulikit_core::package::catalog()[0]).unwrap();
+        persist(record);
+        let error = read_verification_receipt(&path, Some(&opened)).unwrap_err();
+        assert_eq!(
+            error.message,
+            "Attempt record changed since selection. Keep the controller unchanged; verification requires the original record."
+        );
+        // This production boundary returns before Session::open; the test never
+        // creates a controller session or verification output record.
+    }
+
+    #[test]
+    fn probe_attachment_is_refreshed_after_cleanup_without_adopting_a_new_physical_unit() {
+        use gulikit_platform::discovery::{NativeCandidate, Snapshot};
+        let original:NativeCandidate=serde_json::from_value(serde_json::json!({"ancestor":42,"generation":7,"main_volume_candidate":false,"bluetooth_transport_candidate":true,"observed_profile":true,"conflicting_model":false,"storage_identities":[],"disks":[],"mount":null})).unwrap();
+        let mut current = original.clone();
+        current.generation = 8;
+        assert_eq!(
+            post_cleanup_target(
+                &original,
+                Snapshot {
+                    candidates: vec![current.clone()],
+                    incomplete: vec![]
+                },
+                true
+            )
+            .unwrap(),
+            current
+        );
+        let mut replaced = current.clone();
+        replaced.ancestor = 43;
+        for snapshot in [
+            Snapshot {
+                candidates: vec![replaced.clone()],
+                incomplete: vec![],
+            },
+            Snapshot {
+                candidates: vec![current.clone(), replaced],
+                incomplete: vec![],
+            },
+            Snapshot {
+                candidates: vec![],
+                incomplete: vec![],
+            },
+            Snapshot {
+                candidates: vec![current.clone()],
+                incomplete: vec!["discovery pending".into()],
+            },
+        ] {
+            assert!(post_cleanup_target(&original, snapshot, true).is_err());
+        }
+        assert!(
+            post_cleanup_target(
+                &original,
+                Snapshot {
+                    candidates: vec![current],
+                    incomplete: vec![]
+                },
+                false
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn verification_refuses_unrecognized_or_inconsistent_original_package_metadata() {
         let release = &gulikit_core::package::catalog()[0];
@@ -331,12 +539,42 @@ mod tests {
             ("payload_size", serde_json::json!(0)),
             ("model", serde_json::json!("kk3-pro")),
             ("component", serde_json::json!("bluetooth")),
+            ("member", serde_json::json!("other.bin")),
+            (
+                "source_url",
+                serde_json::json!("https://example.invalid/other.zip"),
+            ),
+            ("payload_size", serde_json::json!(-1)),
+            ("payload_size", serde_json::json!("51500")),
+            ("payload_size", serde_json::json!(51500.0)),
         ] {
             let mut invalid = prior.clone();
             invalid["package"][field] = value;
             assert!(
                 attempt_target(&invalid).is_err(),
                 "accepted changed {field}"
+            );
+        }
+        for field in [
+            "model",
+            "component",
+            "version",
+            "payload_size",
+            "payload_sha256",
+            "archive_sha256",
+            "member",
+            "source_url",
+        ] {
+            let mut invalid = prior.clone();
+            invalid["package"].as_object_mut().unwrap().remove(field);
+            assert!(
+                attempt_target(&invalid).is_err(),
+                "accepted missing {field}"
+            );
+            invalid["package"][field] = serde_json::json!(["wrong type"]);
+            assert!(
+                attempt_target(&invalid).is_err(),
+                "accepted mistyped {field}"
             );
         }
     }

@@ -46,6 +46,7 @@ fn request(command: Command, package: Option<VerifiedPackage>) -> Result<Request
             record,
             confirm_ns39,
             confirm_same_controller,
+            expected_receipt: None,
         }),
         _ => Err("Not a native command".into()),
     }

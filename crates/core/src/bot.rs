@@ -327,172 +327,35 @@ impl<T: BulkIo> Session<T> {
         }
         let deadline = self.io.now() + Duration::from_secs(5);
         let result = (|| -> Result<Vec<u8>, String> {
-            let cbw_result = self.transfer_before(Direction::Out, &mut cbw, deadline);
-            if let Some(evidence) = self.evidence.as_mut() {
-                evidence.cbw_actual = Some(
-                    cbw_result
-                        .as_ref()
-                        .map_or_else(|error| error.actual, |count| *count),
-                );
-                evidence.cbw_error = cbw_result.as_ref().err().cloned();
-            }
-            let cbw_actual = cbw_result.map_err(|error| format!("CBW failed: {error}"))?;
-            if cbw_actual != 31 {
-                let error = TransferError {
-                    kind: TransferFailureKind::Other,
-                    actual: cbw_actual,
-                    raw: cbw[..cbw_actual.min(cbw.len())].to_vec(),
-                    message: "Short CBW; command is uncertain".into(),
-                };
-                if let Some(evidence) = self.evidence.as_mut() {
-                    evidence.cbw_error = Some(error.clone());
-                }
-                return Err(error.to_string());
-            }
-            let mut bytes = if direction == Direction::In {
+            self.submit_command_block(&mut cbw, deadline)?;
+            // Firmware OUT stages are 512 bytes. Give the mutable transport a
+            // private copy without allocating a heap buffer for every block.
+            // Larger public commands retain their existing owned-buffer path.
+            let mut short_out = [0; 512];
+            let mut owned = if direction == Direction::In {
                 vec![0; length]
-            } else {
+            } else if length > short_out.len() {
                 data.to_vec()
+            } else {
+                Vec::new()
             };
-            let actual = match self.transfer_before(direction, &mut bytes, deadline) {
-                Ok(actual) => actual,
-                Err(error) => {
-                    if let Some(evidence) = self.evidence.as_mut() {
-                        evidence.data_actual = Some(error.actual);
-                        if direction == Direction::In {
-                            evidence.data_in = Some(error.raw.clone());
-                        }
-                    }
-                    return Err(format!("Data stage failed: {error}"));
-                }
+            let bytes = if direction == Direction::Out && length <= short_out.len() {
+                short_out[..length].copy_from_slice(data);
+                &mut short_out[..length]
+            } else {
+                owned.as_mut_slice()
             };
-            if actual > length {
-                return Err("Invalid bulk data length".into());
-            }
-            bytes.truncate(actual);
-            if let Some(evidence) = self.evidence.as_mut() {
-                evidence.data_actual = Some(actual);
-                if direction == Direction::In {
-                    evidence.data_in = Some(bytes.clone());
-                }
-            }
+            let actual = self.transfer_data_stage(direction, bytes, deadline)?;
+            let bytes = &bytes[..actual];
             if direction == Direction::In {
-                // Retain a normally completed early status, never timeout/error bytes.
-                // This is the exact observed F1 quirk, not arbitrary failed BOT recovery.
-                if cdb == [0xf1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-                    && expected == 20
-                    && actual == 13
-                    && bytes.starts_with(b"USBS")
-                    && bytes[4..8] == tag.to_le_bytes()
-                    && bytes[8..12] == [0; 4]
-                    && bytes[12] == 1
-                {
-                    self.failed_f1_status = bytes.as_slice().try_into().ok();
-                }
-                let stage = data_stage(&bytes, tag, expected).map_err(|e| {
-                    format!(
-                        "{e}; early_command_failed={}; raw={bytes:02x?}",
-                        self.failed_f1_status.is_some() && cdb[0] == 0xf1
-                    )
-                })?;
-                if stage == DataStage::EarlyStatus {
-                    return Err(format!("Early CSW instead of vendor data: {bytes:02x?}"));
-                }
+                self.reject_early_status(cdb, tag, expected, bytes)?;
             }
             let mut status = [0; 13];
-            if let Some(evidence) = self.evidence.as_mut() {
-                evidence.csw_reads = 1;
-            }
-            let first = self.transfer_before(Direction::In, &mut status, deadline);
-            if let Err(error) = &first
-                && let Some(evidence) = self.evidence.as_mut()
-            {
-                evidence.csw_actual = Some(error.actual);
-                evidence.csw_raw = error.raw.clone();
-                evidence.csw_errors.push(error.clone());
-            }
-            let status_actual = match first {
-                Ok(count) => count,
-                Err(first) if first.kind == TransferFailureKind::Stall && first.actual == 0 => {
-                    let remaining = self.remaining(deadline).map_err(|error|format!("{error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"))?;
-                    let clear_started = self.io.now();
-                    let cleared = self.io.clear_stall(remaining);
-                    let clear_elapsed = self.io.now().saturating_duration_since(clear_started);
-                    if let Some(evidence) = self.evidence.as_mut() {
-                        evidence.stall_clear_elapsed = Some(clear_elapsed);
-                        evidence.stall_clear = Some(match &cleared {
-                            Ok(()) => StallClear::Passed,
-                            Err(error) => StallClear::Failed(error.clone()),
-                        });
-                    }
-                    cleared.map_err(|error|format!("CSW halt clearance failed: {error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"))?;
-                    self.remaining(deadline).map_err(|error|format!("{error}; after CSW halt clearance; data_actual={actual} data={bytes:02x?}"))?;
-                    if let Some(evidence) = self.evidence.as_mut() {
-                        evidence.csw_reads = 2;
-                    }
-                    match self.transfer_before(Direction::In, &mut status, deadline) {
-                        Ok(count) => count,
-                        Err(error) => {
-                            if let Some(evidence) = self.evidence.as_mut() {
-                                evidence.csw_actual = Some(error.actual);
-                                evidence.csw_raw = error.raw.clone();
-                                evidence.csw_errors.push(error.clone());
-                            }
-                            return Err(format!(
-                                "Second CSW read failed: {error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"
-                            ));
-                        }
-                    }
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "CSW read failed: {error}; data_actual={actual} data={bytes:02x?}"
-                    ));
-                }
-            };
-            if let Some(evidence) = self.evidence.as_mut() {
-                evidence.csw_actual = Some(status_actual);
-                evidence.csw_raw = status[..status_actual.min(status.len())].to_vec();
-            }
-            if status_actual > status.len() {
-                return Err("Invalid CSW transfer length".into());
-            }
-            // This exact NS39 F2 response was observed on hardware after the
-            // original CSW halt was cleared. Its data count is one, despite the
-            // passed wrapper reporting zero residue. Keep both facts in the
-            // record; do not relax residue checks for other lengths/commands.
-            let f2_zero_residue_quirk = policy == DataPolicy::F2Status
-                && bytes == [0]
-                && status_actual == 13
-                && status[..4] == *b"USBS"
-                && status[4..8] == tag.to_le_bytes()
-                && status[8..13] == [0; 5];
-            if let Some(evidence) = self.evidence.as_mut() {
-                evidence.f2_zero_residue_quirk = f2_zero_residue_quirk;
-            }
-            if !f2_zero_residue_quirk {
-                validate_status(&status[..status_actual], tag, expected, actual as u32).map_err(
-                    |e| {
-                        format!(
-                            "{e}; CSW={:02x?}; data_actual={actual} data={bytes:02x?}",
-                            &status[..status_actual]
-                        )
-                    },
-                )?;
-            }
-            let accepted = match policy {
-                DataPolicy::Exact => actual == length,
-                DataPolicy::F2Status => (1..=20).contains(&actual),
-                DataPolicy::DiagnosticSense => true,
-            };
-            if !accepted {
-                return Err(format!(
-                    "Invalid vendor data length {actual}/{length}; data={bytes:02x?}; CSW={:02x?}",
-                    &status[..status_actual]
-                ));
-            }
+            let status_actual = self.read_status_with_halt_clear(&mut status, bytes, deadline)?;
+            self.validate_command_response(tag, expected, bytes, &status[..status_actual], policy)?;
             Ok(if direction == Direction::In {
-                bytes
+                owned.truncate(actual);
+                owned
             } else {
                 Vec::new()
             })
@@ -501,6 +364,213 @@ impl<T: BulkIo> Session<T> {
             self.failed = true;
         }
         result
+    }
+    fn submit_command_block(
+        &mut self,
+        cbw: &mut [u8; 31],
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let cbw_result = self.transfer_before(Direction::Out, cbw, deadline);
+        if let Some(evidence) = self.evidence.as_mut() {
+            evidence.cbw_actual = Some(
+                cbw_result
+                    .as_ref()
+                    .map_or_else(|error| error.actual, |count| *count),
+            );
+            evidence.cbw_error = cbw_result.as_ref().err().cloned();
+        }
+        let cbw_actual = cbw_result.map_err(|error| format!("CBW failed: {error}"))?;
+        if cbw_actual != 31 {
+            let error = TransferError {
+                kind: TransferFailureKind::Other,
+                actual: cbw_actual,
+                raw: cbw[..cbw_actual.min(cbw.len())].to_vec(),
+                message: "Short CBW; command is uncertain".into(),
+            };
+            if let Some(evidence) = self.evidence.as_mut() {
+                evidence.cbw_error = Some(error.clone());
+            }
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
+    fn transfer_data_stage(
+        &mut self,
+        direction: Direction,
+        bytes: &mut [u8],
+        deadline: Instant,
+    ) -> Result<usize, String> {
+        let length = bytes.len();
+        let actual = match self.transfer_before(direction, bytes, deadline) {
+            Ok(actual) => actual,
+            Err(error) => {
+                if let Some(evidence) = self.evidence.as_mut() {
+                    evidence.data_actual = Some(error.actual);
+                    if direction == Direction::In {
+                        evidence.data_in = Some(error.raw.clone());
+                    }
+                }
+                return Err(format!("Data stage failed: {error}"));
+            }
+        };
+        if actual > length {
+            return Err("Invalid bulk data length".into());
+        }
+        if let Some(evidence) = self.evidence.as_mut() {
+            evidence.data_actual = Some(actual);
+            if direction == Direction::In {
+                evidence.data_in = Some(bytes[..actual].to_vec());
+            }
+        }
+        Ok(actual)
+    }
+
+    fn reject_early_status(
+        &mut self,
+        cdb: &[u8],
+        tag: u32,
+        expected: u32,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        // Retain a normally completed early status, never timeout/error bytes.
+        // This is the exact observed F1 quirk, not arbitrary failed BOT recovery.
+        if cdb == [0xf1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            && expected == 20
+            && bytes.len() == 13
+            && bytes.starts_with(b"USBS")
+            && bytes[4..8] == tag.to_le_bytes()
+            && bytes[8..12] == [0; 4]
+            && bytes[12] == 1
+        {
+            self.failed_f1_status = bytes.try_into().ok();
+        }
+        let stage = data_stage(bytes, tag, expected).map_err(|e| {
+            format!(
+                "{e}; early_command_failed={}; raw={bytes:02x?}",
+                self.failed_f1_status.is_some() && cdb[0] == 0xf1
+            )
+        })?;
+        if stage == DataStage::EarlyStatus {
+            return Err(format!("Early CSW instead of vendor data: {bytes:02x?}"));
+        }
+        Ok(())
+    }
+
+    fn read_status_with_halt_clear(
+        &mut self,
+        status: &mut [u8; 13],
+        bytes: &[u8],
+        deadline: Instant,
+    ) -> Result<usize, String> {
+        let actual = bytes.len();
+        if let Some(evidence) = self.evidence.as_mut() {
+            evidence.csw_reads = 1;
+        }
+        let first = self.transfer_before(Direction::In, status, deadline);
+        if let Err(error) = &first
+            && let Some(evidence) = self.evidence.as_mut()
+        {
+            evidence.csw_actual = Some(error.actual);
+            evidence.csw_raw = error.raw.clone();
+            evidence.csw_errors.push(error.clone());
+        }
+        let status_actual = match first {
+            Ok(count) => count,
+            Err(first) if first.kind == TransferFailureKind::Stall && first.actual == 0 => {
+                let remaining = self.remaining(deadline).map_err(|error|format!("{error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"))?;
+                let clear_started = self.io.now();
+                let cleared = self.io.clear_stall(remaining);
+                let clear_elapsed = self.io.now().saturating_duration_since(clear_started);
+                if let Some(evidence) = self.evidence.as_mut() {
+                    evidence.stall_clear_elapsed = Some(clear_elapsed);
+                    evidence.stall_clear = Some(match &cleared {
+                        Ok(()) => StallClear::Passed,
+                        Err(error) => StallClear::Failed(error.clone()),
+                    });
+                }
+                cleared.map_err(|error|format!("CSW halt clearance failed: {error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"))?;
+                self.remaining(deadline).map_err(|error| {
+                    format!(
+                        "{error}; after CSW halt clearance; data_actual={actual} data={bytes:02x?}"
+                    )
+                })?;
+                if let Some(evidence) = self.evidence.as_mut() {
+                    evidence.csw_reads = 2;
+                }
+                match self.transfer_before(Direction::In, status, deadline) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        if let Some(evidence) = self.evidence.as_mut() {
+                            evidence.csw_actual = Some(error.actual);
+                            evidence.csw_raw = error.raw.clone();
+                            evidence.csw_errors.push(error.clone());
+                        }
+                        return Err(format!(
+                            "Second CSW read failed: {error}; original_csw_error={first}; data_actual={actual} data={bytes:02x?}"
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "CSW read failed: {error}; data_actual={actual} data={bytes:02x?}"
+                ));
+            }
+        };
+        if let Some(evidence) = self.evidence.as_mut() {
+            evidence.csw_actual = Some(status_actual);
+            evidence.csw_raw = status[..status_actual.min(status.len())].to_vec();
+        }
+        if status_actual > status.len() {
+            return Err("Invalid CSW transfer length".into());
+        }
+        Ok(status_actual)
+    }
+
+    fn validate_command_response(
+        &mut self,
+        tag: u32,
+        expected: u32,
+        bytes: &[u8],
+        status: &[u8],
+        policy: DataPolicy,
+    ) -> Result<(), String> {
+        let actual = bytes.len();
+        let length = expected as usize;
+        // This exact NS39 F2 response was observed on hardware after the
+        // original CSW halt was cleared. Its data count is one, despite the
+        // passed wrapper reporting zero residue. Keep both facts in the
+        // record; do not relax residue checks for other lengths/commands.
+        let f2_zero_residue_quirk = policy == DataPolicy::F2Status
+            && bytes == [0]
+            && status.len() == 13
+            && status[..4] == *b"USBS"
+            && status[4..8] == tag.to_le_bytes()
+            && status[8..13] == [0; 5];
+        if let Some(evidence) = self.evidence.as_mut() {
+            evidence.f2_zero_residue_quirk = f2_zero_residue_quirk;
+        }
+        if !f2_zero_residue_quirk {
+            validate_status(status, tag, expected, bytes.len() as u32).map_err(|e| {
+                format!(
+                    "{e}; CSW={:02x?}; data_actual={actual} data={bytes:02x?}",
+                    status
+                )
+            })?;
+        }
+        let accepted = match policy {
+            DataPolicy::Exact => bytes.len() == expected as usize,
+            DataPolicy::F2Status => (1..=20).contains(&bytes.len()),
+            DataPolicy::DiagnosticSense => true,
+        };
+        if !accepted {
+            return Err(format!(
+                "Invalid vendor data length {actual}/{length}; data={bytes:02x?}; CSW={:02x?}",
+                status
+            ));
+        }
+        Ok(())
     }
 }
 

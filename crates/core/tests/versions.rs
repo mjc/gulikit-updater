@@ -20,6 +20,21 @@ fn observed_text_and_integer_version_policy() {
 }
 
 #[test]
+fn main_line_endings_preserve_evidence_and_reject_unpaired_carriage_returns() {
+    let text = "\r\nwww.gulikit.com\r\n\r\nversion 5.9\r\n";
+    let version = MainVersion::parse(text.as_bytes()).unwrap();
+    assert_eq!(version.to_string(), "5.9");
+    assert_eq!(serde_json::to_value(version).unwrap()["original"], text);
+    for text in [
+        "www.gulikit.com\r\r\nversion 5.9",
+        "www.gulikit.com\r\nversion 5.9\r",
+        "www.gulikit.com\rversion 5.9\n",
+    ] {
+        assert!(MainVersion::parse(text.as_bytes()).is_err());
+    }
+}
+
+#[test]
 fn ambiguous_or_unbounded_main_text_is_unknown() {
     for bytes in [
         b"version 5.8".as_slice(),
@@ -90,4 +105,69 @@ fn explicit_downgrade_changes_only_direction_and_never_reinstalls_equal_versions
     );
     raw[0] ^= 1;
     assert!(bluetooth_info(&raw).is_err());
+}
+
+#[test]
+fn selected_reviewed_release_controls_direction_for_all_supported_versions() {
+    use gulikit_core::package::{Component, catalog};
+    use gulikit_core::version::{VersionDecision, VersionPolicy};
+    for (target, current, expected) in [
+        ("3.24", "3.23", VersionDecision::Eligible),
+        ("3.24", "3.24", VersionDecision::AlreadyCurrent),
+        ("3.24", "5.06", VersionDecision::NewerThanSupported),
+        ("5.07", "3.24", VersionDecision::Eligible),
+        ("5.07", "5.07", VersionDecision::AlreadyCurrent),
+        ("5.07", "6.00", VersionDecision::NewerThanSupported),
+    ] {
+        let release = catalog()
+            .iter()
+            .find(|r| r.component == Component::Bluetooth && r.version == target)
+            .unwrap();
+        assert_eq!(
+            release
+                .decision_for_installed(current, VersionPolicy::UpgradeOnly)
+                .unwrap(),
+            expected
+        );
+        let allowed = release
+            .decision_for_installed(current, VersionPolicy::AllowDowngrade)
+            .unwrap();
+        assert_eq!(
+            allowed,
+            if current == target {
+                VersionDecision::AlreadyCurrent
+            } else {
+                VersionDecision::Eligible
+            }
+        );
+        for invalid in [
+            "unknown", "3.2", "+3.24", "3.024", "655.36", "65536.00", "3.24.0",
+        ] {
+            assert!(
+                release
+                    .decision_for_installed(invalid, VersionPolicy::UpgradeOnly)
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+    }
+    let main = catalog()
+        .iter()
+        .find(|r| r.component == Component::Main)
+        .unwrap();
+    assert_eq!(
+        main.decision_for_installed("5.8", VersionPolicy::UpgradeOnly)
+            .unwrap(),
+        VersionDecision::Eligible
+    );
+    assert_eq!(
+        main.decision_for_installed("5.9", VersionPolicy::UpgradeOnly)
+            .unwrap(),
+        VersionDecision::AlreadyCurrent
+    );
+    assert_eq!(
+        main.decision_for_installed("5.10", VersionPolicy::UpgradeOnly)
+            .unwrap(),
+        VersionDecision::NewerThanSupported
+    );
 }

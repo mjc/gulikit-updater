@@ -2,7 +2,6 @@
 
 use crate::package::Component;
 use serde::Serialize;
-use std::collections::BTreeSet;
 
 /// Current attachment evidence. These keys are session identities, never serial numbers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -45,25 +44,45 @@ impl Discovery {
         user_confirmed_ns39: bool,
         component: Component,
     ) -> Result<Candidate, DiscoveryError> {
-        let ids: BTreeSet<_> = self.candidates.iter().map(|c| c.ancestor).collect();
-        if ids.len() > 1 {
+        Self::select_from(
+            self.candidates.iter().cloned(),
+            !self.incomplete.is_empty(),
+            user_confirmed_ns39,
+            component,
+        )
+    }
+
+    /// Select candidates without allocating a temporary collection.
+    /// Cloned iterators must yield the same discovery snapshot.
+    pub fn select_from(
+        mut candidates: impl Iterator<Item = Candidate> + Clone,
+        incomplete: bool,
+        user_confirmed_ns39: bool,
+        component: Component,
+    ) -> Result<Candidate, DiscoveryError> {
+        let first = candidates.clone().next();
+        if first.as_ref().is_some_and(|first| {
+            candidates
+                .clone()
+                .any(|candidate| candidate.ancestor != first.ancestor)
+        }) {
             return Err(DiscoveryError::MultipleDevices);
         }
-        if !self.incomplete.is_empty()
-            || self
-                .candidates
-                .windows(2)
-                .any(|p| p[0].generation != p[1].generation)
+        if incomplete
+            || first.as_ref().is_some_and(|first| {
+                candidates
+                    .clone()
+                    .any(|candidate| candidate.generation != first.generation)
+            })
         {
             return Err(DiscoveryError::DiscoveryIncomplete);
         }
-        let first = self.candidates.first().ok_or(DiscoveryError::NoDevice)?;
-        if !user_confirmed_ns39 || self.candidates.iter().any(|c| c.conflicting_model) {
+        let mut candidate = first.ok_or(DiscoveryError::NoDevice)?;
+        if !user_confirmed_ns39 || candidates.clone().any(|c| c.conflicting_model) {
             return Err(DiscoveryError::WrongOrConflictingModel);
         }
-        let mut candidate = first.clone();
-        candidate.main_access = self.candidates.iter().any(|c| c.main_access);
-        candidate.bluetooth_access = self.candidates.iter().any(|c| c.bluetooth_access);
+        candidate.main_access = candidates.clone().any(|c| c.main_access);
+        candidate.bluetooth_access = candidates.any(|c| c.bluetooth_access);
         let available = match component {
             Component::Main => candidate.main_access,
             Component::Bluetooth => candidate.bluetooth_access,

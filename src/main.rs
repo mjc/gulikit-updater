@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 use gulikit_core::package::{Component, Model, catalog};
 use gulikit_platform::{InspectError, inspect_package};
-use serde::Serialize;
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -96,9 +95,8 @@ enum PackageCommand {
     },
 }
 
-fn write_json(writer: impl Write, body: impl Serialize) -> io::Result<()> {
+fn write_json(writer: impl Write, mut body: serde_json::Value) -> io::Result<()> {
     let mut writer = writer;
-    let mut body = serde_json::to_value(body)?;
     body.as_object_mut()
         .ok_or_else(|| {
             io::Error::new(
@@ -132,7 +130,8 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
                     if json {
                         write_json(out, value)?;
                     } else {
-                        writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
+                        serde_json::to_writer_pretty(&mut *out, &value)?;
+                        writeln!(out)?;
                     }
                     Ok(ExitCode::from(code))
                 }
@@ -355,5 +354,31 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&text).unwrap()["schema_version"],
             1
         );
+    }
+    #[test]
+    fn json_envelope_preserves_nested_evidence_and_rejects_nonobjects() {
+        let body = serde_json::json!({
+            "schema_version":0,
+            "evidence":{"raw":[0,255,13,10], "error":"quoted \"message\"\nUSB — failed", "nullable":null}
+        });
+        let mut expected = body.clone();
+        expected["schema_version"] = 1.into();
+        let mut out = Vec::new();
+        write_json(&mut out, body).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&out).unwrap(),
+            expected
+        );
+        assert_eq!(out.last(), Some(&b'\n'));
+        for body in [
+            serde_json::json!(null),
+            serde_json::json!([1]),
+            serde_json::json!("text"),
+        ] {
+            let mut out = Vec::new();
+            let error = write_json(&mut out, body).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(out.is_empty());
+        }
     }
 }

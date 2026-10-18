@@ -14,6 +14,7 @@ struct Fake {
     calls: Vec<Direction>,
     fail_at: Option<usize>,
     short_cbw: bool,
+    mutate_out: bool,
     error_after_read: bool,
     writes: Vec<Vec<u8>>,
     stalls: Vec<usize>,
@@ -64,6 +65,9 @@ impl BulkIo for Fake {
         }
         if direction == Direction::Out {
             self.writes.push(bytes.to_vec());
+            if self.mutate_out && bytes.len() != 31 {
+                bytes.fill(0xdd);
+            }
             Ok(if self.short_cbw && bytes.len() == 31 {
                 30
             } else {
@@ -91,6 +95,7 @@ fn io() -> Fake {
         calls: vec![],
         fail_at: None,
         short_cbw: false,
+        mutate_out: false,
         error_after_read: false,
         writes: vec![],
         stalls: vec![],
@@ -115,6 +120,39 @@ fn exact_bot_stages_and_zero_tail_cdb_are_shared() {
         b"USBC\x01\0\0\0\x14\0\0\0\x80\0\x0a\xf1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
     );
     assert!(!session.firmware_may_have_been_submitted());
+}
+
+#[test]
+fn out_data_is_exact_and_private_at_the_firmware_buffer_boundary() {
+    for length in [0, 1, 511, 512, 513, 1024] {
+        let payload: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+        let mut fake = io();
+        fake.reads = VecDeque::from([b"USBS\x01\0\0\0\0\0\0\0\0".to_vec()]);
+        fake.mutate_out = true;
+        let mut session = Session::new(fake);
+        let response = session
+            .command(
+                &[0xf0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                Direction::Out,
+                &payload,
+                length,
+            )
+            .unwrap();
+        assert!(response.is_empty());
+        assert_eq!(session.io_mut().writes[1], payload);
+        assert!(
+            payload
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| *byte == (index % 251) as u8)
+        );
+        let evidence = session.take_evidence().unwrap();
+        assert_eq!(evidence.data_actual, Some(length));
+        assert!(evidence.data_in.is_none());
+        assert_eq!(evidence.csw_actual, Some(13));
+        assert!(session.firmware_may_have_been_submitted());
+        assert!(!session.failed());
+    }
 }
 #[test]
 fn every_failed_stage_latches_failure_and_prevents_a_new_command() {

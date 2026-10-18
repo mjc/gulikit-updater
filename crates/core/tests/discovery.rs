@@ -100,3 +100,92 @@ fn each_component_selects_its_own_path_without_the_other_view() {
         );
     }
 }
+
+#[test]
+fn iterator_selection_preserves_error_precedence_and_component_correlation() {
+    let mut conflicting = candidate(1);
+    conflicting.conflicting_model = true;
+    let mut changed = conflicting.clone();
+    changed.generation = 2;
+    for component in [Component::Main, Component::Bluetooth] {
+        let mut other_access = candidate(1);
+        other_access.main_access = component != Component::Main;
+        other_access.bluetooth_access = component != Component::Bluetooth;
+        for (candidates, incomplete, confirmed, expected) in [
+            (vec![], false, false, DiscoveryError::NoDevice),
+            (vec![], true, false, DiscoveryError::DiscoveryIncomplete),
+            (
+                vec![candidate(1), candidate(2)],
+                true,
+                false,
+                DiscoveryError::MultipleDevices,
+            ),
+            (
+                vec![candidate(1), changed.clone()],
+                false,
+                false,
+                DiscoveryError::DiscoveryIncomplete,
+            ),
+            (
+                vec![conflicting.clone()],
+                true,
+                false,
+                DiscoveryError::DiscoveryIncomplete,
+            ),
+            (
+                vec![candidate(1)],
+                false,
+                false,
+                DiscoveryError::WrongOrConflictingModel,
+            ),
+            (
+                vec![conflicting.clone()],
+                false,
+                true,
+                DiscoveryError::WrongOrConflictingModel,
+            ),
+            (
+                vec![other_access],
+                false,
+                true,
+                DiscoveryError::MissingAccess,
+            ),
+        ] {
+            assert_eq!(
+                Discovery::select_from(
+                    candidates.iter().cloned(),
+                    incomplete,
+                    confirmed,
+                    component
+                ),
+                Err(expected.clone())
+            );
+            let snapshot = Discovery {
+                candidates,
+                incomplete: if incomplete {
+                    vec!["uncorrelated".into()]
+                } else {
+                    vec![]
+                },
+            };
+            assert_eq!(snapshot.select(confirmed, component), Err(expected));
+        }
+
+        let mut main = candidate(1);
+        main.bluetooth_access = false;
+        let mut bluetooth = candidate(1);
+        bluetooth.main_access = false;
+        let views = [main, bluetooth];
+        let selected =
+            Discovery::select_from(views.iter().cloned(), false, true, component).unwrap();
+        assert_eq!(selected, candidate(1));
+        assert_eq!(
+            Discovery {
+                candidates: views.to_vec(),
+                incomplete: vec![]
+            }
+            .select(true, component),
+            Ok(selected)
+        );
+    }
+}
