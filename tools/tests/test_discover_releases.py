@@ -395,7 +395,12 @@ class DiscoverReleasesTests(unittest.TestCase):
             calls.append(url)
             return page_html()
 
-        with patch.object(discover_releases, "SCAN_BUDGET_SECONDS", 0):
+        with (
+            patch.object(discover_releases, "SCAN_BUDGET_SECONDS", 0),
+            patch.object(
+                discover_releases.time, "monotonic", side_effect=[0.0, 1.0, 1.0]
+            ),
+        ):
             result = discover_releases.discover(
                 config, None, fetch, observed_at="2026-10-18T00:00:00Z"
             )
