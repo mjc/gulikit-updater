@@ -35,9 +35,7 @@ For local builds on nix-darwin, enter this repository's `devenv shell` first (or
 run directly when `DEVENV_ROOT` already matches this checkout):
 
 ```sh
-bash scripts/build_macos.sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  python3 scripts/package_macos.py smoke --binaries target/release --arch "$(uname -m)"
+devenv tasks run dist:macos:smoke
 ```
 
 `smoke` checks native architecture and system-only linkage, builds a temporary
@@ -46,20 +44,25 @@ ZIP and establishes no Developer ID, notarization or Gatekeeper acceptance.
 The build script keeps devenv's Rust toolchain and selects Apple's compiler,
 linker and SDK so the executable has no Nix/Homebrew runtime dependencies. Set
 `DEVELOPER_DIR_OVERRIDE` if full Xcode is installed at a different location.
-For a signed local release, use `release` with `--identity`, `--notary-profile`
-and optionally `--keychain` after storing notarization credentials with
+The task builds the executables first. `devenv tasks run dist:macos:build` runs
+the build alone; `devenv tasks run check:packaging` runs the native Rust packaging
+tests. For a signed local release, run `devenv tasks run dist:macos:release` with
+`MACOS_SIGNING_IDENTITY`, `APPLE_NOTARY_PROFILE` and optionally
+`MACOS_SIGNING_KEYCHAIN` set after storing credentials with
 `xcrun notarytool store-credentials`. The bundled CLI is at
 `GuliKit Updater.app/Contents/Helpers/gulikit-updater`.
 
-The local release command also accepts an existing App Store Connect API key,
+The release task also accepts an existing App Store Connect API key,
 including one materialized as a temporary file by SecretSpec. Supply
 `--notary-key PATH --notary-key-id ID` and, for a team key, `--notary-issuer ID`
-instead of `--notary-profile`. The equivalent environment names are
+instead of `--notary-profile` when invoking the Rust helper directly with
+`cargo run --locked -p gulikit-dist -- release`. For the task, set
 `APPLE_NOTARY_KEY_PATH`, `APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER_ID`.
 Have the existing secrets loader inject them only into the packaging process;
 never export private-key contents to the terminal or copy them into the repository.
 This path uses the API key directly for submission and log retrieval without
-storing another notarization password/profile. Developer ID signing still uses
+storing another notarization password/profile. Unset `APPLE_NOTARY_PROFILE` when
+using an API key. Developer ID signing still uses
 the selected signing identity and optional keychain.
 
 Windows builds use the MSVC x64 target with `RUSTFLAGS=-C target-feature=+crt-static`.

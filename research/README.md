@@ -1,5 +1,9 @@
 # Offline protocol research
 
+This directory preserves historical protocol research. Its scripts are outside
+the maintained build, check, packaging and release workflows; neither devenv nor
+CI installs their Python dependencies.
+
 `native_probe.m` preserves the original read-only macOS IOUSBHost probe.
 `emulate_update.py` executes the pinned official x86 update-loop instructions
 under Unicorn with fake Windows/UI/device calls. No firmware-write opcode

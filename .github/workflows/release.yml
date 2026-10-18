@@ -29,9 +29,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.99.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.15.0"
       - name: Build native release executables
         run: bash scripts/build_macos.sh
       - name: Import distribution credentials into a temporary keychain
@@ -45,7 +42,7 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
       - name: Sign, notarize, staple and verify the extracted package
         run: >-
-          python3 scripts/package_macos.py release
+          target/release/gulikit-dist release
           --binaries target/release --arch '${{ matrix.arch }}'
           --notary-profile gulikit-release --keychain "$MACOS_SIGNING_KEYCHAIN"
         env:

@@ -41,26 +41,19 @@ jobs:
       - run: cargo build --workspace --bins --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --all-features --locked
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       - name: Render the release UI
         run: cargo test --release -p gulikit-ui --bin gulikit-ui --locked desktop_renders_both_components_and_routes_confirmed_inspection
       - run: cargo test --workspace --doc --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: runner.os == 'macOS'
-        with:
-          python-version: "3.15.0"
-      - name: Exercise macOS bundle and signing guards
-        if: runner.os == 'macOS'
-        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       - name: Build macOS release executables
         if: runner.os == 'macOS'
         run: bash scripts/build_macos.sh
       - name: Smoke-test macOS release packaging without distribution credentials
         if: runner.os == 'macOS'
-        run: python3 scripts/package_macos.py smoke --binaries target/release --arch "$(uname -m)"
+        run: target/debug/gulikit-dist smoke --binaries target/release --arch "$(uname -m)"
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       - name: Build Windows release with the static runtime
@@ -84,14 +77,3 @@ jobs:
           path: artifacts/distribution/*
           if-no-files-found: error
           retention-days: 14
-  research:
-    name: Research harness guards
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.15.0"
-      - run: python3 -m venv .venv
-      - run: .venv/bin/python -m pip install -r research/requirements.txt
-      - run: .venv/bin/python -O -m unittest discover -s research -p 'test_*.py'

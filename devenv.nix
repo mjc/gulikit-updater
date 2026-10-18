@@ -14,8 +14,6 @@
     with pkgs;
     [
       cargo-nextest
-      python315
-      uv
     ]
     ++ lib.optionals stdenv.hostPlatform.isLinux [
       pkg-config
@@ -32,7 +30,6 @@
         };
         nixfmt.enable = true;
         taplo.enable = true;
-        ruff-format.enable = true;
         prettier.enable = true;
         clang-format = {
           enable = true;
@@ -74,10 +71,27 @@
     };
   };
 
+  tasks."check:packaging".exec = "cargo nextest run -p gulikit-dist --locked";
+
+  tasks."dist:macos:build".exec = "bash scripts/build_macos.sh";
+  tasks."dist:macos:smoke" = {
+    after = [ "dist:macos:build" ];
+    exec = ''
+      export DEVELOPER_DIR="''${DEVELOPER_DIR_OVERRIDE:-/Applications/Xcode.app/Contents/Developer}"
+      cargo run --locked -p gulikit-dist -- smoke --binaries target/release --arch "$(uname -m)"
+    '';
+  };
+  tasks."dist:macos:release" = {
+    after = [ "dist:macos:build" ];
+    exec = ''
+      export DEVELOPER_DIR="''${DEVELOPER_DIR_OVERRIDE:-/Applications/Xcode.app/Contents/Developer}"
+      cargo run --locked -p gulikit-dist -- release --binaries target/release --arch "$(uname -m)"
+    '';
+  };
+
   tasks."check:all".exec = ''
     set -euo pipefail
     treefmt --fail-on-change --no-cache
-    python3 -m unittest discover -s scripts -p 'test_*.py' -v
     cargo build --workspace --bins --all-features --locked
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
     cargo nextest run --workspace --all-features --locked
