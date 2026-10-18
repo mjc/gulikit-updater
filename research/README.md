@@ -35,6 +35,16 @@ readback. The F1 signature is shared across device families and cannot identify
 NS39 on its own. The official updater's variable trailing CDB bytes contain
 stack data; zeroed tails remain unproven on the real device.
 
+The userspace instruction fixtures did not cover the lower USB storage driver's
+BOT recovery and residue handling. This gap mattered on the actual NS39: the
+first 3.24 attempt stopped when its status read stalled; a second attempt cleared
+that halt and read a matching passed wrapper, then stopped on our stricter residue
+equality check. That second record shows exactly one F2 byte `00` and zero wrapper
+residue. The maintained transport now retries that same status once after clearing
+Bulk-IN, and accepts only that exact one-byte zero-residue F2 exception while
+preserving its actual count and raw evidence. Neither attempt completed a flash.
+Instruction emulation alone did not qualify the complete native transport.
+
 ## Build the historical read-only probe on macOS
 
 ```sh
