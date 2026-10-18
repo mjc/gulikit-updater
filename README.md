@@ -33,6 +33,11 @@ live in the linked CLI plan and product specification.
 
 ## Development
 
+The Slint desktop UI runs with `devenv shell -- cargo run -p gulikit-ui` and uses
+the same application API as the CLI. Add `-- --demo` for an offline simulated
+device. See [desktop UI](crates/ui/README.md) for controls, supported platforms
+and limits on native firmware writes.
+
 Use the pinned native devenv from this directory:
 
 ```sh
