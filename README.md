@@ -158,3 +158,56 @@ the complete archive's size and SHA-256 before publishing a new destination file
 They never overwrite an existing file. These checks establish consistency with
 the chosen metadata; they do not establish vendor authenticity. Browsing or
 acquiring an archive does not authorize a firmware write.
+
+## Review new catalog releases
+
+The maintainer workflow records original ZIP measurements and a saved official
+page before publishing metadata. A prepared candidate is metadata-only and
+cannot be loaded as a firmware catalog. Page hashes record observations, so a
+changed page can be reviewed without treating that change as a new firmware.
+
+Create a request with the explicitly reviewed product, component, version and
+member. For example, this synthetic Main release request uses a reviewer's
+declared version; Main binaries do not provide that version themselves:
+
+```json
+{
+  "schema_version": 1,
+  "product": "kk3-max",
+  "component": "main",
+  "version": "6.1",
+  "archive": "official.zip",
+  "member": "firmware.bin",
+  "source_url": "https://www.gulikit.com/newsinfo/123456.html",
+  "observed_at": "2026-10-18T00:00:00Z",
+  "vendor_verification": { "status": "unknown" }
+}
+```
+
+Capture a stable official page, or save it manually when the site requires a
+browser. Download the complete original ZIP separately. All output paths below
+must be new files:
+
+```sh
+cargo run --bin gulikit-updater -- catalog observe --url OFFICIAL_PAGE --output page.html --json
+cargo run --bin gulikit-updater -- catalog prepare --request request.json --archive official.zip --page page.html --output candidate.json --json
+cargo run --bin gulikit-updater -- catalog publish --candidate candidate.json --catalog catalog/official.json --archive official.zip --page page.html --output proposed.json --json
+cargo run --bin gulikit-updater -- catalog diff --previous catalog/official.json --proposed proposed.json --json
+```
+
+Before publication, review the vendor's verification evidence in the request.
+Use `{"status":"not_published","source_url":"OFFICIAL_PAGE","note":"What was checked"}`
+when the reviewed page supplies none, or
+`{"status":"sha256","source_url":"OFFICIAL_PAGE","sha256":"64 lowercase hex digits"}`
+for a published checksum of the complete archive. Unknown evidence and offered
+signatures without an implemented verifier keep publication blocked. These
+records preserve what GuliKit offers; they introduce no project signing keys.
+Local files and declared source URLs do not establish vendor authenticity.
+
+Publication rechecks the archive, selected member, embedded Bluetooth version,
+payload and page snapshot. It preserves existing releases and refuses changed
+archive/member/payload/parser identity under an existing version. New releases
+remain hardware-unqualified. To compare a later observation of the same official
+page, pass `--previous candidate.json` to `prepare`; its report includes
+`page_changed`. Commit the reviewed metadata and candidate evidence through the
+normal code-review process, keeping firmware ZIPs outside the source repository.

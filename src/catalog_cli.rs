@@ -22,6 +22,7 @@ use std::{
 use crate::{AppError, CatalogCommand, ReleaseSelection, write_json};
 
 enum Report {
+    Review(serde_json::Value),
     Metadata(Catalog),
     Releases(Vec<Entry>),
     Source(String),
@@ -87,8 +88,39 @@ fn selected_entry(selection: &ReleaseSelection) -> Result<Entry, AppError> {
         })
 }
 
+fn refresh_catalog(
+    cache: &Path,
+    url: Option<&str>,
+    file: Option<&Path>,
+) -> Result<Catalog, AppError> {
+    let cache = CatalogCache::new(cache);
+    match (url, file) {
+        (Some(url), None) => cache
+            .refresh_from_url(url)
+            .map_err(|error| cache_error(&error)),
+        (None, Some(path)) => {
+            let bytes =
+                read_catalog_file(path, MAX_CATALOG_BYTES).map_err(|error| cache_error(&error))?;
+            cache
+                .refresh_from_bytes(&bytes)
+                .map_err(|error| cache_error(&error))
+        }
+        _ => Err(AppError::new(
+            "catalog_usage",
+            2,
+            "select exactly one catalog source: --url or --file".into(),
+        )),
+    }
+}
+
 fn report(command: CatalogCommand) -> Result<Report, AppError> {
     match command {
+        command @ (CatalogCommand::Observe { .. }
+        | CatalogCommand::Prepare { .. }
+        | CatalogCommand::Diff { .. }
+        | CatalogCommand::Publish { .. }) => {
+            crate::catalog_review::report(command).map(Report::Review)
+        }
         CatalogCommand::Inspect { path, .. } => load(&path).map(Report::Metadata),
         CatalogCommand::Cached { cache, .. } => CatalogCache::new(cache)
             .load()
@@ -97,29 +129,7 @@ fn report(command: CatalogCommand) -> Result<Report, AppError> {
             .ok_or_else(|| AppError::new("catalog_io", 4, "no catalog is cached".into())),
         CatalogCommand::Refresh {
             url, file, cache, ..
-        } => {
-            let cache = CatalogCache::new(cache);
-            let catalog = match (url, file) {
-                (Some(url), None) => cache
-                    .refresh_from_url(&url)
-                    .map_err(|error| cache_error(&error))?,
-                (None, Some(path)) => {
-                    let bytes = read_catalog_file(&path, MAX_CATALOG_BYTES)
-                        .map_err(|error| cache_error(&error))?;
-                    cache
-                        .refresh_from_bytes(&bytes)
-                        .map_err(|error| cache_error(&error))?
-                }
-                _ => {
-                    return Err(AppError::new(
-                        "catalog_usage",
-                        2,
-                        "select exactly one catalog source: --url or --file".into(),
-                    ));
-                }
-            };
-            Ok(Report::Metadata(catalog))
-        }
+        } => refresh_catalog(&cache, url.as_deref(), file.as_deref()).map(Report::Metadata),
         CatalogCommand::Releases {
             catalog,
             product,
@@ -193,6 +203,7 @@ fn report(command: CatalogCommand) -> Result<Report, AppError> {
 impl Report {
     fn json(&self) -> serde_json::Value {
         match self {
+            Self::Review(value) => value.clone(),
             Self::Metadata(catalog) => {
                 serde_json::json!({"schema_version":catalog.schema_version(),"catalog":catalog,"trust":"unverified","authorizes_firmware":false})
             }
@@ -218,6 +229,10 @@ impl Report {
 
     fn text(&self, out: &mut impl Write) -> io::Result<()> {
         match self {
+            Self::Review(value) => {
+                serde_json::to_writer_pretty(&mut *out, value)?;
+                writeln!(out)?;
+            }
             Self::Metadata(catalog) => {
                 writeln!(
                     out,
@@ -282,7 +297,11 @@ pub(super) fn run(
     err: &mut impl Write,
 ) -> io::Result<ExitCode> {
     let json = match &command {
-        CatalogCommand::Inspect { json, .. }
+        CatalogCommand::Observe { json, .. }
+        | CatalogCommand::Prepare { json, .. }
+        | CatalogCommand::Diff { json, .. }
+        | CatalogCommand::Publish { json, .. }
+        | CatalogCommand::Inspect { json, .. }
         | CatalogCommand::Cached { json, .. }
         | CatalogCommand::Refresh { json, .. }
         | CatalogCommand::Releases { json, .. }

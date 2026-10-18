@@ -15,6 +15,7 @@ use std::{fmt, str::FromStr};
 pub const MAX_ARCHIVE_SIZE: usize = 1_163_538;
 const MAX_CATALOG_ARCHIVE_SIZE: usize = 64 * 1024 * 1024;
 const MAX_CATALOG_MEMBER_SIZE: usize = 16 * 1024 * 1024;
+const CANDIDATE_MAIN_PAYLOAD_SIZE: usize = 51_500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +107,14 @@ pub enum PackageError {
     UnsupportedCatalogEntry,
     #[error("catalog archive exceeds the inspection size limit")]
     CatalogArchiveTooLarge,
+    #[error("candidate archive exceeds the inspection size limit")]
+    CandidateArchiveTooLarge,
+    #[error("candidate member exceeds the inspection size limit")]
+    CandidateMemberTooLarge,
+    #[error("selected ZIP member path is unsafe")]
+    UnsafeCandidateMember,
+    #[error("candidate package metadata is invalid for the fixed parser")]
+    InvalidCandidateMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -228,6 +237,120 @@ impl CatalogPackageInspection {
 
     #[must_use]
     pub fn info(&self) -> &PackageInfo {
+        &self.info
+    }
+}
+
+/// Measurements from an unreviewed archive. This read-only value is deliberately
+/// distinct from [`VerifiedPackage`] and cannot authorize firmware writes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CandidatePackageInfo {
+    pub model: Model,
+    pub component: Component,
+    /// Maintainer-declared version; main firmware does not embed this version.
+    pub version: String,
+    pub parser_id: ParserId,
+    pub archive_size: usize,
+    pub archive_sha256: String,
+    pub member: String,
+    pub member_size: usize,
+    pub member_sha256: String,
+    pub payload_size: usize,
+    pub payload_sha256: String,
+}
+
+/// Bounded measurements of one explicitly selected ZIP member and fixed parser.
+/// No executable code is run and no firmware payload is exposed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CandidatePackageInspection {
+    info: CandidatePackageInfo,
+}
+
+impl CandidatePackageInspection {
+    /// Measure an unreviewed archive using the fixed KK3 parser recipes.
+    ///
+    /// Bluetooth metadata must match the embedded PE version and length. Main
+    /// firmware version is the maintainer's declaration; it is not inferred from
+    /// hardware or the binary.
+    ///
+    /// # Errors
+    /// Rejects unsupported model/version selections, oversized or malformed ZIPs,
+    /// duplicate/unsafe selected members, CRC failures and invalid embedded data.
+    pub fn inspect(
+        bytes: &[u8],
+        model: Model,
+        component: Component,
+        version: &str,
+        member: &str,
+    ) -> Result<Self, PackageError> {
+        if model != Model::Kk3Max
+            || member.is_empty()
+            || member.starts_with('/')
+            || member.contains('\\')
+            || member.contains('\0')
+            || member
+                .split('/')
+                .any(|segment| segment == ".." || segment == "." || segment.is_empty())
+            || crate::version::release_decision(
+                component,
+                version,
+                version,
+                crate::version::VersionPolicy::UpgradeOnly,
+            )
+            .is_err()
+        {
+            return Err(PackageError::InvalidCandidateMetadata);
+        }
+        if bytes.len() > MAX_CATALOG_ARCHIVE_SIZE {
+            return Err(PackageError::CandidateArchiveTooLarge);
+        }
+
+        let archive_sha256 = hex::encode(Sha256::digest(bytes));
+        let member_bytes = read_candidate_member(bytes, member)?;
+        let member_size = member_bytes.len();
+        let member_sha256 = hex::encode(Sha256::digest(&member_bytes));
+        let (parser_id, payload) = match component {
+            Component::Main => {
+                if member_bytes.len() != CANDIDATE_MAIN_PAYLOAD_SIZE {
+                    return Err(PackageError::Size {
+                        kind: "main member",
+                        expected: CANDIDATE_MAIN_PAYLOAD_SIZE,
+                        actual: member_bytes.len(),
+                    });
+                }
+                (ParserId::Kk3MainBinaryV1, member_bytes)
+            }
+            Component::Bluetooth => {
+                let target = parse_bluetooth_version(version)?;
+                let (embedded_version, payload) = bluetooth_payload(&member_bytes)?;
+                if embedded_version != target
+                    || payload.is_empty()
+                    || payload.len() > MAX_CATALOG_MEMBER_SIZE
+                    || !payload.len().is_multiple_of(512)
+                {
+                    return Err(PackageError::EmbeddedMetadata);
+                }
+                (ParserId::Kk3BluetoothPeV1, payload)
+            }
+        };
+        let info = CandidatePackageInfo {
+            model,
+            component,
+            version: version.to_owned(),
+            parser_id,
+            archive_size: bytes.len(),
+            archive_sha256,
+            member: member.to_owned(),
+            member_size,
+            member_sha256,
+            payload_size: payload.len(),
+            payload_sha256: hex::encode(Sha256::digest(payload)),
+        };
+        Ok(Self { info })
+    }
+
+    #[must_use]
+    pub fn info(&self) -> &CandidatePackageInfo {
         &self.info
     }
 }
@@ -656,6 +779,35 @@ fn read_member(bytes: &[u8], name: &str, size: usize) -> Result<Vec<u8>, Package
     Ok(result)
 }
 
+fn read_candidate_member(bytes: &[u8], name: &str) -> Result<Vec<u8>, PackageError> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))?;
+    archive.validate_header_consistency()?;
+    let member = archive.by_name(name)?;
+    let regular_file = member.unix_mode().is_none_or(|mode| {
+        let kind = mode & 0o170_000;
+        kind == 0 || kind == 0o100_000
+    });
+    if !member.is_file() || member.encrypted() || !regular_file {
+        return Err(PackageError::InvalidMember);
+    }
+    let size = usize::try_from(member.size()).map_err(|_| PackageError::CandidateMemberTooLarge)?;
+    if size > MAX_CATALOG_MEMBER_SIZE {
+        return Err(PackageError::CandidateMemberTooLarge);
+    }
+    let mut contents = Vec::with_capacity(size);
+    member
+        .take(u64::try_from(MAX_CATALOG_MEMBER_SIZE).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut contents)?;
+    if contents.len() != size {
+        return Err(PackageError::Size {
+            kind: "candidate member",
+            expected: size,
+            actual: contents.len(),
+        });
+    }
+    Ok(contents)
+}
+
 fn pe_bytes<'a>(
     image: &PeFile32<'a>,
     exe: &'a [u8],
@@ -678,26 +830,40 @@ fn extract_bluetooth_payload(
     exe: &[u8],
     release: &PackageRecipe<'_>,
 ) -> Result<Vec<u8>, PackageError> {
+    let target = release
+        .bluetooth_version
+        .ok_or(PackageError::EmbeddedMetadata)?;
+    let (embedded_version, payload) = bluetooth_payload(exe)?;
+    if embedded_version != target || payload.len() != release.payload_size {
+        return Err(PackageError::EmbeddedMetadata);
+    }
+    Ok(payload)
+}
+
+fn bluetooth_payload(exe: &[u8]) -> Result<(u16, Vec<u8>), PackageError> {
     let image = PeFile32::parse(exe)?;
     let identity = pe_bytes(&image, exe, 0x17_32d0, 16)?;
     let version = pe_bytes(&image, exe, 0x17_32e0, 2)?;
     let length = pe_bytes(&image, exe, 0x17_32e4, 4)?;
-    // The reviewed 3.23, 3.24 and 5.07 programs share this layout and identical
-    // transport code. Version and payload size belong to the selected archive.
-    let target = release
-        .bluetooth_version
-        .ok_or(PackageError::EmbeddedMetadata)?;
-    let size: u32 = release
-        .payload_size
-        .try_into()
-        .map_err(|_| PackageError::EmbeddedRange)?;
-    if identity != crate::version::BT_SIGNATURE
-        || version != target.to_le_bytes()
-        || length != size.to_le_bytes()
-    {
+    if identity != crate::version::BT_SIGNATURE {
         return Err(PackageError::EmbeddedMetadata);
     }
-    Ok(pe_bytes(&image, exe, 0x17_32f0, release.payload_size)?.to_vec())
+    let embedded_version = u16::from_le_bytes(
+        version
+            .try_into()
+            .map_err(|_| PackageError::EmbeddedMetadata)?,
+    );
+    let length = u32::from_le_bytes(
+        length
+            .try_into()
+            .map_err(|_| PackageError::EmbeddedMetadata)?,
+    );
+    let size = usize::try_from(length).map_err(|_| PackageError::EmbeddedRange)?;
+    if size == 0 || size > MAX_CATALOG_MEMBER_SIZE || !size.is_multiple_of(512) {
+        return Err(PackageError::EmbeddedMetadata);
+    }
+    let payload = pe_bytes(&image, exe, 0x17_32f0, size)?.to_vec();
+    Ok((embedded_version, payload))
 }
 
 #[cfg(test)]

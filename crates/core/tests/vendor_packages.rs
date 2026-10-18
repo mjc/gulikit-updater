@@ -1,7 +1,7 @@
 //! These explicit acceptance tests use original archives from the ignored cache.
 //! They never open a controller or execute the bundled Windows updater.
 
-use gulikit_core::package::{Component, Model, VerifiedPackage};
+use gulikit_core::package::{CandidatePackageInspection, Component, Model, VerifiedPackage};
 use std::path::PathBuf;
 
 fn archive(name: &str) -> Vec<u8> {
@@ -100,6 +100,14 @@ fn catalog_admission_matches_compiled_payloads_for_all_reviewed_archives() {
     for release in gulikit_core::package::catalog() {
         let bytes = archive(release.archive);
         let compiled = VerifiedPackage::inspect(&bytes, release.model, release.component).unwrap();
+        let candidate = CandidatePackageInspection::inspect(
+            &bytes,
+            release.model,
+            release.component,
+            release.version,
+            release.member,
+        )
+        .unwrap();
         let selected =
             VerifiedPackage::inspect_catalog(&bytes, &catalog, release.model, release.component)
                 .unwrap();
@@ -117,6 +125,38 @@ fn catalog_admission_matches_compiled_payloads_for_all_reviewed_archives() {
         );
         assert!(compiled.catalog_entry().is_none());
         let snapshot = selected.catalog_entry().unwrap();
+        let candidate_info = candidate.info();
+        assert_eq!(candidate_info.archive_size, bytes.len());
+        assert_eq!(
+            candidate_info.archive_sha256,
+            snapshot.archive_sha256().as_str()
+        );
+        assert_eq!(candidate_info.member, snapshot.member());
+        assert_eq!(
+            candidate_info.member_size,
+            usize::try_from(snapshot.member_size()).unwrap()
+        );
+        assert_eq!(
+            candidate_info.member_sha256,
+            snapshot.member_sha256().as_str()
+        );
+        assert_eq!(
+            candidate_info.payload_size,
+            usize::try_from(snapshot.payload_size()).unwrap()
+        );
+        assert_eq!(
+            candidate_info.payload_sha256,
+            snapshot.payload_sha256().as_str()
+        );
+        assert_eq!(
+            candidate_info.archive_sha256,
+            compiled.info().archive_sha256
+        );
+        assert_eq!(candidate_info.payload_size, compiled.payload().len());
+        assert_eq!(
+            candidate_info.payload_sha256,
+            compiled.info().payload_sha256
+        );
         let roundtrip =
             gulikit_catalog::Entry::parse(&serde_json::to_vec(snapshot).unwrap()).unwrap();
         assert_eq!(&roundtrip, snapshot);

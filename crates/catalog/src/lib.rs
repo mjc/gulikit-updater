@@ -8,6 +8,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod review;
+pub use review::{CatalogDiff, EntryField, FieldChange, ReleaseChange, ReleaseIdentity};
+
 pub const MAX_CATALOG_BYTES: usize = 256 * 1024;
 pub const MAX_ENTRIES: usize = 256;
 pub const MAX_ARCHIVE_SIZE: u64 = 64 * 1024 * 1024;
@@ -46,6 +49,8 @@ struct RawEntry {
     software_support: String,
     hardware_acceptance: String,
     hardware_evidence: Option<RawHardwareEvidence>,
+    #[serde(default)]
+    vendor_verification: Option<VendorVerification>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -88,6 +93,8 @@ pub struct Entry {
     software_support: SoftwareSupport,
     hardware_acceptance: HardwareAcceptance,
     hardware_evidence: Option<HardwareEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vendor_verification: Option<VendorVerification>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -147,6 +154,20 @@ pub struct HardwareEvidence {
     evidence_url: String,
 }
 
+/// Vendor verification information reported for a release archive.
+///
+/// This is descriptive metadata. A listed checksum, absent signature, or
+/// signature format does not authenticate the catalog entry or authorize an
+/// installation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VendorVerification {
+    Unknown,
+    NotPublished { source_url: String, note: String },
+    Sha256 { source_url: String, sha256: String },
+    Signature { source_url: String, format: String },
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CatalogError {
     #[error("catalog exceeds the {MAX_CATALOG_BYTES}-byte input limit")]
@@ -170,6 +191,13 @@ pub enum CatalogError {
         product: String,
         component: String,
         version: String,
+    },
+    #[error("cannot replace {product}/{component}/{version}: immutable {field} metadata differs")]
+    ImmutableMetadataChanged {
+        product: String,
+        component: String,
+        version: String,
+        field: &'static str,
     },
 }
 
@@ -286,6 +314,8 @@ impl Entry {
         }
         let hardware_evidence =
             parse_hardware_evidence(index, hardware_acceptance, raw.hardware_evidence)?;
+        let vendor_verification =
+            parse_vendor_verification(index, raw.vendor_verification, &hashes.archive)?;
         validate_status_coherence(
             index,
             hardware_acceptance,
@@ -312,6 +342,7 @@ impl Entry {
             software_support,
             hardware_acceptance,
             hardware_evidence,
+            vendor_verification,
         };
         if serde_json::to_vec(&entry)
             .map_err(|error| CatalogError::Json(error.to_string()))?
@@ -398,6 +429,81 @@ impl Entry {
     #[must_use]
     pub fn hardware_evidence(&self) -> Option<&HardwareEvidence> {
         self.hardware_evidence.as_ref()
+    }
+    #[must_use]
+    pub fn vendor_verification(&self) -> Option<&VendorVerification> {
+        self.vendor_verification.as_ref()
+    }
+}
+
+fn parse_vendor_verification(
+    index: usize,
+    value: Option<VendorVerification>,
+    archive_sha256: &Sha256Digest,
+) -> Result<Option<VendorVerification>, CatalogError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        VendorVerification::Unknown => Ok(Some(VendorVerification::Unknown)),
+        VendorVerification::NotPublished { source_url, note } => {
+            validate_vendor_source(index, &source_url)?;
+            if note.is_empty()
+                || note.len() > 512
+                || note.trim() != note
+                || note.bytes().any(|byte| byte.is_ascii_control())
+            {
+                return Err(invalid(
+                    index,
+                    "vendor_verification.note",
+                    "expected bounded text without control characters",
+                ));
+            }
+            Ok(Some(VendorVerification::NotPublished { source_url, note }))
+        }
+        VendorVerification::Sha256 { source_url, sha256 } => {
+            validate_vendor_source(index, &source_url)?;
+            let digest = parse_digest(index, "vendor_verification.sha256", sha256)?;
+            if digest.as_str() != archive_sha256.as_str() {
+                return Err(invalid(
+                    index,
+                    "vendor_verification.sha256",
+                    "must match the catalog archive SHA-256",
+                ));
+            }
+            Ok(Some(VendorVerification::Sha256 {
+                source_url,
+                sha256: digest.as_str().to_owned(),
+            }))
+        }
+        VendorVerification::Signature { source_url, format } => {
+            validate_vendor_source(index, &source_url)?;
+            if format.is_empty()
+                || format.len() > 64
+                || !format
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            {
+                return Err(invalid(
+                    index,
+                    "vendor_verification.format",
+                    "expected a bounded signature format identifier",
+                ));
+            }
+            Ok(Some(VendorVerification::Signature { source_url, format }))
+        }
+    }
+}
+
+fn validate_vendor_source(index: usize, source_url: &str) -> Result<(), CatalogError> {
+    if stable_source_url(source_url) {
+        Ok(())
+    } else {
+        Err(invalid(
+            index,
+            "vendor_verification.source_url",
+            "expected a stable HTTPS URL on gulikit.com",
+        ))
     }
 }
 
@@ -737,7 +843,9 @@ fn parse_digest(
     Ok(Sha256Digest(value))
 }
 
-fn stable_source_url(value: &str) -> bool {
+/// Check that a source URL is a stable HTTPS path on the official vendor domain.
+#[must_use]
+pub fn stable_source_url(value: &str) -> bool {
     if !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control()) {
         return false;
     }

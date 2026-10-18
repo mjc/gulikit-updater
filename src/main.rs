@@ -94,6 +94,54 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CatalogCommand {
+    /// Capture a bounded official release page for later review.
+    Observe {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure an original ZIP and save a metadata-only release candidate.
+    Prepare {
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        page: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        previous: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare catalog metadata deterministically without publishing it.
+    Diff {
+        #[arg(long)]
+        previous: PathBuf,
+        #[arg(long)]
+        proposed: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recheck a candidate and publish a new catalog file, preserving history.
+    Publish {
+        #[arg(long)]
+        candidate: PathBuf,
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        page: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate local catalog metadata without claiming vendor authentication.
     Inspect {
         path: PathBuf,
@@ -274,6 +322,7 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
                         out,
                         serde_json::json!({
                             "package": package.info(),
+                            "authorizes_firmware": false,
                             "catalog_authenticity": if catalog.is_some() { "not_established" } else { "not_applicable" }
                         }),
                     )?;
@@ -477,6 +526,7 @@ fn outcome_code(value: &serde_json::Value) -> u8 {
 }
 
 mod catalog_cli;
+mod catalog_review;
 #[cfg(target_os = "macos")]
 mod main_supervision;
 mod native;

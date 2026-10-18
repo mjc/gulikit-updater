@@ -16,7 +16,9 @@ pub mod main_worker;
 #[cfg(unix)]
 pub mod volume;
 
-use gulikit_core::package::{Component, MAX_ARCHIVE_SIZE, Model, PackageError, VerifiedPackage};
+use gulikit_core::package::{
+    CandidatePackageInspection, Component, MAX_ARCHIVE_SIZE, Model, PackageError, VerifiedPackage,
+};
 use std::{fs::OpenOptions, io::Read, path::Path};
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +61,23 @@ pub fn inspect_catalog_package(
     let bytes = read_archive(path, gulikit_catalog::MAX_ARCHIVE_SIZE)?;
     Ok(VerifiedPackage::inspect_catalog(
         &bytes, catalog, model, component,
+    )?)
+}
+
+/// Measure an original candidate archive without admitting it for installation.
+///
+/// # Errors
+/// Rejects unsafe files, excessive archive/member sizes, and invalid fixed-parser data.
+pub fn inspect_candidate_package(
+    path: &Path,
+    model: Model,
+    component: Component,
+    version: &str,
+    member: &str,
+) -> Result<CandidatePackageInspection, InspectError> {
+    let bytes = read_archive(path, gulikit_catalog::MAX_ARCHIVE_SIZE)?;
+    Ok(CandidatePackageInspection::inspect(
+        &bytes, model, component, version, member,
     )?)
 }
 
