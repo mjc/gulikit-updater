@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 
 [workspace]
-members = ["crates/core", "crates/platform", "crates/ui"]
+members = ["crates/catalog", "crates/core", "crates/platform", "crates/ui"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -31,6 +31,7 @@ unused_peekable = "deny"
 workspace = true
 
 [dependencies]
+gulikit-catalog = { path = "crates/catalog" }
 gulikit-core = { path = "crates/core" }
 gulikit-platform = { path = "crates/platform" }
 clap = { version = "4.6", features = ["derive"] }

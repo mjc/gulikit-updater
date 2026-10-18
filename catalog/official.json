@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "product": "kk3-max",
+      "component": "main",
+      "version": "5.9",
+      "archive": "KK3_NS38_NS39_V5.9.zip",
+      "archive_size": 107606,
+      "archive_sha256": "b4d3c74bc2b0f6570523f121d7d8feb8842f239bdfc5e87bffd7af6aee520b67",
+      "member": "NS39_KK3_MAX_V5.9.bin",
+      "member_size": 51500,
+      "member_sha256": "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4",
+      "payload_size": 51500,
+      "payload_sha256": "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4",
+      "source_url": "https://www.gulikit.com/newsinfo/887152.html",
+      "parser_id": "kk3_main_binary_v1",
+      "software_support": "supported",
+      "hardware_acceptance": "unqualified",
+      "hardware_evidence": null
+    },
+    {
+      "product": "kk3-max",
+      "component": "bluetooth",
+      "version": "5.07",
+      "archive": "GuliKit_NS38_NS39_NS59_BT_V5.07.zip",
+      "archive_size": 1148144,
+      "archive_sha256": "6ce3db166031d30ff9f61e83387c6f8cb0475eef57321c2347ee32afe9152dad",
+      "member": "GuliKit_NS38_NS39_NS59_BT_V5.07.exe",
+      "member_size": 2245632,
+      "member_sha256": "3dc8fd352597de4b619efcf139933fbbccc5c1c335aa580455bf5f64f4b9c97a",
+      "payload_size": 345088,
+      "payload_sha256": "2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826",
+      "source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "parser_id": "kk3_bluetooth_pe_v1",
+      "software_support": "supported",
+      "hardware_acceptance": "unqualified",
+      "hardware_evidence": null
+    },
+    {
+      "product": "kk3-max",
+      "component": "bluetooth",
+      "version": "3.24",
+      "archive": "NS38_NS39_BT_V3.24.zip",
+      "archive_size": 1163538,
+      "archive_sha256": "1bcccf02448b9c92b5b69d82b168b951c883ea6d71ec6463127523d0b275ab30",
+      "member": "GuliKit_NS38_NS39_BT_V3.24.exe",
+      "member_size": 2245632,
+      "member_sha256": "38e24c9e49952fbba14764f688a020fb22a49786321382bc5a2ea76822addc2c",
+      "payload_size": 361472,
+      "payload_sha256": "e540b990cd07df2deb91ac90d20428ddf7788a15f55d84aaaf88cdd99ea71606",
+      "source_url": "https://gulikit.com/filedownload/133023",
+      "parser_id": "kk3_bluetooth_pe_v1",
+      "software_support": "supported",
+      "hardware_acceptance": "qualified",
+      "hardware_evidence": {
+        "model_label": "NS39",
+        "scope": "Single KK3 Max NS39; Bluetooth 3.23 -> 3.24 -> 3.23 with fresh version readbacks",
+        "evidence_url": "https://lific.mjc.lol/GULI/pages/252"
+      }
+    },
+    {
+      "product": "kk3-max",
+      "component": "bluetooth",
+      "version": "3.23",
+      "archive": "NS39_BT_V3.23.zip",
+      "archive_size": 1163454,
+      "archive_sha256": "39d678170e8d86488d65eb815873c708ff31b096d69d93714a0177086d5db938",
+      "member": "NS39_BT_V3.23.exe",
+      "member_size": 2245632,
+      "member_sha256": "825cca9b36fa9078d8198f31ab4bf0ecebb4a6a8bd100303801ba1d1363c4dd6",
+      "payload_size": 361472,
+      "payload_sha256": "783d206c08253c1e2291a8b0bc99b04f95fc4054c2215447a30933f623cf9dfe",
+      "source_url": "https://gulikit.com/filedownload/123020",
+      "parser_id": "kk3_bluetooth_pe_v1",
+      "software_support": "supported",
+      "hardware_acceptance": "qualified",
+      "hardware_evidence": {
+        "model_label": "NS39",
+        "scope": "Single KK3 Max NS39; Bluetooth 3.23 -> 3.24 -> 3.23 with fresh version readbacks",
+        "evidence_url": "https://lific.mjc.lol/GULI/pages/252"
+      }
+    }
+  ]
+}

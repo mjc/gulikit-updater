@@ -79,6 +79,21 @@ enum Command {
         #[command(subcommand)]
         command: PackageCommand,
     },
+    /// Inspect catalog metadata without authorizing packages or accessing a device.
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CatalogCommand {
+    /// Validate a local metadata catalog. Signatures are not checked by this command.
+    Inspect {
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +186,9 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Catalog {
+            command: CatalogCommand::Inspect { path, json },
+        } => catalog_cli::inspect(&path, json, out, err),
         Command::Package {
             command:
                 PackageCommand::Inspect {
@@ -291,6 +309,7 @@ fn outcome_code(value: &serde_json::Value) -> u8 {
     }
 }
 
+mod catalog_cli;
 #[cfg(target_os = "macos")]
 mod main_supervision;
 mod native;

@@ -43,6 +43,7 @@ Use the pinned native devenv from this directory:
 ```sh
 devenv shell
 cargo run -- packages
+cargo run -- catalog inspect catalog/official.json --json
 cargo run -- package inspect /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main
 cargo run -- package inspect /path/to/NS38_NS39_BT_V3.24.zip --model kk3-max --component bluetooth --json
 cargo run -- package inspect /path/to/GuliKit_NS38_NS39_NS59_BT_V5.07.zip --model kk3-max --component bluetooth --json
@@ -73,6 +74,11 @@ parser; it never executes the Windows updater. The Main archive also contains
 an NS38 binary, which is never selected for NS39. Repacked archives and unknown
 releases are rejected. A digest match ties the bytes to the reviewed catalog;
 it does not independently establish publisher authenticity.
+
+`catalog inspect` validates local catalog metadata and reports it as unverified.
+It does not check a signature, change the supported package inventory, or access
+a controller. The seed in `catalog/official.json` describes the four compiled
+releases; signed refresh and runtime catalog selection remain tracked work.
 
 `--json` produces schema version 1. Package information and completed attempt or
 verification records go to stdout. An attempt can report refusal, uncertainty or
