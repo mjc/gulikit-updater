@@ -33,7 +33,9 @@ failures and does not verify installed firmware after restart. A native updater
 must validate transport/status/length and perform its own installed-version
 readback. The F1 signature is shared across device families and cannot identify
 NS39 on its own. The official updater's variable trailing CDB bytes contain
-stack data; zeroed tails remain unproven on the real device.
+stack data. The native zeroed tails have been exercised through F1, the first
+F0 block and the first F2 checkpoint on the observed NS39; the complete transfer
+has not passed hardware acceptance.
 
 The userspace instruction fixtures did not cover the lower USB storage driver's
 BOT recovery and residue handling. This gap mattered on the actual NS39: the
