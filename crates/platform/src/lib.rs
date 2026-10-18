@@ -5,6 +5,7 @@
 pub mod macos;
 
 pub mod acquisition;
+pub mod catalog;
 pub mod discovery;
 pub mod journal;
 #[cfg(unix)]

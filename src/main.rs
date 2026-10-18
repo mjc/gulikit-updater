@@ -94,6 +94,46 @@ enum CatalogCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Authenticate a signed envelope and require fresh metadata.
+    Verify {
+        path: PathBuf,
+        #[arg(long)]
+        trusted_keys: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        minimum_revision: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the last authenticated cache offline, including its freshness.
+    Cached {
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        trusted_keys: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        minimum_revision: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Authenticate a new envelope and atomically refresh the catalog cache.
+    Refresh {
+        #[arg(
+            long,
+            required_unless_present = "envelope",
+            conflicts_with = "envelope"
+        )]
+        url: Option<String>,
+        #[arg(long, required_unless_present = "url", conflicts_with = "url")]
+        envelope: Option<PathBuf>,
+        #[arg(long)]
+        cache: PathBuf,
+        #[arg(long)]
+        trusted_keys: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        minimum_revision: u64,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -186,9 +226,7 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Catalog {
-            command: CatalogCommand::Inspect { path, json },
-        } => catalog_cli::inspect(&path, json, out, err),
+        Command::Catalog { command } => catalog_cli::run(command, out, err),
         Command::Package {
             command:
                 PackageCommand::Inspect {

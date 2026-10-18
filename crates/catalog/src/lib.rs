@@ -1,8 +1,11 @@
 //! Strict, bounded parsing for reviewed firmware catalog metadata.
 //!
 //! Catalog entries describe files, parser capability, software support and
-//! hardware acceptance. Every field is descriptive, unverified metadata; none
-//! authenticates firmware, constructs a `VerifiedPackage`, or authorizes installation.
+//! hardware acceptance. [`Catalog::parse`] validates descriptive metadata only;
+//! [`auth`] binds signed metadata to caller-pinned keys. Neither operation
+//! constructs a `VerifiedPackage` or authorizes installation.
+
+pub mod auth;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

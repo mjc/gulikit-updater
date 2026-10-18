@@ -44,6 +44,9 @@ Use the pinned native devenv from this directory:
 devenv shell
 cargo run -- packages
 cargo run -- catalog inspect catalog/official.json --json
+cargo run -- catalog verify /path/to/catalog-envelope.json --trusted-keys /path/to/catalog-keys.json --json
+cargo run -- catalog refresh --envelope /path/to/catalog-envelope.json --cache /path/to/catalog-cache.json --trusted-keys /path/to/catalog-keys.json --json
+cargo run -- catalog cached --cache /path/to/catalog-cache.json --trusted-keys /path/to/catalog-keys.json --json
 cargo run -- package inspect /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main
 cargo run -- package inspect /path/to/NS38_NS39_BT_V3.24.zip --model kk3-max --component bluetooth --json
 cargo run -- package inspect /path/to/GuliKit_NS38_NS39_NS59_BT_V5.07.zip --model kk3-max --component bluetooth --json
@@ -78,7 +81,28 @@ it does not independently establish publisher authenticity.
 `catalog inspect` validates local catalog metadata and reports it as unverified.
 It does not check a signature, change the supported package inventory, or access
 a controller. The seed in `catalog/official.json` describes the four compiled
-releases; signed refresh and runtime catalog selection remain tracked work.
+releases. `catalog verify` checks a signed envelope and requires fresh metadata.
+`catalog refresh` accepts either `--envelope` or an HTTPS `--url` and atomically
+replaces the cache only after authentication, freshness and revision checks.
+`catalog cached` reauthenticates the saved envelope without networking and reports
+expired metadata explicitly. The cache directory must already exist.
+
+These commands trust only keys in the operator's explicit `--trusted-keys` file;
+the application does not yet bundle an official catalog root. Obtain public keys
+and confirm their fingerprints through a separate trusted channel. The file uses
+`{"schema_version":1,"keys":[{"id":"release-key","public_key":"<64 lowercase hex characters>"}]}`.
+Multiple pinned keys allow an overlap period during rotation. An envelope cannot
+change the trusted keys. Signing keys stay outside the repository.
+
+Refresh retains the highest authenticated revision present in the cache, even
+after expiry, and rejects different payloads using the same revision. Use
+`--minimum-revision` to enforce a separately known floor when bootstrapping or
+recovering. Removing or restoring the entire cache also removes or restores its
+local revision history; signatures alone cannot detect that filesystem rollback.
+A corrupt cache is preserved: inspect it and choose a new cache path or restore
+a known valid envelope with an appropriate revision floor. File contents are
+synced before atomic replacement; Unix also syncs the containing directory.
+Runtime package selection from authenticated metadata remains tracked work.
 
 The optional archive importer is available through
 `python3 tools/firmware_archive.py --help`. It requires an isolated bare
