@@ -8,7 +8,7 @@ pub enum Direction {
     Out,
 }
 
-/// Evidence obtained by the standard GET_MAX_LUN request on this attachment.
+/// Evidence obtained by the standard `GET_MAX_LUN` request on this attachment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", content = "maximum", rename_all = "snake_case")]
 pub enum MaxLun {
@@ -92,15 +92,32 @@ pub struct CommandEvidence {
 
 /// One serialized bulk stage. An error must retain OS status, actual count and raw bytes.
 pub trait BulkIo {
+    /// Read the attachment's advertised LUN addressing evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter's failure when `GET_MAX_LUN` cannot establish a maximum
+    /// or the permitted single-LUN stall response.
     fn max_lun(&mut self) -> Result<MaxLun, String>;
     /// Clear only the Bulk-IN halt for the original CSW. Never reset or resubmit a CBW.
     /// Keep ownership until this operation has finished, including any OS deadline overrun.
+    ///
+    /// # Errors
+    ///
+    /// Fails when halt clearance is unsupported or the host operation fails;
+    /// the error must retain its actual count and native status evidence.
     fn clear_stall(&mut self, _budget: Duration) -> Result<(), TransferError> {
         Err("Bulk-IN stall clearance is unsupported by this adapter".into())
     }
     fn now(&self) -> Instant {
         Instant::now()
     }
+    /// Complete one bulk stage within the supplied remaining request budget.
+    ///
+    /// # Errors
+    ///
+    /// Reports stalls, timeouts and other host failures with actual transferred
+    /// bytes and raw evidence. An error never authorizes replay of the command.
     fn transfer(
         &mut self,
         direction: Direction,
@@ -144,6 +161,11 @@ impl<T: BulkIo> Session<T> {
         }
     }
     /// This implementation supports only an attachment advertising exactly LUN0.
+    ///
+    /// # Errors
+    ///
+    /// Refuses failed sessions, failed addressing queries or a maximum LUN above
+    /// zero. A failed query or unsupported addressing latches session failure.
     pub fn qualify_addressing(&mut self) -> Result<u8, String> {
         if self.failed {
             return Err("BOT session already failed".into());
@@ -223,6 +245,11 @@ impl<T: BulkIo> Session<T> {
     }
     /// One standard error read after the exact completed failed F1 status.
     /// This never clears failure or permits normal commands/firmware afterward.
+    ///
+    /// # Errors
+    ///
+    /// Refuses ineligible/repeated diagnostics and propagates bulk-stage, deadline
+    /// or command-status validation failures from the one permitted sense request.
     pub fn diagnostic_request_sense(&mut self) -> Result<Vec<u8>, String> {
         if !self.request_sense_eligible() {
             return Err("No diagnostic sense allowance".into());
@@ -268,6 +295,13 @@ impl<T: BulkIo> Session<T> {
         }
         Ok(actual)
     }
+    /// Execute one qualified command without retrying a submitted command block.
+    ///
+    /// # Errors
+    ///
+    /// Refuses failed sessions, mismatched OUT lengths, unsupported addressing,
+    /// oversized lengths, invalid CDBs or exhausted tags. Transfer, deadline,
+    /// data/status or residue failures latch failure after the exchange starts.
     pub fn command(
         &mut self,
         cdb: &[u8],
@@ -472,7 +506,7 @@ impl<T: BulkIo> Session<T> {
             && let Some(evidence) = self.evidence.as_mut()
         {
             evidence.csw_actual = Some(error.actual);
-            evidence.csw_raw = error.raw.clone();
+            evidence.csw_raw.clone_from(&error.raw);
             evidence.csw_errors.push(error.clone());
         }
         let status_actual = match first {
@@ -503,7 +537,7 @@ impl<T: BulkIo> Session<T> {
                     Err(error) => {
                         if let Some(evidence) = self.evidence.as_mut() {
                             evidence.csw_actual = Some(error.actual);
-                            evidence.csw_raw = error.raw.clone();
+                            evidence.csw_raw.clone_from(&error.raw);
                             evidence.csw_errors.push(error.clone());
                         }
                         return Err(format!(
@@ -552,11 +586,9 @@ impl<T: BulkIo> Session<T> {
             evidence.f2_zero_residue_quirk = f2_zero_residue_quirk;
         }
         if !f2_zero_residue_quirk {
-            validate_status(status, tag, expected, bytes.len() as u32).map_err(|e| {
-                format!(
-                    "{e}; CSW={:02x?}; data_actual={actual} data={bytes:02x?}",
-                    status
-                )
+            let actual = u32::try_from(actual).map_err(|_| "BOT length exceeds u32")?;
+            validate_status(status, tag, expected, actual).map_err(|e| {
+                format!("{e}; CSW={status:02x?}; data_actual={actual} data={bytes:02x?}")
             })?;
         }
         let accepted = match policy {
@@ -566,8 +598,7 @@ impl<T: BulkIo> Session<T> {
         };
         if !accepted {
             return Err(format!(
-                "Invalid vendor data length {actual}/{length}; data={bytes:02x?}; CSW={:02x?}",
-                status
+                "Invalid vendor data length {actual}/{length}; data={bytes:02x?}; CSW={status:02x?}"
             ));
         }
         Ok(())
@@ -580,6 +611,11 @@ pub enum CommandError {
     CdbLength,
 }
 
+/// Encode one LUN0 command block with zero-filled unused CDB bytes.
+///
+/// # Errors
+///
+/// Rejects an empty CDB or one longer than the 16-byte BOT command field.
 pub fn command_block(
     tag: u32,
     direction: Direction,
@@ -597,7 +633,7 @@ pub fn command_block(
         Direction::In => 0x80,
         Direction::Out => 0,
     };
-    bytes[14] = cdb.len() as u8;
+    bytes[14] = u8::try_from(cdb.len()).map_err(|_| CommandError::CdbLength)?;
     bytes[15..15 + cdb.len()].copy_from_slice(cdb);
     Ok(bytes)
 }
@@ -608,6 +644,12 @@ pub enum DataStage<'a> {
     EarlyStatus,
 }
 
+/// Classify received data, recognizing a complete early command-status wrapper.
+///
+/// # Errors
+///
+/// Rejects invalid early status (including tag, residue and command failure) or
+/// data longer than the advertised command length.
 pub fn data_stage(bytes: &[u8], tag: u32, expected: u32) -> Result<DataStage<'_>, StatusError> {
     if bytes.len() == 13 && bytes.starts_with(b"USBS") {
         validate_status(bytes, tag, expected, 0)?;
@@ -637,6 +679,12 @@ pub enum StatusError {
     UnknownStatus(u8),
 }
 
+/// Validate the complete BOT wrapper against the original tag and actual DATA count.
+///
+/// # Errors
+///
+/// Rejects incomplete wrappers, wrong signatures/tags, inconsistent residue,
+/// command failure, phase errors and unknown status values.
 pub fn validate_status(
     bytes: &[u8],
     tag: u32,
@@ -671,7 +719,7 @@ mod tests {
         let status = [
             0x55, 0x53, 0x42, 0x53, 0x47, 0x55, 0x4c, 0x49, 0, 0, 0, 0, 0,
         ];
-        assert_eq!(validate_status(&status, 0x494c5547, 36, 36), Ok(()));
+        assert_eq!(validate_status(&status, 0x494c_5547, 36, 36), Ok(()));
     }
 
     #[test]
@@ -687,14 +735,14 @@ mod tests {
         ] {
             let mut bytes = original;
             bytes[offset] ^= 1;
-            assert_eq!(validate_status(&bytes, 0x494c5547, 36, 36), Err(error));
+            assert_eq!(validate_status(&bytes, 0x494c_5547, 36, 36), Err(error));
         }
         assert_eq!(
-            validate_status(&original[..12], 0x494c5547, 36, 36),
+            validate_status(&original[..12], 0x494c_5547, 36, 36),
             Err(StatusError::Length)
         );
         assert_eq!(
-            validate_status(&original, 0x494c5547, 20, 21),
+            validate_status(&original, 0x494c_5547, 20, 21),
             Err(StatusError::Residue)
         );
     }
@@ -705,9 +753,9 @@ mod tests {
             0x55, 0x53, 0x42, 0x53, 0x47, 0x55, 0x4c, 0x49, 0, 0, 0, 0, 0,
         ];
         bytes[8] = 20;
-        assert_eq!(validate_status(&bytes, 0x494c5547, 20, 0), Ok(()));
+        assert_eq!(validate_status(&bytes, 0x494c_5547, 20, 0), Ok(()));
         assert_eq!(
-            validate_status(&bytes, 0x494c5547, 20, 7),
+            validate_status(&bytes, 0x494c_5547, 20, 7),
             Err(StatusError::Residue)
         );
     }
@@ -715,7 +763,7 @@ mod tests {
     #[test]
     fn encodes_the_observed_inquiry_cbw() {
         assert_eq!(
-            command_block(0x494c5547, Direction::In, 36, &[0x12, 0, 0, 0, 36, 0]).unwrap(),
+            command_block(0x494c_5547, Direction::In, 36, &[0x12, 0, 0, 0, 36, 0]).unwrap(),
             [
                 0x55, 0x53, 0x42, 0x43, 0x47, 0x55, 0x4c, 0x49, 0x24, 0, 0, 0, 0x80, 0, 6, 0x12, 0,
                 0, 0, 0x24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
@@ -729,7 +777,7 @@ mod tests {
             0x55, 0x53, 0x42, 0x53, 0x47, 0x55, 0x4c, 0x49, 20, 0, 0, 0, 0,
         ];
         assert_eq!(
-            data_stage(&bytes, 0x494c5547, 20),
+            data_stage(&bytes, 0x494c_5547, 20),
             Ok(DataStage::EarlyStatus)
         );
         assert_eq!(data_stage(&bytes, 1, 20), Err(StatusError::Tag));

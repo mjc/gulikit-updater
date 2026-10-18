@@ -23,10 +23,10 @@ installation path is required by these scripts.
 The original ignored `analysis-manifest.json` under
 `artifacts/vendor/protocol-research/f1-diagnosis/ghidra/` records these inputs:
 
-| Prepared input | Bytes | SHA-256 |
-| --- | ---: | --- |
+| Prepared input                                           |   Bytes | SHA-256                                                            |
+| -------------------------------------------------------- | ------: | ------------------------------------------------------------------ |
 | `artifacts/research/GuliKit_NS38_NS39_NS59_BT_V5.07.exe` | 2245632 | `3dc8fd352597de4b619efcf139933fbbccc5c1c335aa580455bf5f64f4b9c97a` |
-| `artifacts/research/DeviceUsb.official.dll` | 8704 | `fad660bc7e006c58f37db9d75b72bf30c089ef62fc4e72673cbfd424d247b5e5` |
+| `artifacts/research/DeviceUsb.official.dll`              |    8704 | `fad660bc7e006c58f37db9d75b72bf30c089ef62fc4e72673cbfd424d247b5e5` |
 
 Run the following sequentially from the repository root, using a fresh output
 folder for each reproduction. Keep project databases, exports and logs under

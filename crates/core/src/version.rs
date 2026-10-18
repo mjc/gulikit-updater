@@ -27,7 +27,7 @@ pub enum VersionPolicy {
 #[error("Unknown or incompatible installed firmware version; writing refused.")]
 pub struct UnknownVersion;
 
-fn decision<T: Ord>(current: T, target: T, policy: VersionPolicy) -> VersionDecision {
+fn decision<T: Ord + Copy>(current: T, target: T, policy: VersionPolicy) -> VersionDecision {
     match current.cmp(&target) {
         std::cmp::Ordering::Less => VersionDecision::Eligible,
         std::cmp::Ordering::Equal => VersionDecision::AlreadyCurrent,
@@ -77,6 +77,12 @@ pub struct MainVersion {
 }
 
 impl MainVersion {
+    /// Parse the bounded controller version file while retaining its original bytes as text.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-ASCII, NUL-containing or oversized input, unpaired carriage
+    /// returns, missing/duplicate identity or version lines and malformed numbers.
     pub fn parse(bytes: &[u8]) -> Result<Self, UnknownVersion> {
         if bytes.len() > 4096 || !bytes.is_ascii() || bytes.contains(&0) {
             return Err(UnknownVersion);
@@ -123,9 +129,11 @@ impl MainVersion {
             original: text.to_owned(),
         })
     }
+    #[must_use]
     pub fn decision(&self) -> VersionDecision {
         self.decision_with_policy(VersionPolicy::UpgradeOnly)
     }
+    #[must_use]
     pub fn decision_with_policy(&self, policy: VersionPolicy) -> VersionDecision {
         decision((self.major, self.minor), (5, 9), policy)
     }
@@ -139,9 +147,11 @@ impl fmt::Display for MainVersion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct BluetoothVersion(u16);
 impl BluetoothVersion {
+    #[must_use]
     pub fn decision(self) -> VersionDecision {
         self.decision_with_policy(VersionPolicy::UpgradeOnly)
     }
+    #[must_use]
     pub fn decision_with_policy(self, policy: VersionPolicy) -> VersionDecision {
         self.decision_for(507, policy)
     }
@@ -155,6 +165,11 @@ impl fmt::Display for BluetoothVersion {
     }
 }
 /// Call only with the bytes from a successful fresh F1 command.
+///
+/// # Errors
+///
+/// Rejects any response that is not exactly 20 bytes or lacks the reviewed
+/// Bluetooth identity signature; missing response bytes are never inferred.
 pub fn bluetooth_info(bytes: &[u8]) -> Result<BluetoothVersion, UnknownVersion> {
     if bytes.len() != 20 || bytes[..16] != BT_SIGNATURE {
         return Err(UnknownVersion);

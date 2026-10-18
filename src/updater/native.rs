@@ -153,7 +153,7 @@ fn probe(
             let qualified_lun = port.qualified_lun();
             let (raw, cleanup) = read_with_cleanup(
                 &mut port,
-                |port| port.read_info(),
+                gulikit_platform::macos::BluetoothSession::read_info,
                 BluetoothPort::finish,
                 &mut *cancelled,
             );
@@ -172,7 +172,7 @@ fn probe(
             // Read-only cleanup may reset USB and restart driver matching.
             // Discover again before returning an attachment for later operations.
             let target = match discover()
-                .and_then(|snapshot| post_cleanup_target(&target, snapshot, confirm_ns39))
+                .and_then(|snapshot| post_cleanup_target(&target, &snapshot, confirm_ns39))
             {
                 Ok(current) => current,
                 Err(error) => {
@@ -319,7 +319,7 @@ fn read_verification_version(
                 let qualified_lun = port.qualified_lun();
                 let (raw, cleanup) = read_with_cleanup(
                     &mut port,
-                    |port| port.read_info(),
+                    gulikit_platform::macos::BluetoothSession::read_info,
                     BluetoothPort::finish,
                     &mut *cancelled,
                 );
@@ -394,7 +394,7 @@ pub(super) fn record_path(path: &std::path::Path) -> Value {
 #[cfg(any(target_os = "macos", test))]
 fn post_cleanup_target(
     original: &gulikit_platform::discovery::NativeCandidate,
-    snapshot: gulikit_platform::discovery::Snapshot,
+    snapshot: &gulikit_platform::discovery::Snapshot,
     confirmed: bool,
 ) -> Result<gulikit_platform::discovery::NativeCandidate, String> {
     let current = snapshot.select(confirmed, gulikit_core::package::Component::Bluetooth)?;
@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(
             post_cleanup_target(
                 &original,
-                Snapshot {
+                &Snapshot {
                     candidates: vec![current.clone()],
                     incomplete: vec![]
                 },
@@ -499,12 +499,12 @@ mod tests {
                 incomplete: vec!["discovery pending".into()],
             },
         ] {
-            assert!(post_cleanup_target(&original, snapshot, true).is_err());
+            assert!(post_cleanup_target(&original, &snapshot, true).is_err());
         }
         assert!(
             post_cleanup_target(
                 &original,
-                Snapshot {
+                &Snapshot {
                     candidates: vec![current],
                     incomplete: vec![]
                 },

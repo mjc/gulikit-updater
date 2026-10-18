@@ -5,8 +5,15 @@ use serde::Serialize;
 use serde_json::json;
 use std::{fs::File, io::Write};
 
+#[cfg(unix)]
+const ATTEMPT_SIZE_LIMIT: u64 = 16 * 1024 * 1024;
+
 /// Open the attempt itself without following a symlink or waiting for a FIFO writer.
 #[cfg(unix)]
+///
+/// # Errors
+///
+/// Returns an error for a symlink, nonregular or unreadable file, an oversized record, or a read failure.
 pub fn read_attempt(path: &std::path::Path) -> Result<Vec<u8>, String> {
     use nix::{
         fcntl::{OFlag, open},
@@ -30,15 +37,14 @@ pub fn read_attempt(path: &std::path::Path) -> Result<Vec<u8>, String> {
     // expanded by JSON escaping, needs about 4.9 MB including its final receipt.
     // Main can report up to 51,500 positive one-byte writes; allow its larger
     // submission/result journal too, while keeping reads explicitly bounded.
-    const LIMIT: u64 = 16 * 1024 * 1024;
-    if metadata.len() > LIMIT {
+    if metadata.len() > ATTEMPT_SIZE_LIMIT {
         return Err("Attempt record exceeds its size bound".into());
     }
     let mut bytes = Vec::new();
-    file.take(LIMIT + 1)
+    file.take(ATTEMPT_SIZE_LIMIT + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
-    if bytes.len() as u64 > LIMIT {
+    if bytes.len() as u64 > ATTEMPT_SIZE_LIMIT {
         return Err("Attempt record exceeds its size bound".into());
     }
     Ok(bytes)
@@ -109,7 +115,7 @@ impl<'a, P> Recorded<'a, P> {
         result
     }
     fn record_cleanup(&mut self, result: Result<(), String>) -> Result<(), String> {
-        let logged = self.record_result("cleanup_result", result, |_| json!(null));
+        let logged = self.record_result("cleanup_result", result, |()| json!(null));
         let mut failure = logged.err();
         for audit_error in &self.audit_failures {
             match &mut failure {
@@ -126,7 +132,7 @@ impl<'a, P> Recorded<'a, P> {
         &mut self,
         name: &str,
         result: Result<T, SubmissionError>,
-        transport: Option<gulikit_core::bot::CommandEvidence>,
+        transport: Option<&gulikit_core::bot::CommandEvidence>,
         known_write_count: Option<usize>,
         actual: impl FnOnce(&T) -> serde_json::Value,
     ) -> Result<T, SubmissionError> {
@@ -141,7 +147,7 @@ impl<'a, P> Recorded<'a, P> {
                     .as_ref()
                     .map_or_else(|error| error.may_have_been_submitted, |_| true),
                 error_completion: result.as_ref().err().map(|error| error.completion),
-                transport: transport.as_ref(),
+                transport,
             },
         );
         self.index += 1;
@@ -218,7 +224,7 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
         .map_err(SubmissionError::audit_before)?;
         let result = self.inner.command(opcode, data);
         let transport = self.inner.take_transport_evidence();
-        self.record_submission_result("command_result",result,transport,None,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
+        self.record_submission_result("command_result",result,transport.as_ref(),None,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
     }
     fn completion_detached(&mut self) -> Result<bool, String> {
         let result = self.inner.completion_detached();
@@ -246,11 +252,13 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
             &SubmissionEvent::MainDestination { index: self.index },
         )?;
         let result = self.inner.create_destination();
-        let created = result.as_ref().map_or_else(|error| error.created, |_| true);
+        let created = result
+            .as_ref()
+            .map_or_else(|error| error.created, |()| true);
         self.record_result(
             "main_create_result",
             result.map_err(|error| error.error),
-            |_| json!({"created":true}),
+            |()| json!({"created":true}),
         )
         .map_err(|error| DestinationCreationError { error, created })
     }
@@ -271,15 +279,15 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
     }
     fn flush(&mut self) -> Result<(), String> {
         let result = self.inner.flush();
-        self.record_result("main_flush_result", result, |_| json!(null))
+        self.record_result("main_flush_result", result, |()| json!(null))
     }
     fn close(&mut self) -> Result<(), String> {
         let result = self.inner.close();
-        self.record_result("main_close_result", result, |_| json!(null))
+        self.record_result("main_close_result", result, |()| json!(null))
     }
     fn volume_flush(&mut self) -> Result<(), String> {
         let result = self.inner.volume_flush();
-        self.record_result("volume_durability",result,|_|json!("No separate qualified volume-flush API; sync_all on open file and checked close are recorded separately"))
+        self.record_result("volume_durability",result,|()|json!("No separate qualified volume-flush API; sync_all on open file and checked close are recorded separately"))
     }
     fn wait_for_completion(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<bool, String> {
         let result = self.inner.wait_for_completion(cancelled);
@@ -502,7 +510,7 @@ mod tests {
             port.record_submission_result(
                 "command_result",
                 Ok(20usize),
-                Some(transport),
+                Some(&transport),
                 None,
                 |count| json!(count),
             )
@@ -585,6 +593,10 @@ mod tests {
 }
 
 /// Write and sync one JSON-line event, returning any serialization, write or sync error.
+///
+/// # Errors
+///
+/// Returns an error if JSON encoding, writing the complete line, or syncing the journal fails.
 pub fn write_event(journal: &mut File, value: &serde_json::Value) -> Result<(), String> {
     serde_json::to_writer(&mut *journal, value).map_err(|e| e.to_string())?;
     writeln!(journal).map_err(|e| e.to_string())?;
@@ -735,7 +747,7 @@ mod verification_tests {
             ]
         );
         let mut readonly = File::open(temporary.path()).unwrap();
-        let failed = finalize_record(&mut readonly, input.clone());
+        let failed = finalize_record(&mut readonly, input);
         assert_eq!(failed["record_finalized"], false);
         assert_eq!(failed["transfer"]["outcome"], "installed_verified");
         assert!(
@@ -755,6 +767,10 @@ mod verification_tests {
 
 /// Create one exclusive host record and durably publish its directory entry.
 #[cfg(unix)]
+///
+/// # Errors
+///
+/// Returns an error if the host directory cannot be opened safely, resides on excluded device storage, or record creation and directory syncing fail.
 pub fn create_host_record(
     path: &std::path::Path,
     excluded_devices: &[u64],
@@ -767,7 +783,7 @@ pub fn create_host_record(
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
+        .unwrap_or_else(|| std::path::Path::new("."));
     let name = path
         .file_name()
         .ok_or("Attempt record requires a filename")?;

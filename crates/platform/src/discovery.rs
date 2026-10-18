@@ -20,6 +20,10 @@ pub struct StorageIdentity {
     pub revision: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Native snapshot fields are independent observations, not mutually exclusive states"
+)]
 pub struct NativeCandidate {
     pub ancestor: u64,
     pub generation: u64,
@@ -51,6 +55,10 @@ pub struct Snapshot {
     pub incomplete: Vec<String>,
 }
 impl Snapshot {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for incomplete or ambiguous discovery, missing model confirmation, conflicting identity, or absent component access.
     pub fn select(&self, confirmed: bool, component: Component) -> Result<NativeCandidate, String> {
         let selected = Discovery::select_from(
             self.candidates.iter().map(NativeCandidate::core),

@@ -84,6 +84,10 @@ enum ReceiptLifecycle {
     Verified,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "This borrowed Slint projection exposes independent control states; the model owns the lifecycle invariants."
+)]
 pub struct View<'a> {
     pub page: Page,
     pub component: Component,
@@ -159,6 +163,7 @@ fn index(component: Component) -> usize {
 }
 
 impl LiveApp {
+    #[must_use]
     pub fn is_busy(&self) -> bool {
         self.pending.is_some()
     }
@@ -269,6 +274,7 @@ impl LiveApp {
     fn can_switch_component(&self) -> bool {
         self.pending.is_none() && self.retry_block.is_none() && !self.has_unverified_receipt()
     }
+    #[must_use]
     pub fn can_update(&self) -> bool {
         self.page == Page::Ready
             && self.pending.is_none()
@@ -325,9 +331,7 @@ impl LiveApp {
             return None;
         }
         match self.page {
-            Page::Connect => self.connect(),
             Page::Ready => self.start(),
-            Page::Writing => None,
             Page::Restart
                 if self.confirmed && self.same_controller && self.has_unverified_receipt() =>
             {
@@ -341,7 +345,7 @@ impl LiveApp {
                     expected_receipt: receipt.identity.clone(),
                 })
             }
-            Page::Restart => None,
+            Page::Writing | Page::Restart => None,
             Page::Verified => self.select_component(if self.component == Component::Main {
                 Component::Bluetooth
             } else {
@@ -352,7 +356,7 @@ impl LiveApp {
                 self.same_controller = false;
                 None
             }
-            Page::Failed => self.connect(),
+            Page::Connect | Page::Failed => self.connect(),
         }
     }
     fn fail(&mut self, error: String) {
@@ -365,7 +369,7 @@ impl LiveApp {
         self.connected = false;
         self.pending = None;
         self.page = Page::Failed;
-        self.notice = error.clone();
+        self.notice.clone_from(&error);
         self.log.push(error);
     }
     pub fn accept(&mut self, event: Event) {
@@ -412,17 +416,17 @@ impl LiveApp {
             Event::Inspected(inspection)
                 if self.pending == Some(Job::Inspect) && inspection.component == self.component =>
             {
-                self.inspected(inspection)
+                self.inspected(inspection);
             }
             Event::Package { path, info } if self.pending == Some(Job::Package) => {
-                self.selected(path, info)
+                self.selected(path, info);
             }
             Event::Transferred { record, result } if self.pending == Some(Job::Transfer) => {
-                self.transferred(record, result)
+                self.transferred(record, result);
             }
             Event::Verified(result) if self.pending == Some(Job::Verify) => self.verified(result),
             Event::Prior { path, prior } if self.pending == Some(Job::Receipt) => {
-                self.loaded(path, prior)
+                self.loaded(path, prior);
             }
             _ => {
                 if self.pending.is_some() {
@@ -753,6 +757,7 @@ impl LiveApp {
             Page::Verified => "Other firmware  →".into(),
         }
     }
+    #[must_use]
     pub fn view(&self) -> View<'_> {
         View {
             page: self.page,

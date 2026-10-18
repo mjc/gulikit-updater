@@ -76,6 +76,10 @@ unsafe extern "C" {
     fn gu_usb_description(value: *mut c_void) -> *mut c_char;
 }
 
+///
+/// # Errors
+///
+/// Returns an error if native enumeration fails or its snapshot cannot be decoded.
 pub fn discover() -> Result<Snapshot, String> {
     discover_bound(0)
 }
@@ -108,7 +112,7 @@ impl Watch {
         let mut epoch = 0;
         let mut arrivals = 0;
         unsafe {
-            gu_watch_state(ptr.as_ptr(), &mut epoch, &mut arrivals);
+            gu_watch_state(ptr.as_ptr(), &raw mut epoch, &raw mut arrivals);
         }
         Ok(Self {
             ptr,
@@ -123,7 +127,7 @@ impl Watch {
         let mut epoch = 0;
         let mut arrivals = 0;
         unsafe {
-            gu_watch_state(self.ptr.as_ptr(), &mut epoch, &mut arrivals);
+            gu_watch_state(self.ptr.as_ptr(), &raw mut epoch, &raw mut arrivals);
         }
         (
             epoch.saturating_sub(self.epoch),
@@ -150,6 +154,10 @@ pub struct Session {
 }
 impl Session {
     /// Create the host audit log relative to an open directory, excluding device volumes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attachment or lock identity changes, disk correlation is invalid, or the host record cannot be created durably outside device storage.
     pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
         self.check()?;
         let devices = record_exclusions(&self.target.disks, |bsd| {
@@ -168,9 +176,17 @@ impl Session {
         crate::journal::create_host_record(path, &devices)
     }
 
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process lock or watcher cannot be acquired, discovery refuses the requested attachment, or its identity changes.
     pub fn open(confirmed: bool, component: Component) -> Result<Self, String> {
         Self::open_locked(confirmed, component, crate::lock::ProcessLock::acquire()?)
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a nonworker lease, failed watcher or discovery, or a changed Main attachment.
     pub fn open_main_worker(
         confirmed: bool,
         lease: crate::lock::ProcessLock,
@@ -201,6 +217,10 @@ impl Session {
         session.check()?;
         Ok(session)
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if lock identity, USB topology, discovery completeness, or the selected attachment changes.
     pub fn check(&self) -> Result<(), String> {
         self.lock.check()?;
         if !self.watch.unchanged() {
@@ -215,11 +235,15 @@ impl Session {
         }
         Ok(())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a different component, changed session, missing or uncorrelated mount, or failure to open the selected filesystem.
     pub fn main(self) -> Result<MainSession, String> {
+        use std::os::unix::fs::MetadataExt;
         if self.component != Component::Main {
             return Err("Session selected a different component".into());
         }
-        use std::os::unix::fs::MetadataExt;
         self.check()?;
         let mount = self
             .target
@@ -242,6 +266,10 @@ impl Session {
             volume,
         })
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an acquisition error for a different component, changed session, unqualified profile, disk media, or failed USB capture. Cleanup failures remain separate evidence.
     pub fn bluetooth(self) -> Result<BluetoothSession, AcquisitionError> {
         if self.component != Component::Bluetooth {
             return Err("Session selected a different component".into());
@@ -343,7 +371,7 @@ impl Drop for Session {
 fn error_string(bytes: &[i8]) -> String {
     let bytes: Vec<u8> = bytes
         .iter()
-        .map(|b| *b as u8)
+        .map(|b| b.to_ne_bytes()[0])
         .take_while(|b| *b != 0)
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
@@ -370,6 +398,7 @@ pub struct MainSession {
     volume: Volume,
 }
 impl MainSession {
+    #[must_use]
     pub fn target(&self) -> &NativeCandidate {
         &self.session.target
     }
@@ -503,8 +532,14 @@ impl BulkIo for NativeUsb {
         let usb = self.pointer()?;
         let mut value = 0;
         let mut error = [0i8; 1024];
-        let result =
-            unsafe { gu_usb_max_lun(usb.as_ptr(), &mut value, error.as_mut_ptr(), error.len()) };
+        let result = unsafe {
+            gu_usb_max_lun(
+                usb.as_ptr(),
+                &raw mut value,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
         match result {
             0 => Ok(MaxLun::Reported(value)),
             1 => Ok(MaxLun::SingleLunStall),
@@ -556,8 +591,8 @@ impl BulkIo for NativeUsb {
                 bytes.as_mut_ptr(),
                 bytes.len(),
                 timeout.as_secs_f64(),
-                &mut actual,
-                &mut failure_kind,
+                &raw mut actual,
+                &raw mut failure_kind,
                 error.as_mut_ptr(),
                 error.len(),
             )
@@ -643,6 +678,10 @@ impl BluetoothSession {
             .map(bot::Session::io_mut)
             .ok_or_else(|| "No exclusive USB claim".into())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session or USB claim is invalid or the native description cannot be allocated.
     pub fn enable_diagnostics(&mut self) -> Result<String, String> {
         self.check_session()?;
         let io = self.native()?;
@@ -657,6 +696,10 @@ impl BluetoothSession {
         }
     }
     /// Standard read-only EP0 diagnostics; no recovery or firmware opcode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session or claim is invalid or the endpoint status request fails.
     pub fn endpoint_status(&mut self, input: bool) -> Result<(u8, u16), String> {
         self.check_session()?;
         let usb = self.native()?.pointer()?;
@@ -667,8 +710,8 @@ impl BluetoothSession {
             gu_usb_endpoint_status(
                 usb.as_ptr(),
                 i32::from(input),
-                &mut address,
-                &mut status,
+                &raw mut address,
+                &raw mut status,
                 error.as_mut_ptr(),
                 error.len(),
             )
@@ -681,6 +724,10 @@ impl BluetoothSession {
         }
         Ok((address, status))
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session or claim is invalid or the observed maximum LUN does not qualify for this adapter.
     pub fn max_lun(&mut self) -> Result<u8, String> {
         self.check_session()?;
         self.usb
@@ -688,13 +735,22 @@ impl BluetoothSession {
             .ok_or("No USB claim")?
             .qualify_addressing()
     }
+    #[must_use]
     pub fn target(&self) -> &NativeCandidate {
         &self.session.target
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the F1 request, session checks, or vendor response validation fails.
     pub fn read_info(&mut self) -> Result<Vec<u8>, String> {
         // command invalidates the previous F1 proof before its first fallible check.
         self.command(0xf1, &[]).map_err(|error| error.message)
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session check or bounded standard inquiry fails.
     pub fn inquiry(&mut self) -> Result<Vec<u8>, String> {
         self.check_session()?;
         self.bot(&[0x12, 0, 0, 0, 36, 0], Direction::In, &[], 36)
@@ -725,6 +781,10 @@ impl BluetoothSession {
         channel.io_mut().diagnostic && channel.request_sense_eligible()
     }
     /// One standard error read, without clearing the failed session or write gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without the exact diagnostic allowance, for nonzero endpoint status, or if session checks or the one permitted sense read fail.
     pub fn diagnostic_request_sense(&mut self) -> Result<Vec<u8>, String> {
         if !self.diagnostic_sense_eligible() {
             return Err("No eligible diagnostic REQUEST SENSE".into());
@@ -751,6 +811,10 @@ impl BluetoothSession {
     }
     /// At most one diagnostic continuation of the original timed-out F1 IN
     /// phase. Never clears the failure latch or authorizes a firmware command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless this is the one permitted read-only F1 timeout continuation, endpoint checks pass, and its bounded reads and status validation succeed.
     pub fn diagnostic_continuation(&mut self) -> Result<String, String> {
         if self.continuation_used || self.last_opcode != 0xf1 {
             return Err("No eligible F1 continuation".into());
@@ -943,6 +1007,10 @@ impl Drop for BluetoothSession {
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the Main session cannot be acquired, the version file cannot be read, or its contents do not identify a known version.
 pub fn read_main(confirmed: bool) -> Result<(NativeCandidate, Vec<u8>, MainVersion), String> {
     let mut port = Session::open(confirmed, Component::Main)?.main()?;
     let raw = port.read_version()?;
@@ -1004,9 +1072,11 @@ mod tests {
     }
     #[test]
     fn max_lun_accepts_only_a_zero_byte_stall_as_the_single_lun_fallback() {
-        const STALL: i32 = 0xe000404f_u32 as i32;
+        const STALL: i32 = i32::from_ne_bytes(0xe000_404f_u32.to_ne_bytes());
         assert_eq!(
-            unsafe { super::gu_max_lun_result(0, 0, 0xe0005000_u32 as i32) },
+            unsafe {
+                super::gu_max_lun_result(0, 0, i32::from_ne_bytes(0xe000_5000_u32.to_ne_bytes()))
+            },
             1
         );
         // SAFETY: pure bridge decoder takes values only and performs no I/O.
@@ -1015,7 +1085,7 @@ mod tests {
             assert_eq!(super::gu_max_lun_result(1, 1, 0), 0);
             for (success, actual, code) in [
                 (0, 1, STALL),
-                (0, 0, 0xe00002d6_u32 as i32),
+                (0, 0, i32::from_ne_bytes(0xe000_02d6_u32.to_ne_bytes())),
                 (0, 0, 0),
                 (1, 0, 0),
                 (1, 2, 0),

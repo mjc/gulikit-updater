@@ -22,6 +22,7 @@ impl From<&str> for AcquisitionError {
     }
 }
 impl AcquisitionError {
+    #[must_use]
     pub fn after_cleanup(error: String, cleanup: Result<(), String>) -> Self {
         Self {
             error,

@@ -2,4 +2,5 @@
 /artifacts/vendor/
 /artifacts/research/
 /.devenv/
+/.pre-commit-config.yaml
 /research/__pycache__/

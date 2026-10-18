@@ -44,6 +44,10 @@ pub struct Channel {
     pending: Vec<u8>,
 }
 impl Channel {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket cannot be configured for nonblocking I/O.
     pub fn new(stream: UnixStream) -> Result<Self, String> {
         stream
             .set_nonblocking(true)
@@ -53,6 +57,10 @@ impl Channel {
             pending: Vec::new(),
         })
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the inherited socket cannot be duplicated or configured for nonblocking I/O.
     pub fn from_stdin() -> Result<Self, String> {
         let fd = std::io::stdin()
             .as_fd()
@@ -60,6 +68,10 @@ impl Channel {
             .map_err(|error| error.to_string())?;
         Self::new(UnixStream::from(fd))
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an oversized or unencodable message, socket write failure, closed peer, or exceeded write deadline.
     pub fn send(&mut self, message: &Message) -> Result<(), String> {
         let mut frame = Vec::with_capacity(128);
         frame.extend_from_slice(&[0; 4]);
@@ -68,7 +80,8 @@ impl Channel {
         if length > LIMIT {
             return Err("Main worker message exceeds bound".into());
         }
-        frame[..4].copy_from_slice(&(length as u32).to_le_bytes());
+        let length = u32::try_from(length).map_err(|_| "Main worker message exceeds bound")?;
+        frame[..4].copy_from_slice(&length.to_le_bytes());
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut remaining = frame.as_slice();
         while !remaining.is_empty() {
@@ -79,7 +92,7 @@ impl Channel {
                 Ok(0) => return Err("Main worker channel closed".into()),
                 Ok(count) => remaining = &remaining[count..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(TICK)
+                    std::thread::sleep(TICK);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.to_string()),
@@ -87,11 +100,15 @@ impl Channel {
         }
         Ok(())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized or invalid frames, a closed peer, or a socket read failure.
     pub fn poll(&mut self) -> Result<Option<Message>, String> {
         loop {
-            if self.pending.len() >= 4 {
-                let length =
-                    u32::from_le_bytes(self.pending[..4].try_into().expect("four bytes")) as usize;
+            if let [a, b, c, d, ..] = self.pending.as_slice() {
+                let length = usize::try_from(u32::from_le_bytes([*a, *b, *c, *d]))
+                    .map_err(|_| "Main worker message exceeds bound")?;
                 if length > LIMIT {
                     return Err("Main worker message exceeds bound".into());
                 }
@@ -117,6 +134,10 @@ impl Channel {
             }
         }
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns a framing or socket error from polling, or an error when the read deadline expires.
     pub fn wait(&mut self, timeout: Duration) -> Result<Message, String> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -134,8 +155,33 @@ impl Channel {
 /// The lease outlives the child, including during panic/EOF/error unwinding.
 struct LeasedChild {
     child: Child,
-    _lease: Option<ProcessLock>,
+    lease: Option<ProcessLock>,
 }
+impl LeasedChild {
+    fn grant_lease(&mut self, socket: &UnixStream) -> Result<(), String> {
+        if self.lease.is_none() {
+            self.lease = Some(ProcessLock::acquire()?);
+        }
+        let descriptor = self
+            .lease
+            .as_ref()
+            .ok_or("Main guardian has no lease")?
+            .worker_descriptor()?;
+        send_lease(socket, &descriptor)
+    }
+
+    fn interrupt(&self) -> Result<(), String> {
+        // The owned, unreaped Child prevents PID reuse; never signal a wrapped PID.
+        let pid = i32::try_from(self.child.id())
+            .map_err(|_| "Main worker PID exceeds the platform range")?;
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGINT,
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
 impl Drop for LeasedChild {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -150,6 +196,10 @@ impl Drop for LeasedChild {
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error for invalid parent or worker protocol, failed process or channel operations, or lease acquisition and transfer failures. Cleanup retains the lease until the exact child is reaped.
 pub fn guardian(parent: Channel, worker_command: Command, budget: Duration) -> Result<(), String> {
     guardian_with_lease(parent, worker_command, budget, None)
 }
@@ -168,9 +218,8 @@ fn guardian_with_clock(
     lease: Option<ProcessLock>,
     now: impl Fn() -> Instant,
 ) -> Result<(), String> {
-    let request = match parent.wait(Duration::from_secs(10))? {
-        Message::Request(request) => request,
-        _ => return Err("Main guardian expected a request".into()),
+    let Message::Request(request) = parent.wait(Duration::from_secs(10))? else {
+        return Err("Main guardian expected a request".into());
     };
     let (local, remote) = UnixStream::pair().map_err(|error| error.to_string())?;
     let (lease_sender, lease_receiver) = UnixStream::pair().map_err(|error| error.to_string())?;
@@ -186,10 +235,7 @@ fn guardian_with_clock(
     // Command retains configured Stdio handles for reuse. Close its peer copy
     // so worker EOF is observable when the actual child exits.
     drop(worker_command);
-    let mut owned = LeasedChild {
-        child,
-        _lease: lease,
-    };
+    let mut owned = LeasedChild { child, lease };
     let mut worker = Channel::new(local)?;
     worker.send(&Message::Request(request))?;
     let deadline = now() + budget;
@@ -209,12 +255,7 @@ fn guardian_with_clock(
                     return Err("Cancelled before Main worker authorization".into());
                 }
                 if cancellation_deadline.is_none() {
-                    // Owned, unreaped Child prevents PID reuse. Only this child is signaled.
-                    nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(owned.child.id() as i32),
-                        nix::sys::signal::Signal::SIGINT,
-                    )
-                    .map_err(|error| error.to_string())?;
+                    owned.interrupt()?;
                     cancellation_deadline = Some(now() + Duration::from_secs(5));
                 }
             }
@@ -224,15 +265,7 @@ fn guardian_with_clock(
         if result.is_none() {
             match worker.poll() {
                 Ok(Some(Message::PackageReady)) if !lease_sent && !ready && !started => {
-                    if owned._lease.is_none() {
-                        owned._lease = Some(ProcessLock::acquire()?);
-                    }
-                    let descriptor = owned
-                        ._lease
-                        .as_ref()
-                        .expect("guardian owns lease")
-                        .worker_descriptor()?;
-                    send_lease(&lease_sender, &descriptor)?;
+                    owned.grant_lease(&lease_sender)?;
                     lease_sent = true;
                 }
                 Ok(Some(Message::Ready)) if lease_sent && !ready && !started => {
@@ -270,7 +303,7 @@ fn guardian_with_clock(
                     _ => return Err("Main worker exited in an unexpected protocol phase".into()),
                 }
             }
-            parent.send(&result.unwrap_or(Message::Unknown {
+            parent.send(&result.unwrap_or_else(|| Message::Unknown {
                 reason: "Main worker exited without a final result".into(),
                 worker_stopped: true,
             }))?;
@@ -284,6 +317,10 @@ fn guardian_with_clock(
     }
 }
 
+///
+/// # Errors
+///
+/// Returns an error if the guardian cannot be started or its reporting channel fails before a final response. Unknown results retain their explicit worker-stopped evidence.
 pub fn run(
     mut guardian_command: Command,
     request: serde_json::Value,
@@ -632,7 +669,10 @@ mod tests {
 
     #[test]
     fn channel_rejects_oversized_frames_and_incomplete_eof() {
-        for bytes in [((LIMIT + 1) as u32).to_le_bytes().to_vec(), vec![1, 0]] {
+        for bytes in [
+            u32::try_from(LIMIT + 1).unwrap().to_le_bytes().to_vec(),
+            vec![1, 0],
+        ] {
             let (local, mut remote) = UnixStream::pair().unwrap();
             let mut channel = Channel::new(local).unwrap();
             remote.write_all(&bytes).unwrap();

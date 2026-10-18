@@ -3,6 +3,7 @@
 Only the known Bluetooth 5.07 ZIP is accepted. No vendor executable is launched
 and no device APIs are used. Outputs belong in the ignored research cache.
 """
+
 import argparse
 import hashlib
 import io
@@ -50,7 +51,11 @@ def prepare(archive, output):
     payload = checked(pe.get_data(0x1732F0, 345_088), 345_088, PAYLOAD_SHA)
     dll = extract_device_usb(pe)
     output.mkdir(parents=True, exist_ok=True)
-    for name, data in [(EXE_NAME, exe), ("bt-v5.07-payload.bin", payload), ("DeviceUsb.official.dll", dll)]:
+    for name, data in [
+        (EXE_NAME, exe),
+        ("bt-v5.07-payload.bin", payload),
+        ("DeviceUsb.official.dll", dll),
+    ]:
         destination = output / name
         destination.write_bytes(data)
         print(f"{destination}: {hashlib.sha256(data).hexdigest()}")

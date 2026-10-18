@@ -12,6 +12,24 @@ resolver = "3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+collection_is_never_read = "deny"
+debug_assert_with_mut_call = "deny"
+fallible_impl_from = "deny"
+needless_collect = "deny"
+needless_pass_by_ref_mut = "deny"
+or_fun_call = "deny"
+path_buf_push_overwrite = "deny"
+read_zero_byte_vec = "deny"
+redundant_clone = "deny"
+significant_drop_in_scrutinee = "deny"
+too_long_first_doc_paragraph = "deny"
+unused_peekable = "deny"
+
+[lints]
+workspace = true
+
 [dependencies]
 gulikit-core = { path = "crates/core" }
 gulikit-platform = { path = "crates/platform" }

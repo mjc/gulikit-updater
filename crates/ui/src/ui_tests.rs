@@ -50,9 +50,9 @@ fn inside_window(ui: &AppWindow, item: &ElementHandle) {
     let window = ui.window().size();
     assert!(size.width > 0. && size.height > 0.);
     assert!(position.x >= 0. && position.y >= 0.);
-    assert!(position.x + size.width <= window.width as f32 + 1.);
+    assert!(f64::from(position.x + size.width) <= f64::from(window.width) + 1.);
     assert!(
-        position.y + size.height <= window.height as f32 + 1.,
+        f64::from(position.y + size.height) <= f64::from(window.height) + 1.,
         "element y={} + height={} exceeds window height={}",
         position.y,
         size.height,
@@ -331,8 +331,8 @@ fn shared_controls_only_transfer_on_click_and_only_verify_after_fresh_readback()
     i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(10));
     layout(&app.ui);
     assert_eq!(
-        app.ui.get_state().progress,
-        0.,
+        app.ui.get_state().progress.to_bits(),
+        0_f32.to_bits(),
         "wall time cannot invent transfer progress"
     );
     app.send(Event::Progress(Progress {
@@ -432,7 +432,7 @@ fn progress_updates_reuse_unchanged_text_and_still_present_recovery_holds() {
         total: 51500,
     }));
     let held = app.ui.get_state();
-    assert_eq!(held.progress, 237. / 51500.);
+    assert_eq!(held.progress.to_bits(), (237_f32 / 51_500.).to_bits());
     assert!(held.notice.contains("No retry or resume"));
     assert_eq!(held.notice, held.error);
     assert!(!app.ui.get_primary_enabled());
@@ -579,11 +579,22 @@ fn log_is_read_only_copyable_and_has_visible_text() {
     let snapshot = ui.window().take_snapshot().unwrap();
     let position = log.absolute_position();
     let size = log.size();
+    let horizontal_inset =
+        f64::from(position.x.ceil()) + 4. ..f64::from((position.x + size.width).floor()) - 4.;
+    let vertical_inset =
+        f64::from(position.y.ceil()) + 4. ..f64::from((position.y + size.height).floor()) - 4.;
+    let width = usize::try_from(snapshot.width()).unwrap();
     let mut ink_pixels = 0;
-    for y in position.y.ceil() as u32 + 4..(position.y + size.height).floor() as u32 - 4 {
-        for x in position.x.ceil() as u32 + 4..(position.x + size.width).floor() as u32 - 4 {
-            let pixel = snapshot.as_slice()[(y * snapshot.width() + x) as usize];
-            if pixel.r < 128 && pixel.g < 150 && pixel.b < 128 {
+    for (y, row) in snapshot.as_slice().chunks_exact(width).enumerate() {
+        if !vertical_inset.contains(&f64::from(u32::try_from(y).unwrap())) {
+            continue;
+        }
+        for (x, pixel) in row.iter().enumerate() {
+            if horizontal_inset.contains(&f64::from(u32::try_from(x).unwrap()))
+                && pixel.r < 128
+                && pixel.g < 150
+                && pixel.b < 128
+            {
                 ink_pixels += 1;
             }
         }

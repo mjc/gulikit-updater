@@ -51,24 +51,23 @@ fn request(command: Command, package: Option<VerifiedPackage>) -> Result<Request
         _ => Err("Not a native command".into()),
     }
 }
+#[cfg(target_os = "macos")]
 fn cancellation(request: &Request) -> Result<Arc<AtomicBool>, AppError> {
     let cancelled = Arc::new(AtomicBool::new(false));
-    #[cfg(target_os = "macos")]
-    {
-        if let Request::Devices = request {
-            return Ok(cancelled);
-        }
-        let flag = Arc::clone(&cancelled);
-        ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
-            .map_err(|error| error.to_string())?;
+    if let Request::Devices = request {
+        return Ok(cancelled);
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = request;
+    let flag = Arc::clone(&cancelled);
+    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
+        .map_err(|error| error.to_string())?;
     Ok(cancelled)
 }
 pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Value, AppError> {
     let request = request(command, package)?;
+    #[cfg(target_os = "macos")]
     let cancelled = cancellation(&request)?;
+    #[cfg(not(target_os = "macos"))]
+    let cancelled = Arc::new(AtomicBool::new(false));
     updater::execute_raw(
         request,
         &mut || cancelled.load(Ordering::SeqCst),

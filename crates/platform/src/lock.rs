@@ -27,6 +27,10 @@ impl Drop for ProcessLock {
     }
 }
 impl ProcessLock {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updater lock cannot be opened safely, is already owned, or fails its file identity checks.
     pub fn acquire() -> Result<Self, String> {
         Self::at(Path::new("/tmp/gulikit-updater.lock"))
     }
@@ -60,10 +64,18 @@ impl ProcessLock {
         Ok(lock)
     }
     /// Descriptor passed to a Main I/O worker. The guardian retains ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if lock identity changed or duplicating the held descriptor fails.
     pub fn worker_descriptor(&self) -> Result<File, String> {
         self.check()?;
         self.file.try_clone().map_err(|error| error.to_string())
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the guardian does not supply exactly one complete lease descriptor, reception fails, or the inherited lock is invalid.
     pub fn adopt_worker_stderr() -> Result<Self, String> {
         Self::adopt_worker_descriptor_at(PathBuf::from("/tmp/gulikit-updater.lock"))
     }
@@ -117,6 +129,7 @@ impl ProcessLock {
         let file = received.try_clone().map_err(|error| error.to_string())?; // CLOEXEC duplicate
         Self::inherited(file, path)
     }
+    #[must_use]
     pub fn is_worker_lease(&self) -> bool {
         !self.unlock_on_drop
     }
@@ -131,6 +144,10 @@ impl ProcessLock {
         lock.file.try_lock().map_err(|error| error.to_string())?;
         Ok(lock)
     }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the named lock no longer identifies the held, singly linked regular file.
     pub fn check(&self) -> Result<(), String> {
         let held = self.file.metadata().map_err(|e| e.to_string())?;
         let named = std::fs::symlink_metadata(&self.path).map_err(|e| e.to_string())?;

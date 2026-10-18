@@ -117,6 +117,13 @@ pub struct VerifiedPackage {
 }
 
 impl VerifiedPackage {
+    /// Authenticate an original reviewed archive and extract its selected payload offline.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unreviewed archive lengths/digests, invalid or encrypted ZIP members,
+    /// read failures, mismatched member/payload digests and incompatible embedded
+    /// executable metadata or address ranges. No embedded executable is run.
     pub fn inspect(bytes: &[u8], model: Model, component: Component) -> Result<Self, PackageError> {
         let release = release_from_archive(bytes, model, component)?;
         let member = read_member(bytes, release.member, release.member_size)?;
@@ -152,6 +159,7 @@ impl VerifiedPackage {
         })
     }
 
+    #[must_use]
     pub fn info(&self) -> &PackageInfo {
         &self.info
     }
@@ -159,6 +167,7 @@ impl VerifiedPackage {
     pub(crate) fn bluetooth_version(&self) -> Option<u16> {
         self.bluetooth_version
     }
+    #[must_use]
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
@@ -186,6 +195,11 @@ pub struct Release {
 
 impl Release {
     /// Apply version direction policy to the selected reviewed release.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed version text, including Bluetooth versions that cannot be
+    /// represented by the protocol's unsigned 16-bit hundredths value.
     pub fn decision_for_installed(
         &self,
         installed: &str,
@@ -195,11 +209,13 @@ impl Release {
     }
 
     /// Exact payload length pinned to this reviewed release.
+    #[must_use]
     pub fn payload_size(&self) -> usize {
         self.payload_size
     }
 
     /// SHA-256 of the payload pinned to this reviewed release.
+    #[must_use]
     pub fn payload_sha256(&self) -> &'static str {
         self.payload_sha256
     }
@@ -270,6 +286,7 @@ static RELEASES: [Release; 4] = [
     },
 ];
 
+#[must_use]
 pub fn catalog() -> &'static [Release] {
     &RELEASES
 }
@@ -371,9 +388,9 @@ fn pe_bytes<'a>(
 
 fn extract_bluetooth_payload(exe: &[u8], release: &Release) -> Result<Vec<u8>, PackageError> {
     let image = PeFile32::parse(exe)?;
-    let identity = pe_bytes(&image, exe, 0x1732d0, 16)?;
-    let version = pe_bytes(&image, exe, 0x1732e0, 2)?;
-    let length = pe_bytes(&image, exe, 0x1732e4, 4)?;
+    let identity = pe_bytes(&image, exe, 0x17_32d0, 16)?;
+    let version = pe_bytes(&image, exe, 0x17_32e0, 2)?;
+    let length = pe_bytes(&image, exe, 0x17_32e4, 4)?;
     // The reviewed 3.23, 3.24 and 5.07 programs share this layout and identical
     // transport code. Version and payload size belong to the selected archive.
     let target = release
@@ -389,7 +406,7 @@ fn extract_bluetooth_payload(exe: &[u8], release: &Release) -> Result<Vec<u8>, P
     {
         return Err(PackageError::EmbeddedMetadata);
     }
-    Ok(pe_bytes(&image, exe, 0x1732f0, release.payload_size)?.to_vec())
+    Ok(pe_bytes(&image, exe, 0x17_32f0, release.payload_size)?.to_vec())
 }
 
 #[cfg(test)]

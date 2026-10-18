@@ -109,6 +109,37 @@ fn write_json(writer: impl Write, mut body: serde_json::Value) -> io::Result<()>
     writeln!(writer)
 }
 
+fn write_native_result(
+    result: Result<serde_json::Value, AppError>,
+    json: bool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> io::Result<ExitCode> {
+    match result {
+        Ok(value) => {
+            let code = outcome_code(&value);
+            if json {
+                write_json(out, value)?;
+            } else {
+                serde_json::to_writer_pretty(&mut *out, &value)?;
+                writeln!(out)?;
+            }
+            Ok(ExitCode::from(code))
+        }
+        Err(error) => {
+            if json {
+                write_json(
+                    err,
+                    serde_json::json!({"error":{"kind":error.kind,"message":error.message,"cleanup_errors":error.cleanup_errors}}),
+                )?;
+            } else {
+                writeln!(err, "{}; cleanup={:?}", error.message, error.cleanup_errors)?;
+            }
+            Ok(ExitCode::from(error.code))
+        }
+    }
+}
+
 fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     match cli.command {
         #[cfg(target_os = "macos")]
@@ -124,29 +155,7 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
                 | Command::Verify { json, .. } => *json,
                 _ => unreachable!(),
             };
-            match native_command(command) {
-                Ok(value) => {
-                    let code = outcome_code(&value);
-                    if json {
-                        write_json(out, value)?;
-                    } else {
-                        serde_json::to_writer_pretty(&mut *out, &value)?;
-                        writeln!(out)?;
-                    }
-                    Ok(ExitCode::from(code))
-                }
-                Err(error) => {
-                    if json {
-                        write_json(
-                            err,
-                            serde_json::json!({"error":{"kind":error.kind,"message":error.message,"cleanup_errors":error.cleanup_errors}}),
-                        )?;
-                    } else {
-                        writeln!(err, "{}; cleanup={:?}", error.message, error.cleanup_errors)?;
-                    }
-                    Ok(ExitCode::from(error.code))
-                }
-            }
+            write_native_result(native_command(command), json, out, err)
         }
         Command::Packages { json } => {
             if json {
@@ -290,7 +299,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     #[cfg(target_os = "macos")]
     if let Command::MainGuardian | Command::MainWorker = &cli.command {
-        return main_supervision::internal(cli.command);
+        return main_supervision::internal(&cli.command);
     }
     match run(cli, &mut io::stdout().lock(), &mut io::stderr().lock()) {
         Ok(code) => code,

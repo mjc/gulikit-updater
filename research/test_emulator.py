@@ -1,4 +1,5 @@
 """Run under python -O too: input and baseline checks must remain active."""
+
 import tempfile
 import unittest
 from pathlib import Path
