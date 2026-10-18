@@ -76,6 +76,138 @@ fn normal_startup_never_presents_a_simulated_controller() {
 }
 
 #[test]
+fn changelog_opens_before_connection_and_shows_intermediate_releases() {
+    let app = LiveHarness::new();
+    click(&app.ui, "Changelog");
+    click(&app.ui, "Bluetooth changelog");
+    let notes = app.ui.get_changelog_result();
+    for version in ["3.24", "3.26", "3.27", "3.30", "3.31", "5.03", "5.07"] {
+        assert!(notes.contains(&format!("Version {version}")));
+    }
+    assert!(notes.contains("may be incomplete"));
+    assert!(
+        !app.ui.get_state().bluetooth,
+        "notes must not change the update component"
+    );
+    assert!(
+        app.work.try_recv().is_err(),
+        "reading notes must not access a device"
+    );
+    for label in [
+        "From version",
+        "To version",
+        "Compare versions",
+        "Close changelog",
+    ] {
+        inside_window(&app.ui, &element(&app.ui, label));
+    }
+}
+
+#[test]
+fn changelog_reports_invalid_input_and_can_recover() {
+    let app = LiveHarness::new();
+    click(&app.ui, "Changelog");
+    app.ui.set_changelog_from("latest".into());
+    click(&app.ui, "Compare versions");
+    assert!(
+        app.ui
+            .get_changelog_error()
+            .contains("Invalid main from version")
+    );
+    assert!(app.ui.get_changelog_result().is_empty());
+    app.ui.set_changelog_from("5.8".into());
+    app.ui.set_changelog_to("5.9".into());
+    click(&app.ui, "Compare versions");
+    assert!(app.ui.get_changelog_error().is_empty());
+    assert!(app.ui.get_changelog_result().contains("analog trigger"));
+    assert!(app.work.try_recv().is_err());
+}
+
+#[test]
+fn changelog_downgrade_labels_removed_changes_and_closes_cleanly() {
+    let app = LiveHarness::new();
+    click(&app.ui, "Changelog");
+    click(&app.ui, "Bluetooth changelog");
+    app.ui.set_changelog_from("5.07".into());
+    app.ui.set_changelog_to("3.23".into());
+    click(&app.ui, "Compare versions");
+    assert!(app.ui.get_changelog_result().contains("Changes removed"));
+    click(&app.ui, "Close changelog");
+    assert!(
+        ElementHandle::find_by_accessible_label(&app.ui, "Compare versions")
+            .next()
+            .is_none()
+    );
+    assert!(app.work.try_recv().is_err());
+}
+
+#[test]
+fn changelog_equal_versions_have_an_explicit_empty_result() {
+    let app = LiveHarness::new();
+    click(&app.ui, "Changelog");
+    app.ui.set_changelog_from("5.9".into());
+    app.ui.set_changelog_to("5.9".into());
+    click(&app.ui, "Compare versions");
+    assert!(app.ui.get_changelog_result().contains("No version change"));
+    assert!(app.work.try_recv().is_err());
+}
+
+#[test]
+fn changelog_fields_accept_keyboard_input() {
+    let app = LiveHarness::new();
+    click(&app.ui, "Changelog");
+    app.ui.set_changelog_from("".into());
+    app.ui.set_changelog_to("".into());
+    for (label, value) in [("From version", "5.8"), ("To version", "5.9")] {
+        let input = ElementHandle::find_by_accessible_label(&app.ui, label)
+            .find(|item| {
+                item.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::TextInput)
+            })
+            .unwrap();
+        inside_window(&app.ui, &input);
+        input.mock_single_click(PointerEventButton::Left);
+        key(&app.ui, value);
+    }
+    click(&app.ui, "Compare versions");
+    assert_eq!(app.ui.get_changelog_from(), "5.8");
+    assert_eq!(app.ui.get_changelog_to(), "5.9");
+    assert!(app.ui.get_changelog_result().contains("analog trigger"));
+    assert!(app.work.try_recv().is_err());
+}
+
+#[test]
+fn changelog_keyboard_does_not_activate_the_ready_updater() {
+    let app = LiveHarness::new_mode(true);
+    app.prepare_main();
+    assert!(app.ui.get_primary_enabled());
+    click(&app.ui, "Changelog");
+    key(&app.ui, slint::platform::Key::Return);
+    key(&app.ui, " ");
+    assert!(app.work.try_recv().is_err());
+    assert_eq!(app.ui.get_state().page, Page::Ready);
+}
+
+#[test]
+fn changelog_is_disabled_while_controller_inspection_is_busy() {
+    let app = LiveHarness::new();
+    app.ui.invoke_confirm_model(true);
+    app.ui.invoke_inspect_controller();
+    assert!(app.work.try_recv().is_ok());
+    assert!(app.ui.get_state().busy);
+    assert_eq!(
+        element(&app.ui, "Changelog").accessible_enabled(),
+        Some(false)
+    );
+    click(&app.ui, "Changelog");
+    assert!(
+        ElementHandle::find_by_accessible_label(&app.ui, "Compare versions")
+            .next()
+            .is_none()
+    );
+    assert!(app.work.try_recv().is_err());
+}
+
+#[test]
 fn desktop_renders_both_components_and_routes_confirmed_inspection() {
     use gulikit_ui::live::Work;
 

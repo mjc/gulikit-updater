@@ -49,6 +49,7 @@ fn main() -> Result<(), slint::PlatformError> {
     result
 }
 
+mod changelog_ui;
 mod live_ui;
 #[cfg(test)]
 mod ui_tests;

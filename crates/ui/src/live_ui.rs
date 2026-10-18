@@ -297,6 +297,7 @@ pub fn create_mode(
     }));
     present(&ui, &driver.borrow().app);
     bind_actions(&ui, &driver, demo);
+    super::changelog_ui::bind(&ui);
     let closing = Rc::new(Cell::new(false));
     {
         let (driver, closing) = (driver.clone(), closing.clone());

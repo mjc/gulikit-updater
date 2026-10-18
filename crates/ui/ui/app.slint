@@ -1,4 +1,4 @@
-import { ScrollView } from "std-widgets.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
 export { Palette } from "std-widgets.slint";
 
 export enum Page { connect, ready, writing, restart, verified, failed }
@@ -131,6 +131,14 @@ export component AppWindow inherits Window {
     callback inspect-controller();
     callback open-attempt();
     callback cancel-operation();
+    callback open-changelog();
+    callback compare-changelog();
+    callback select-changelog-component(bool);
+    in-out property <string> changelog-from;
+    in-out property <string> changelog-to;
+    in property <bool> changelog-bluetooth;
+    in property <string> changelog-result;
+    in property <string> changelog-error;
     in-out property <bool> details-open: false;
     in-out property <bool> log-open: false;
     property <length> sidebar-width: 280px;
@@ -151,6 +159,7 @@ export component AppWindow inherits Window {
                 Rectangle { width: 54px; height: 23px; vertical-stretch: 0; border-radius: 4px; background: #e8eddf;
                     Text { text: root.demo-mode ? "DEMO" : "NS39"; color: #526840; font-size: 10px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                 }
+                ActionButton { text: "Changelog"; quiet: true; enabled: !root.state.busy; clicked => { root.open-changelog(); changelog.show(); } }
                 ActionButton { text: "?"; min-width: 34px; quiet: true; accessible-label: "Connection help"; enabled: root.state.can-troubleshoot; clicked => { help.show(); } }
             }
         }
@@ -343,6 +352,49 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+    changelog := PopupWindow {
+        close-policy: close-on-click-outside;
+        x: (root.width - self.width) / 2; y: (root.height - self.height) / 2;
+        width: 700px; height: 540px;
+        Rectangle { background: #fbfcf8; border-color: #c9d7bd; border-width: 1px; border-radius: 10px; }
+        VerticalLayout {
+            padding: 24px; spacing: 12px;
+            Text { text: "Firmware changelog"; color: #2d452d; font-size: 24px; font-weight: 600; }
+            Label { text: "KK3 Max · Choose the versions to compare"; }
+            HorizontalLayout {
+                spacing: 8px; alignment: start;
+                ActionButton { text: "Main"; accessible-label: "Main changelog"; selected: !root.changelog-bluetooth; clicked => { root.select-changelog-component(false); } }
+                ActionButton { text: "Bluetooth"; accessible-label: "Bluetooth changelog"; selected: root.changelog-bluetooth; clicked => { root.select-changelog-component(true); } }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout { spacing: 5px;
+                    Label { text: "From version"; }
+                    LineEdit { text <=> root.changelog-from; accessible-label: "From version"; accepted => { root.compare-changelog(); } }
+                }
+                VerticalLayout { spacing: 5px;
+                    Label { text: "To version"; }
+                    LineEdit { text <=> root.changelog-to; accessible-label: "To version"; accepted => { root.compare-changelog(); } }
+                }
+                VerticalLayout { alignment: end;
+                    ActionButton { text: "Compare"; accessible-label: "Compare versions"; primary: true; clicked => { root.compare-changelog(); } }
+                }
+            }
+            if root.changelog-error != "": Notice { text: root.changelog-error; warning: true; }
+            ScrollView {
+                content-width: self.width; horizontal-scrollbar-policy: always-off;
+                VerticalLayout {
+                    notes-text := TextInput {
+                        text: root.changelog-result; accessible-label: "Release notes";
+                        read-only: true; single-line: false; wrap: word-wrap;
+                        font-size: 13px; color: #334d32;
+                        selection-background-color: #cdddc1; selection-foreground-color: #24382f;
+                    }
+                }
+            }
+            ActionButton { text: "Done"; accessible-label: "Close changelog"; clicked => { changelog.close(); } }
         }
     }
     files := PopupWindow {

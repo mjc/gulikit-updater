@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bot;
+pub mod changelog;
 pub mod device;
 pub mod package;
 pub mod scsi;
