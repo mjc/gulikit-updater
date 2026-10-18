@@ -45,3 +45,7 @@ hex = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 assert_cmd = "2"
 tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
