@@ -24,8 +24,10 @@ returning its command-status wrapper. Exact successful DATA OUT for every block,
 with all earlier commands confirmed, no final status bytes received, and the
 selected device's expected USB removal observed, produces
 `transfer_submitted_pending_completion`. The missing final command confirmation
-is retained. Only a fresh independent version read after restart can produce
-`installed_verified`. An earlier interruption, failed status, partial transfer or
+is retained. A passed final F0 status is retained too if the controller detaches
+before final F2; that case also awaits completion verification. An expected
+detach after a passed final F2 preserves the completed transfer. Only a fresh
+independent version read after restart can produce `installed_verified`. An earlier interruption, failed status, partial transfer or
 audit failure retains an uncertain outcome. Hardware evidence and remaining work
 live in the linked CLI plan and product specification.
 

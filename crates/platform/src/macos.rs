@@ -841,8 +841,11 @@ impl BluetoothSession {
             data,
             if opcode == 0xf0 { 512 } else { 20 },
         )?;
-        self.check_session()?;
         if opcode == 0xf1 {
+            // Identity must remain attachment-bound before it can authorize a
+            // write. Completed F0/F2 evidence survives a subsequent detach;
+            // their next operation still checks the live session before I/O.
+            self.check_session()?;
             self.write_gate.observe_f1(&raw)?;
         }
         Ok(raw)

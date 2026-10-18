@@ -373,7 +373,13 @@ fn bluetooth_observed(
                 if cancelled() {
                     return Err("Cancelled after firmware submission".into());
                 }
-                port.check_session()?;
+                if let Err(error) = port.check_session() {
+                    if index + 1 == block_count && port.completion_detached()? {
+                        record.outcome = Outcome::TransferSubmittedPendingCompletion;
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
                 let status =
                     command(port, &mut record, 0xf2, &[]).map_err(|error| error.message)?;
                 if status[0] != 0 {
@@ -381,7 +387,11 @@ fn bluetooth_observed(
                 }
             }
         }
-        port.check_session()?;
+        if let Err(error) = port.check_session()
+            && !port.completion_detached()?
+        {
+            return Err(error);
+        }
         record.outcome = Outcome::TransferCompletedAwaitingVerification;
         Ok(())
     })();
@@ -1050,6 +1060,40 @@ mod tests {
         assert_eq!(record.outcome, Outcome::OutcomeUnknown);
         assert_eq!(record.bytes_submitted, 361472);
         assert_eq!(record.bytes_confirmed, 360960);
+    }
+
+    #[test]
+    fn completed_final_commands_retain_confirmation_across_expected_detach() {
+        for (after_command, still_present, expected) in [
+            (708, false, Outcome::TransferSubmittedPendingCompletion),
+            (709, false, Outcome::TransferCompletedAwaitingVerification),
+            (708, true, Outcome::OutcomeUnknown),
+            (709, true, Outcome::OutcomeUnknown),
+            (4, false, Outcome::OutcomeUnknown),
+        ] {
+            let mut port = Fake {
+                version: 323,
+                invalidate: Some(after_command),
+                selected_still_present: still_present,
+                ..Fake::default()
+            };
+            let record = bluetooth_release(
+                &mut port,
+                &vec![0; 361472],
+                324,
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
+            assert_eq!(
+                record.outcome, expected,
+                "after={after_command} present={still_present}"
+            );
+            let confirmed = if after_command >= 708 { 361472 } else { 1024 };
+            assert_eq!(record.bytes_confirmed, confirmed);
+            assert_eq!(record.bytes_submitted, confirmed);
+            assert_eq!(port.calls.len(), after_command);
+            assert!(port.cleanup);
+        }
     }
 
     #[test]
