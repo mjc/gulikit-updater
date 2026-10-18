@@ -14,7 +14,6 @@ use std::{
     ffi::{CStr, c_char, c_void},
     fs::File,
     path::PathBuf,
-    process::Command,
     ptr::NonNull,
     time::{Duration, Instant},
 };
@@ -152,20 +151,23 @@ pub struct Session {
 impl Session {
     /// Create the host audit log relative to an open directory, excluding device volumes.
     pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
-        use std::os::unix::fs::MetadataExt;
-        let devices = self
-            .target
-            .disks
-            .iter()
-            .filter(|disk| !disk.mount.as_os_str().is_empty())
-            .map(|disk| {
-                std::fs::metadata(&disk.mount)
-                    .map(|metadata| metadata.dev())
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        self.check()?;
+        let devices = record_exclusions(&self.target.disks, |bsd| {
+            use std::os::unix::fs::{FileTypeExt, MetadataExt};
+            if !bsd.starts_with("disk") || !bsd.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                return Err("Invalid correlated disk identifier".into());
+            }
+            let metadata = std::fs::metadata(PathBuf::from("/dev").join(bsd))
+                .map_err(|error| error.to_string())?;
+            if !metadata.file_type().is_block_device() {
+                return Err("Correlated disk is not a block device".into());
+            }
+            Ok(metadata.rdev())
+        })?;
+        self.check()?;
         crate::journal::create_host_record(path, &devices)
     }
+
     pub fn open(confirmed: bool, component: Component) -> Result<Self, String> {
         Self::open_locked(confirmed, component, crate::lock::ProcessLock::acquire()?)
     }
@@ -252,10 +254,10 @@ impl Session {
         }) {
             return Err("Bluetooth requires the observed Gamepad/Updater/1.00 update profile. Exit the current mode normally, then enter Gear/Set+A Bluetooth mode and rediscover.".into());
         }
+        bluetooth_media_capability(&self.target.disks)?;
         let mut port = BluetoothSession {
             session: self,
             usb: None,
-            unmounted: Vec::new(),
             finished: false,
             last_opcode: 0,
             continuation_used: false,
@@ -263,13 +265,6 @@ impl Session {
             write_gate: BluetoothWriteGate::default(),
         };
         let result = (|| {
-            for disk in port.session.target.disks.clone() {
-                if !disk.mount.as_os_str().is_empty() {
-                    port.session.check()?;
-                    port.unmounted.push(disk.bsd.clone());
-                    diskutil("unmount", &disk.bsd)?;
-                }
-            }
             port.session.check_transport()?;
             let mut error = [0i8; 1024];
             // SAFETY: bridge consumes only this ID and writes at most error.len() bytes.
@@ -307,6 +302,24 @@ impl Session {
     }
     // Quiescing storage can remove its logical mount. Still require all physical
     // candidates, the selected ancestor and live watcher, never a cached mount path.
+    fn completion_observation(&self) -> Result<CompletionObservation, String> {
+        self.lock.check()?;
+        let snapshot = discover_bound(self.target.ancestor)?;
+        let (events, arrivals) = self.watch.changes();
+        Ok(CompletionObservation {
+            selected_present: snapshot
+                .candidates
+                .iter()
+                .any(|candidate| candidate.ancestor == self.target.ancestor),
+            other_candidate_present: snapshot
+                .candidates
+                .iter()
+                .any(|candidate| candidate.ancestor != self.target.ancestor),
+            discovery_complete: snapshot.incomplete.is_empty(),
+            usb_events: events,
+            usb_arrivals: arrivals,
+        })
+    }
     fn check_transport(&self) -> Result<(), String> {
         self.lock.check()?;
         if !self.watch.unchanged() {
@@ -335,22 +348,21 @@ fn error_string(bytes: &[i8]) -> String {
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
-fn diskutil(action: &str, bsd: &str) -> Result<(), String> {
-    if !bsd.starts_with("disk") || !bsd.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return Err("Invalid OS disk identifier".into());
+// Include unmounted media: Disk Arbitration can mount it before record creation.
+fn record_exclusions(
+    disks: &[Disk],
+    device: impl FnMut(&str) -> Result<u64, String>,
+) -> Result<Vec<u64>, String> {
+    let mut device = device;
+    disks.iter().map(|disk| device(&disk.bsd)).collect()
+}
+
+fn bluetooth_media_capability(disks: &[Disk]) -> Result<(), String> {
+    if disks.is_empty() {
+        Ok(())
+    } else {
+        Err("Bluetooth capture requires the qualified update profile without disk media. No volume will be unmounted; enter Gear/Set+A mode and rediscover.".into())
     }
-    let output = crate::process::run_with_deadline(
-        Command::new("/usr/sbin/diskutil").args([action, bsd]),
-        Duration::from_secs(30),
-    )?;
-    if !output.status.success() {
-        return Err(format!(
-            "diskutil {action} refused: {} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
 }
 
 pub struct MainSession {
@@ -419,16 +431,17 @@ impl MainPort for MainSession {
                     "Cancelled while awaiting Main completion after firmware submission".into(),
                 );
             }
-            let snapshot = discover()?;
-            let (events, arrivals) = self.session.watch.changes();
-            match (CompletionObservation {selected_present:snapshot.candidates.iter().any(|c|c.ancestor==self.session.target.ancestor),other_candidate_present:snapshot.candidates.iter().any(|c|c.ancestor!=self.session.target.ancestor),discovery_complete:snapshot.incomplete.is_empty(),usb_events:events,usb_arrivals:arrivals}).decision(){
-                CompletionDecision::ExpectedDetach=>return Ok(true),
-                CompletionDecision::Invalidated=>return Err("Unexpected topology change or incomplete discovery while awaiting Main completion".into()),
-                CompletionDecision::Pending=>{}
+            match self.session.completion_observation()?.decision() {
+                CompletionDecision::ExpectedDetach => return Ok(true),
+                CompletionDecision::Invalidated => return Err("Unexpected topology change or incomplete discovery while awaiting Main completion".into()),
+                CompletionDecision::Pending => {}
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        Ok(false)
+        self.session
+            .completion_observation()?
+            .at_deadline()
+            .map_err(str::to_owned)
     }
     fn finish(&mut self) -> Result<(), String> {
         self.volume.close()
@@ -575,31 +588,41 @@ impl BulkIo for NativeUsb {
     }
 }
 
-#[derive(Default)]
-struct BluetoothWriteGate {
-    fresh_f1: bool,
-    prepared: bool,
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum BluetoothWriteGate {
+    #[default]
+    Unqualified,
+    FreshInfo,
+    Prepared,
 }
 impl BluetoothWriteGate {
     fn observe_f1(&mut self, raw: &[u8]) -> Result<(), String> {
-        self.fresh_f1 = false;
-        self.prepared = false;
+        self.begin_f1();
         gulikit_core::version::bluetooth_info(raw)
             .map_err(|error| format!("{error}; raw={raw:02x?}"))?;
-        self.fresh_f1 = true;
+        *self = Self::FreshInfo;
         Ok(())
     }
     fn begin_f1(&mut self) {
-        *self = Self::default();
+        *self = Self::Unqualified;
+    }
+    fn unprepare(&mut self) {
+        match self {
+            Self::Unqualified | Self::FreshInfo => {}
+            Self::Prepared => *self = Self::FreshInfo,
+        }
+    }
+    fn is_prepared(self) -> bool {
+        self == Self::Prepared
     }
     fn prepare(&mut self, lun: Option<u8>, failed: bool) -> Result<(), String> {
-        self.prepared = false;
-        if !self.fresh_f1 || lun != Some(0) || failed {
+        self.unprepare();
+        if *self != Self::FreshInfo || lun != Some(0) || failed {
             return Err(
                 "Bluetooth writing requires a fresh valid F1 in this qualified LUN0 session".into(),
             );
         }
-        self.prepared = true;
+        *self = Self::Prepared;
         Ok(())
     }
 }
@@ -607,7 +630,6 @@ impl BluetoothWriteGate {
 pub struct BluetoothSession {
     session: Session,
     usb: Option<bot::Session<NativeUsb>>,
-    unmounted: Vec<String>,
     finished: bool,
     last_opcode: u8,
     continuation_used: bool,
@@ -793,10 +815,10 @@ impl BluetoothSession {
         }
         match opcode {
             0xf1 if !channel.firmware_may_have_been_submitted() && data.is_empty() => {}
-            0xf0 if self.write_gate.prepared
+            0xf0 if self.write_gate.is_prepared()
                 && channel.qualified_lun() == Some(0)
                 && data.len() == 512 => {}
-            0xf2 if self.write_gate.prepared
+            0xf2 if self.write_gate.is_prepared()
                 && channel.qualified_lun() == Some(0)
                 && channel.firmware_may_have_been_submitted()
                 && data.is_empty() => {}
@@ -838,13 +860,13 @@ impl BluetoothPort for BluetoothSession {
         self.usb.as_ref().and_then(bot::Session::qualified_lun)
     }
     fn prepare_write(&mut self) -> Result<(), String> {
-        self.write_gate.prepared = false;
+        self.write_gate.unprepare();
         self.check_session()?;
         let channel = self.usb.as_ref().ok_or("No exclusive USB claim")?;
         self.write_gate
             .prepare(channel.qualified_lun(), channel.failed())?;
         if let Err(error) = self.check_session() {
-            self.write_gate.prepared = false;
+            self.write_gate.unprepare();
             return Err(error);
         }
         Ok(())
@@ -868,11 +890,23 @@ impl BluetoothPort for BluetoothSession {
         let attempted = self.usb.as_ref().map(bot::Session::tag) != before;
         result.map_err(|message| {
             if attempted {
-                message.into()
+                let mut error = gulikit_core::update::SubmissionError::from(message);
+                if self
+                    .usb
+                    .as_ref()
+                    .is_some_and(bot::Session::data_sent_status_missing)
+                {
+                    error.completion =
+                        gulikit_core::update::SubmissionCompletion::DataSentStatusMissing;
+                }
+                error
             } else {
                 gulikit_core::update::SubmissionError::before(message)
             }
         })
+    }
+    fn completion_detached(&mut self) -> Result<bool, String> {
+        Ok(self.session.completion_observation()?.decision() == CompletionDecision::ExpectedDetach)
     }
     fn finish(&mut self) -> Result<(), String> {
         if self.finished {
@@ -881,6 +915,7 @@ impl BluetoothPort for BluetoothSession {
         self.finished = true;
         if let Some(mut usb) = self.usb.take() {
             let preserve = usb.firmware_may_have_been_submitted();
+            let detached = preserve && self.completion_detached().unwrap_or(false);
             if usb.io_mut().diagnostic {
                 eprintln!(
                     "Cleanup disposition: {}",
@@ -892,41 +927,11 @@ impl BluetoothPort for BluetoothSession {
                 );
             }
             usb.into_inner().close(preserve);
-            if preserve {
+            if preserve && !detached {
                 return Err(crate::acquisition::SURRENDER_PENDING_NOTICE.into());
             }
         }
-        let mut errors = Vec::new();
-        for disk in std::mem::take(&mut self.unmounted) {
-            // No cached disk number is acted upon after replacement/reconnect.
-            if let Err(error) = self.session.check_transport() {
-                errors.push(format!("Remount requires rediscovery: {error}"));
-                break;
-            }
-            let current = match discover() {
-                Ok(value) => value,
-                Err(error) => {
-                    errors.push(error);
-                    break;
-                }
-            };
-            if current.candidates.iter().any(|c| {
-                c.ancestor == self.session.target.ancestor
-                    && c.disks
-                        .iter()
-                        .any(|d| d.bsd == disk && !d.mount.as_os_str().is_empty())
-            }) {
-                continue;
-            }
-            if let Err(error) = diskutil("mount", &disk) {
-                errors.push(error);
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        Ok(())
     }
 }
 impl Drop for BluetoothSession {
@@ -948,6 +953,24 @@ mod tests {
         NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
     };
     #[test]
+    fn bluetooth_capture_refuses_media_including_unmounted_disks() {
+        super::bluetooth_media_capability(&[]).unwrap();
+        for mount in ["", "/Volumes/GuliKit"] {
+            let disks = [super::Disk {
+                bsd: "disk9".into(),
+                mount: mount.into(),
+                writable: true,
+            }];
+            assert!(super::bluetooth_media_capability(&disks).is_err());
+            let exclusions = super::record_exclusions(&disks, |bsd| {
+                assert_eq!(bsd, "disk9");
+                Ok(99)
+            })
+            .unwrap();
+            assert_eq!(exclusions, [99]);
+        }
+    }
+    #[test]
     fn main_writes_require_both_a_supervised_lease_and_writable_media() {
         for (supervised, writable) in [(false, false), (false, true), (true, false)] {
             assert!(super::main_write_capability(supervised, writable).is_err());
@@ -965,15 +988,15 @@ mod tests {
         assert!(gate.prepare(None, false).is_err());
         assert!(gate.prepare(Some(0), true).is_err());
         gate.prepare(Some(0), false).unwrap();
-        assert!(gate.prepared);
+        assert!(gate.is_prepared());
         gate.begin_f1();
-        assert!(!gate.prepared);
+        assert!(!gate.is_prepared());
         assert!(gate.prepare(Some(0), false).is_err());
         gate.observe_f1(&raw).unwrap();
         gate.prepare(Some(0), false).unwrap();
         raw[0] = 0;
         assert!(gate.observe_f1(&raw).is_err());
-        assert!(!gate.prepared);
+        assert!(!gate.is_prepared());
         assert!(gate.prepare(Some(0), false).is_err());
     }
     #[test]

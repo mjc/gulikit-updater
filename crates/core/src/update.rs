@@ -20,6 +20,22 @@ pub enum Outcome {
     InstalledVerified,
 }
 
+impl Outcome {
+    pub fn awaits_restart_verification(self) -> bool {
+        match self {
+            Self::TransferCompletedAwaitingVerification
+            | Self::TransferSubmittedPendingCompletion => true,
+            Self::Refused
+            | Self::AlreadyCurrent
+            | Self::NewerThanSupported
+            | Self::CancelledBeforeWrite
+            | Self::DestinationCreatedWithoutPayload
+            | Self::OutcomeUnknown
+            | Self::InstalledVerified => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionDecision {
     Pending,
@@ -47,6 +63,19 @@ impl CompletionObservation {
             _ => CompletionDecision::Invalidated,
         }
     }
+    /// At the deadline, one-sided removal evidence is an invalidated session,
+    /// not an ordinary wait for a controller that has not restarted yet.
+    pub fn at_deadline(&self) -> Result<bool, &'static str> {
+        match self.decision() {
+            CompletionDecision::ExpectedDetach => Ok(true),
+            CompletionDecision::Pending if self.selected_present && self.usb_events == 0 => {
+                Ok(false)
+            }
+            CompletionDecision::Pending | CompletionDecision::Invalidated => {
+                Err("Unexpected topology change while awaiting completion")
+            }
+        }
+    }
 }
 
 /// A fresh machine readback and separately recorded assisted association.
@@ -63,11 +92,8 @@ pub struct Verification {
     pub expected_version: String,
 }
 pub fn verify_restart(previous: Outcome, observation: &Verification) -> Outcome {
-    if matches!(
-        previous,
-        Outcome::TransferCompletedAwaitingVerification
-            | Outcome::TransferSubmittedPendingCompletion
-    ) && observation.generation != observation.previous_generation
+    if previous.awaits_restart_verification()
+        && observation.generation != observation.previous_generation
         && observation.same_unit_confirmed
         && observation.model_confirmed
         && !observation.expected_version.is_empty()
@@ -116,6 +142,17 @@ impl Default for TransferRecord {
     }
 }
 
+/// What the transport established before returning a command error.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionCompletion {
+    #[default]
+    Uncertain,
+    /// Exact firmware DATA OUT succeeded, but no command-status bytes arrived.
+    /// This is not a passed command or proof that the firmware was installed.
+    DataSentStatusMissing,
+}
+
 /// A refusal before I/O is distinct from a failure after submission may have begun.
 /// Adapters may return `before` only when no part of this operation was submitted.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -124,6 +161,7 @@ pub struct SubmissionError {
     pub message: String,
     pub may_have_been_submitted: bool,
     pub audit_failure: bool,
+    pub completion: SubmissionCompletion,
     /// Successful Main write count retained when only its audit result failed.
     pub known_write_count: Option<usize>,
 }
@@ -133,6 +171,7 @@ impl SubmissionError {
             message: message.into(),
             may_have_been_submitted: false,
             audit_failure: false,
+            completion: SubmissionCompletion::Uncertain,
             known_write_count: None,
         }
     }
@@ -149,6 +188,7 @@ impl From<String> for SubmissionError {
             message,
             may_have_been_submitted: true,
             audit_failure: false,
+            completion: SubmissionCompletion::Uncertain,
             known_write_count: None,
         }
     }
@@ -182,6 +222,11 @@ pub trait BluetoothPort {
     fn prepare_write(&mut self) -> Result<(), String>;
     fn check_session(&mut self) -> Result<(), String>;
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError>;
+    /// Observe only the selected device's removal, with complete discovery and
+    /// no intervening USB arrival or additional recognized update candidate.
+    fn completion_detached(&mut self) -> Result<bool, String> {
+        Ok(false)
+    }
     /// Release claims on every exit; report restoration or preservation pending.
     /// No-reset surrender after F0 may deliberately leave storage drivers detached.
     fn finish(&mut self) -> Result<(), String>;
@@ -271,7 +316,7 @@ fn bluetooth_observed(
             return Ok(());
         }
         port.check_session()?;
-        let response = command(port, &mut record, 0xf1, &[])?;
+        let response = command(port, &mut record, 0xf1, &[]).map_err(|error| error.message)?;
         let version = bluetooth_info(&response).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
         match version.decision_for(target, policy) {
@@ -304,7 +349,24 @@ fn bluetooth_observed(
             port.check_session()?;
             let result = command(port, &mut record, 0xf0, block);
             publish_progress(&record, payload.len(), &mut progress);
-            result?;
+            if let Err(error) = result {
+                if index > 0
+                    && index + 1 == block_count
+                    && record.bytes_submitted == payload.len()
+                    && record.bytes_confirmed + block.len() == payload.len()
+                    && error.completion == SubmissionCompletion::DataSentStatusMissing
+                    && !error.audit_failure
+                {
+                    // Hardware can restart after accepting the last DATA OUT,
+                    // before returning its CSW. Preserve that command's error
+                    // and unconfirmed block; only a fresh F1 can prove install.
+                    if port.completion_detached()? {
+                        record.outcome = Outcome::TransferSubmittedPendingCompletion;
+                        return Ok(());
+                    }
+                }
+                return Err(error.message);
+            }
             record.bytes_confirmed += block.len();
             publish_progress(&record, payload.len(), &mut progress);
             if index == 0 || index + 1 == block_count {
@@ -312,7 +374,8 @@ fn bluetooth_observed(
                     return Err("Cancelled after firmware submission".into());
                 }
                 port.check_session()?;
-                let status = command(port, &mut record, 0xf2, &[])?;
+                let status =
+                    command(port, &mut record, 0xf2, &[]).map_err(|error| error.message)?;
                 if status[0] != 0 {
                     return Err(format!("DeviceStatusError({})", status[0]));
                 }
@@ -341,7 +404,7 @@ fn command(
     record: &mut TransferRecord,
     opcode: u8,
     data: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, SubmissionError> {
     let requested = if opcode == 0xf0 { 512 } else { 20 };
     let result = port.command(opcode, data).and_then(|response| {
         let accepted = match opcode {
@@ -381,7 +444,7 @@ fn command(
         }),
         error: result.as_ref().err().map(|error| error.message.clone()),
     });
-    result.map_err(|error| error.message)
+    result
 }
 
 /// A mounted, writable, verified root held open throughout the operation.
@@ -630,6 +693,7 @@ mod tests {
                     message: "write succeeded but audit failed".into(),
                     may_have_been_submitted: true,
                     audit_failure: true,
+                    completion: SubmissionCompletion::Uncertain,
                     known_write_count: Some(n),
                 });
             }
@@ -874,6 +938,9 @@ mod tests {
         refuse_write: bool,
         audit_before_firmware: bool,
         f2_response: Option<Vec<u8>>,
+        missing_status: Option<usize>,
+        audit_at_missing_status: bool,
+        selected_still_present: bool,
     }
     impl BluetoothPort for Fake {
         fn prepare_write(&mut self) -> Result<(), String> {
@@ -895,6 +962,14 @@ mod tests {
                 return Err(SubmissionError::audit_before("host audit failed before F0"));
             }
             self.calls.push(opcode);
+            if self.missing_status == Some(self.calls.len()) {
+                self.bytes.extend_from_slice(data);
+                return Err(SubmissionError {
+                    completion: SubmissionCompletion::DataSentStatusMissing,
+                    audit_failure: self.audit_at_missing_status,
+                    ..SubmissionError::from("status unavailable after exact DATA OUT")
+                });
+            }
             if self.fail == Some(self.calls.len()) {
                 return Err("timeout after submission".into());
             }
@@ -913,11 +988,107 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+        fn completion_detached(&mut self) -> Result<bool, String> {
+            Ok(!self.selected_still_present)
+        }
         fn finish(&mut self) -> Result<(), String> {
             self.cleanup = true;
             Ok(())
         }
     }
+    #[test]
+    fn only_a_fully_sent_last_block_can_await_restart_without_its_status() {
+        for (at, audit, expected) in [
+            (2, false, Outcome::OutcomeUnknown),
+            (4, false, Outcome::OutcomeUnknown),
+            (708, true, Outcome::OutcomeUnknown),
+            (708, false, Outcome::TransferSubmittedPendingCompletion),
+        ] {
+            let mut port = Fake {
+                version: 323,
+                missing_status: Some(at),
+                audit_at_missing_status: audit,
+                ..Fake::default()
+            };
+            let record = bluetooth_release(
+                &mut port,
+                &vec![0x5a; 361472],
+                324,
+                VersionPolicy::UpgradeOnly,
+                || false,
+            );
+            assert_eq!(record.outcome, expected, "at={at} audit={audit}");
+            assert_eq!(record.bytes_confirmed, at.saturating_sub(3) * 512);
+            assert!(record.commands.last().unwrap().error.is_some());
+            assert_eq!(record.commands.last().unwrap().confirmed, 0);
+            assert_eq!(port.calls.last(), Some(&0xf0));
+            assert!(port.cleanup);
+            if at == 708 && !audit {
+                assert_eq!(record.bytes_submitted, 361472);
+                assert_eq!(record.bytes_confirmed, 360960);
+                assert!(record.error.is_none());
+                assert_eq!(port.calls.iter().filter(|&&op| op == 0xf2).count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn final_data_without_status_or_observed_detach_remains_unknown() {
+        let mut port = Fake {
+            version: 323,
+            missing_status: Some(708),
+            selected_still_present: true,
+            ..Fake::default()
+        };
+        let record = bluetooth_release(
+            &mut port,
+            &vec![0; 361472],
+            324,
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(record.outcome, Outcome::OutcomeUnknown);
+        assert_eq!(record.bytes_submitted, 361472);
+        assert_eq!(record.bytes_confirmed, 360960);
+    }
+
+    #[test]
+    fn upgrade_and_explicit_downgrade_pending_receipts_require_fresh_target_readback() {
+        for (current, target, policy) in [
+            (323, 324, VersionPolicy::UpgradeOnly),
+            (324, 323, VersionPolicy::AllowDowngrade),
+        ] {
+            let mut port = Fake {
+                version: current,
+                missing_status: Some(708),
+                ..Fake::default()
+            };
+            let record = bluetooth_release(&mut port, &vec![0; 361472], target, policy, || false);
+            assert_eq!(record.outcome, Outcome::TransferSubmittedPendingCompletion);
+            let mut observation = Verification {
+                component: Component::Bluetooth,
+                previous_generation: 10,
+                generation: 11,
+                same_unit_confirmed: true,
+                model_confirmed: true,
+                version: record.prewrite_version.clone().unwrap(),
+                expected_version: format!("{}.{:02}", target / 100, target % 100),
+            };
+            assert_eq!(verify_restart(record.outcome, &observation), record.outcome);
+            observation.version = observation.expected_version.clone();
+            observation.generation = 10;
+            assert_eq!(verify_restart(record.outcome, &observation), record.outcome);
+            observation.generation = 11;
+            observation.same_unit_confirmed = false;
+            assert_eq!(verify_restart(record.outcome, &observation), record.outcome);
+            observation.same_unit_confirmed = true;
+            assert_eq!(
+                verify_restart(record.outcome, &observation),
+                Outcome::InstalledVerified
+            );
+        }
+    }
+
     #[test]
     fn first_and_final_f2_use_only_received_nonempty_status() {
         let mut port = Fake {

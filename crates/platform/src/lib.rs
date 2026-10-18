@@ -11,7 +11,6 @@ pub mod journal;
 pub mod lock;
 #[cfg(unix)]
 pub mod main_worker;
-pub mod process;
 #[cfg(unix)]
 pub mod volume;
 

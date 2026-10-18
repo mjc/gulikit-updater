@@ -109,7 +109,7 @@ pub trait BulkIo {
     ) -> Result<usize, TransferError>;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum DataPolicy {
     Exact,
     F2Status,
@@ -172,6 +172,24 @@ impl<T: BulkIo> Session<T> {
     }
     pub fn qualified_lun(&self) -> Option<u8> {
         self.qualified_lun
+    }
+    /// A failed exact F0 whose successful DATA stage was followed by no CSW bytes.
+    /// CSW reads are scheduled only after DATA succeeds. Keep the BOT session
+    /// failed: this observation never authorizes another command or replay.
+    pub fn data_sent_status_missing(&self) -> bool {
+        self.failed
+            && self.evidence.as_ref().is_some_and(|evidence| {
+                evidence.opcode == 0xf0
+                    && evidence.requested == 512
+                    && evidence.cbw_actual == Some(31)
+                    && evidence.cbw_error.is_none()
+                    && evidence.data_actual == Some(512)
+                    && evidence.data_in.is_none()
+                    && evidence.csw_reads > 0
+                    && evidence.csw_actual == Some(0)
+                    && evidence.csw_raw.is_empty()
+                    && !evidence.csw_errors.is_empty()
+            })
     }
     pub fn take_evidence(&mut self) -> Option<CommandEvidence> {
         self.evidence.take()
@@ -443,7 +461,7 @@ impl<T: BulkIo> Session<T> {
             // original CSW halt was cleared. Its data count is one, despite the
             // passed wrapper reporting zero residue. Keep both facts in the
             // record; do not relax residue checks for other lengths/commands.
-            let f2_zero_residue_quirk = matches!(policy, DataPolicy::F2Status)
+            let f2_zero_residue_quirk = policy == DataPolicy::F2Status
                 && bytes == [0]
                 && status_actual == 13
                 && status[..4] == *b"USBS"

@@ -93,7 +93,7 @@ impl<'a, P> Recorded<'a, P> {
         known_write_count: Option<usize>,
         actual: impl FnOnce(&T) -> serde_json::Value,
     ) -> Result<T, SubmissionError> {
-        let logged = self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err().map(|error| &error.message),"may_have_been_submitted":result.as_ref().map_or_else(|error|error.may_have_been_submitted, |_|true),"transport":transport}));
+        let logged = self.event(json!({"event":name,"index":self.index,"actual":result.as_ref().ok().map(actual),"error":result.as_ref().err().map(|error| &error.message),"may_have_been_submitted":result.as_ref().map_or_else(|error|error.may_have_been_submitted, |_|true),"error_completion":result.as_ref().err().map(|error|error.completion),"transport":transport}));
         self.index += 1;
         match (result, logged) {
             (Err(mut error), Err(log)) => {
@@ -106,6 +106,7 @@ impl<'a, P> Recorded<'a, P> {
                 message: format!("Operation completed but audit failed: {log}"),
                 may_have_been_submitted: true,
                 audit_failure: true,
+                completion: gulikit_core::update::SubmissionCompletion::Uncertain,
                 known_write_count,
             }),
             (Ok(value), Ok(())) => Ok(value),
@@ -145,6 +146,10 @@ impl<P: BluetoothPort> BluetoothPort for Recorded<'_, P> {
         let result = self.inner.command(opcode, data);
         let transport = self.inner.take_transport_evidence();
         self.submission_result("command_result",result,transport,None,|bytes|json!({"response":bytes,"firmware_bytes_confirmed":if opcode==0xf0{data.len()}else{0}}))
+    }
+    fn completion_detached(&mut self) -> Result<bool, String> {
+        let result = self.inner.completion_detached();
+        self.result("bluetooth_completion_detach", result, |value| json!(value))
     }
     fn finish(&mut self) -> Result<(), String> {
         let result = self.inner.finish();
@@ -274,6 +279,39 @@ mod tests {
             assert!(error.audit_failure);
         }
     }
+    #[test]
+    fn missing_status_disposition_survives_recording_but_an_audit_error_stays_visible() {
+        use gulikit_core::update::SubmissionCompletion;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for writable in [true, false] {
+            let mut journal = if writable {
+                file.reopen().unwrap()
+            } else {
+                File::open(file.path()).unwrap()
+            };
+            let mut port = Recorded::new((), &mut journal);
+            let failure = SubmissionError {
+                completion: SubmissionCompletion::DataSentStatusMissing,
+                ..SubmissionError::from("last F0 status lost")
+            };
+            let error = port
+                .submission_result::<Vec<u8>>("command_result", Err(failure), None, None, |_| {
+                    json!(null)
+                })
+                .unwrap_err();
+            assert_eq!(
+                error.completion,
+                SubmissionCompletion::DataSentStatusMissing
+            );
+            assert_eq!(error.audit_failure, !writable);
+            if writable {
+                let saved: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+                assert_eq!(saved["error_completion"], "data_sent_status_missing");
+            }
+        }
+    }
+
     struct MainReadFake {
         finished: bool,
     }

@@ -219,13 +219,11 @@ use gulikit_updater::updater::ApplicationError as AppError;
 
 fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
     #[cfg(target_os = "macos")]
-    if matches!(
-        &command,
-        Command::Update {
-            component: Component::Main,
-            ..
-        }
-    ) {
+    if let Command::Update {
+        component: Component::Main,
+        ..
+    } = &command
+    {
         return main_supervision::update(command);
     }
     // Package rejection precedes device access and attempt-file creation on every OS.
@@ -237,10 +235,9 @@ fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
     } = &command
     {
         Some(inspect_package(path, *model, *component).map_err(|e| {
-            let (kind, code) = if matches!(e, InspectError::Rejected(_)) {
-                ("package_rejected", 3)
-            } else {
-                ("package_io", 4)
+            let (kind, code) = match &e {
+                InspectError::Rejected(_) => ("package_rejected", 3),
+                InspectError::Io(_) | InspectError::NotFile => ("package_io", 4),
             };
             AppError::new(kind, code, e.to_string())
         })?)
@@ -293,7 +290,7 @@ mod native;
 fn main() -> ExitCode {
     let cli = Cli::parse();
     #[cfg(target_os = "macos")]
-    if matches!(&cli.command, Command::MainGuardian | Command::MainWorker) {
+    if let Command::MainGuardian | Command::MainWorker = &cli.command {
         return main_supervision::internal(cli.command);
     }
     match run(cli, &mut io::stdout().lock(), &mut io::stderr().lock()) {

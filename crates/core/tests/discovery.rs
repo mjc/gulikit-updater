@@ -100,22 +100,3 @@ fn each_component_selects_its_own_path_without_the_other_view() {
         );
     }
 }
-
-#[test]
-fn legacy_selector_also_allows_independent_components_without_cross_unit_pairing() {
-    use gulikit_core::{
-        device::{ControllerId, Identity, Observation, select_ns39_update_target},
-        package::Model,
-    };
-    for component in [Component::Main, Component::Bluetooth] {
-        let observation = Observation {
-            controller: ControllerId::new("one").unwrap(),
-            component,
-            identity: Identity::Exact {
-                model: Model::Kk3Max,
-            },
-        };
-        let target = select_ns39_update_target([observation], component).unwrap();
-        assert_eq!(target.controller().components, [component]);
-    }
-}

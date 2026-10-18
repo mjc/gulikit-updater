@@ -628,3 +628,48 @@ fn partial_status_stall_timeout_and_expired_budget_are_not_recovered() {
         }
     }
 }
+
+#[test]
+fn f0_missing_status_requires_successful_exact_data_and_zero_status_bytes() {
+    for stage in 1..=3 {
+        let mut fake = io();
+        fake.fail_at = Some(stage);
+        let mut session = Session::new(fake);
+        assert!(
+            session
+                .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+                .is_err()
+        );
+        assert_eq!(session.data_sent_status_missing(), stage == 3);
+        let count = session.io_mut().calls.len();
+        assert!(
+            session
+                .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+                .is_err()
+        );
+        assert_eq!(session.io_mut().calls.len(), count);
+    }
+    for response in [
+        vec![0; 5],
+        status(1, 0, 1),
+        status(2, 0, 0),
+        status(1, 1, 0),
+    ] {
+        let mut fake = io();
+        fake.reads = VecDeque::from([response]);
+        let mut session = Session::new(fake);
+        assert!(
+            session
+                .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+                .is_err()
+        );
+        assert!(!session.data_sent_status_missing());
+    }
+    let mut fake = io();
+    fake.reads = VecDeque::from([status(1, 0, 0)]);
+    let mut session = Session::new(fake);
+    session
+        .command(&[0xf0; 10], Direction::Out, &[0; 512], 512)
+        .unwrap();
+    assert!(!session.data_sent_status_missing());
+}

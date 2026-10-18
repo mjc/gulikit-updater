@@ -123,11 +123,7 @@ pub struct PriorAttempt {
 impl PriorAttempt {
     /// Check the receipt before acquiring a new controller session.
     pub fn require_verifiable(&self) -> Result<(), String> {
-        if matches!(
-            self.outcome,
-            Outcome::TransferCompletedAwaitingVerification
-                | Outcome::TransferSubmittedPendingCompletion
-        ) {
+        if self.outcome.awaits_restart_verification() {
             Ok(())
         } else {
             Err("This receipt does not safely await restart verification. Keep a partial or unknown controller connected and unchanged; no new device session or reset is permitted by this receipt.".into())
@@ -148,12 +144,7 @@ impl PriorAttempt {
             .ok_or(
                 "Attempt has no complete result. Keep the controller connected and unchanged; a missing final receipt does not establish that no firmware was submitted. Do not probe or reset until recovery is separately qualified.",
             )?;
-        let component = prior["package"]["component"]
-            .as_str()
-            .ok_or("Missing component")?
-            .parse::<Component>()
-            .map_err(|e| e.to_string())?;
-        let (_, expected_version) = native::attempt_target(&prior)?;
+        let (component, expected_version) = native::attempt_target(&prior)?;
         let outcome = serde_json::from_value(prior["transfer"]["outcome"].clone())
             .map_err(|e| e.to_string())?;
         let generation = prior["target"]["generation"]
@@ -213,8 +204,8 @@ impl From<gulikit_platform::acquisition::AcquisitionError> for ApplicationError 
 }
 mod native;
 
-/// Execute a desktop operation. Native writes remain unavailable pending desktop
-/// supervision and verified rollback acceptance; offline demos use a separate device.
+/// Execute a desktop operation through the shared component transaction and
+/// native ownership boundary. Firmware installation requires fresh readback.
 pub fn execute(
     request: Request,
     cancelled: &mut dyn FnMut() -> bool,
@@ -341,7 +332,7 @@ pub fn operator_action(component: Component, outcome: Outcome) -> &'static str {
                 "The controller completes Main installation and restarts automatically. Once it has restarted, re-enter update mode if needed and use verify with this attempt plus a new host record. Confirm the same physical controller; transfer completion alone does not verify installation."
             }
             Component::Bluetooth => {
-                "Power off and on normally, re-enter update mode, then use verify with this attempt plus a new host record and confirm the same physical controller. Transfer completion does not verify installation."
+                "After the controller completes the transfer and restarts, turn it on normally once, turn it off, then hold Gear first and press the rightmost A to re-enter Bluetooth update mode. Use verify with this attempt plus a new host record and confirm the same physical controller. Only a fresh version read matching the selected target verifies installation."
             }
         },
         Outcome::OutcomeUnknown => {

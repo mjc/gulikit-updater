@@ -14,18 +14,20 @@ tracked separately from portable tests and offline instruction emulation.
 | Bluetooth | 3.24 | 361,472 | 706 |
 | Bluetooth | 5.07 | 345,088 | 674 |
 
-The observed NS39 has passed read-only Bluetooth identity/version qualification.
-The first 3.24 hardware attempt confirmed one 512-byte block, then stopped on a
-stalled command-status read. Its outcome is unknown; complete flashing and
-installed-version verification have not passed on hardware.
-A second attempt cleared that halt and received a passed status wrapper, but
-stopped because the controller returned one F2 byte with zero residue. The
-adapter now recognizes that exact response as a component-specific quirk;
-complete flashing remains a separate hardware check.
-Firmware transfer completion requires every block and both status checks;
-installation requires a fresh independent read after restarting. Hardware
-acceptance evidence and remaining work live in the linked CLI plan and product
-specification.
+KK3 Max Bluetooth 3.23 → 3.24 → 3.23 has passed hardware acceptance using
+original manufacturer archives. Fresh F1 readbacks confirmed both 3.24 after
+the upgrade and 3.23 after the downgrade. This qualifies that Bluetooth pair;
+other release pairs and Main downgrade acceptance remain separate checks.
+
+The controller can restart after receiving the last firmware block, before
+returning its command-status wrapper. Exact successful DATA OUT for every block,
+with all earlier commands confirmed, no final status bytes received, and the
+selected device's expected USB removal observed, produces
+`transfer_submitted_pending_completion`. The missing final command confirmation
+is retained. Only a fresh independent version read after restart can produce
+`installed_verified`. An earlier interruption, failed status, partial transfer or
+audit failure retains an uncertain outcome. Hardware evidence and remaining work
+live in the linked CLI plan and product specification.
 
 ## Development
 
@@ -84,13 +86,12 @@ Put only one controller in update mode. `--confirm-ns39` attests that you checke
 the physical NS39 label and Max controls. USB IDs and the shared F1 signature
 are observed profile evidence, not automatic proof of the model. The native
 adapter checks runtime support for modern IOUSBHost and DeviceSurrender.
-`probe --component bluetooth` unmounts any correlated mounted volumes before
-requesting modern Capture. Read-only cleanup explicitly destroys the capture,
-which resets USB and restarts driver matching; restored storage is checked
-separately. A busy volume refuses without forcing an unmount. After any possible
-firmware submission, cleanup uses no-reset DeviceSurrender and reports storage
-restoration pending, including after final F2 success. No firmware replay or
-automatic reset is used after submission. Other OSes currently support package commands.
+Bluetooth capture requires the qualified update profile with no disk media; it
+refuses profiles with correlated disks rather than unmounting volumes. Read-only
+cleanup destroys the capture, which resets USB and restarts driver matching.
+After possible firmware submission, cleanup uses no-reset DeviceSurrender. If
+the original device has not observably detached, restoration remains pending.
+No firmware replay or automatic reset is used after submission. Other OSes currently support package commands.
 
 BOT transport requests a 20-byte F2 reply and accepts 1–20 received bytes only
 with a matching, successful command-status wrapper and exact residue; byte zero
@@ -124,8 +125,8 @@ write nothing. A newer installed version
 refuses by default; `update --allow-downgrade` explicitly permits installing the
 selected older reviewed release. The record retains that version policy. The
 original manufacturer-supplied Bluetooth 3.23 archive is available in the catalog;
-its availability does not establish device acceptance of downgrade or safe
-recovery from a partial update. This option changes version direction only: package hashes, physical model confirmation,
+physical upgrade and downgrade between 3.23 and 3.24 are verified. Other pairs
+and recovery from a partial update need their own evidence. This option changes version direction only: package hashes, physical model confirmation,
 fresh component readback, session ownership and native qualification still apply.
 There is no general force or equal-version reinstall option. Main copying and raw Bluetooth
 traffic are serialized. A topology change invalidates the active session.
@@ -133,7 +134,8 @@ traffic are serialized. A topology change invalidates the active session.
 Transfer completion is separate from installation verification. Main installation
 finishes with the controller automatically restarting; its own detach is observed
 without manually unmounting it. After a completed Bluetooth transfer, power the
-controller off and on normally. Re-enter update mode if needed for fresh readback. `verify` requires a fresh version read on a new attachment plus explicit
+controller on normally once, then off, then re-enter Bluetooth update mode with
+Gear held before pressing the rightmost A. This fresh entry permits version readback. `verify` requires a fresh version read on a new attachment plus explicit
 confirmation of the same physical controller. No USB serial is available, so
 this assisted association is recorded separately from the machine-read version.
 The required `verify --record` creates a new exclusive host record linking the

@@ -99,19 +99,20 @@ fn worker(channel: &mut Channel) -> Result<(), AppError> {
         .map_err(|error: gulikit_core::package::SelectionError| error.to_string())?;
     let package =
         gulikit_platform::inspect_package(&archive, model, Component::Main).map_err(|error| {
-            let (kind, code) = if matches!(error, gulikit_platform::InspectError::Rejected(_)) {
-                ("package_rejected", 3)
-            } else {
-                ("package_io", 4)
+            let (kind, code) = match &error {
+                gulikit_platform::InspectError::Rejected(_) => ("package_rejected", 3),
+                gulikit_platform::InspectError::Io(_) | gulikit_platform::InspectError::NotFile => {
+                    ("package_io", 4)
+                }
             };
             AppError::new(kind, code, error.to_string())
         })?;
     channel.send(&Message::PackageReady)?;
     let lease = ProcessLock::adopt_worker_stderr()?;
     channel.send(&Message::Ready)?;
-    if !matches!(channel.wait(Duration::from_secs(10))?, Message::Go) {
+    let Message::Go = channel.wait(Duration::from_secs(10))? else {
         return Err("Main worker was not authorized to start".into());
-    }
+    };
     let command = Command::Update {
         path: archive,
         model,
