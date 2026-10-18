@@ -44,9 +44,8 @@ Use the pinned native devenv from this directory:
 devenv shell
 cargo run -- packages
 cargo run -- catalog inspect catalog/official.json --json
-cargo run -- catalog verify /path/to/catalog-envelope.json --trusted-keys /path/to/catalog-keys.json --json
-cargo run -- catalog refresh --envelope /path/to/catalog-envelope.json --cache /path/to/catalog-cache.json --trusted-keys /path/to/catalog-keys.json --json
-cargo run -- catalog cached --cache /path/to/catalog-cache.json --trusted-keys /path/to/catalog-keys.json --json
+cargo run -- catalog refresh --file catalog/official.json --cache /path/to/catalog-cache.json --json
+cargo run -- catalog cached --cache /path/to/catalog-cache.json --json
 cargo run -- package inspect /path/to/KK3_NS38_NS39_V5.9.zip --model kk3-max --component main
 cargo run -- package inspect /path/to/NS38_NS39_BT_V3.24.zip --model kk3-max --component bluetooth --json
 cargo run -- package inspect /path/to/GuliKit_NS38_NS39_NS59_BT_V5.07.zip --model kk3-max --component bluetooth --json
@@ -79,30 +78,21 @@ releases are rejected. A digest match ties the bytes to the reviewed catalog;
 it does not independently establish publisher authenticity.
 
 `catalog inspect` validates local catalog metadata and reports it as unverified.
-It does not check a signature, change the supported package inventory, or access
-a controller. The seed in `catalog/official.json` describes the four compiled
-releases. `catalog verify` checks a signed envelope and requires fresh metadata.
-`catalog refresh` accepts either `--envelope` or an HTTPS `--url` and atomically
-replaces the cache only after authentication, freshness and revision checks.
-`catalog cached` reauthenticates the saved envelope without networking and reports
-expired metadata explicitly. The cache directory must already exist.
+The seed in `catalog/official.json` describes the four compiled releases.
+`catalog refresh` accepts a local `--file` or an HTTPS `--url` and atomically
+replaces the cache after schema and size checks. `catalog cached` inspects it
+offline. These commands do not authorize a firmware write. The cache directory
+must already exist. Failed downloads or invalid metadata preserve the old cache.
+File contents are synced before replacement; Unix also syncs the parent directory.
 
-These commands trust only keys in the operator's explicit `--trusted-keys` file;
-the application does not yet bundle an official catalog root. Obtain public keys
-and confirm their fingerprints through a separate trusted channel. The file uses
-`{"schema_version":1,"keys":[{"id":"release-key","public_key":"<64 lowercase hex characters>"}]}`.
-Multiple pinned keys allow an overlap period during rotation. An envelope cannot
-change the trusted keys. Signing keys stay outside the repository.
-
-Refresh retains the highest authenticated revision present in the cache, even
-after expiry, and rejects different payloads using the same revision. Use
-`--minimum-revision` to enforce a separately known floor when bootstrapping or
-recovering. Removing or restoring the entire cache also removes or restores its
-local revision history; signatures alone cannot detect that filesystem rollback.
-A corrupt cache is preserved: inspect it and choose a new cache path or restore
-a known valid envelope with an appropriate revision floor. File contents are
-synced before atomic replacement; Unix also syncs the containing directory.
-Runtime package selection from authenticated metadata remains tracked work.
+Use whatever signatures or published checksums GuliKit provides for a release.
+The reviewed KK3 pages and packages have no identified vendor signature or
+published cryptographic checksum. Recorded archive/member/payload SHA-256 values
+check consistency with reviewed downloads; they are not vendor authentication.
+There is no project signing-key setup or custom signed catalog envelope.
+HTTPS validates the download connection, while review establishes the mapping
+between official source pages and the original archives. Catalog-driven write
+selection and receipt integration remain tracked work.
 
 The optional archive importer is available through
 `python3 tools/firmware_archive.py --help`. It requires an isolated bare

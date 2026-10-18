@@ -88,49 +88,27 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CatalogCommand {
-    /// Validate a local metadata catalog. Signatures are not checked by this command.
+    /// Validate local catalog metadata without claiming vendor authentication.
     Inspect {
         path: PathBuf,
         #[arg(long)]
         json: bool,
     },
-    /// Authenticate a signed envelope and require fresh metadata.
-    Verify {
-        path: PathBuf,
-        #[arg(long)]
-        trusted_keys: PathBuf,
-        #[arg(long, default_value_t = 1)]
-        minimum_revision: u64,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Inspect the last authenticated cache offline, including its freshness.
+    /// Inspect saved catalog metadata offline.
     Cached {
         #[arg(long)]
         cache: PathBuf,
         #[arg(long)]
-        trusted_keys: PathBuf,
-        #[arg(long, default_value_t = 1)]
-        minimum_revision: u64,
-        #[arg(long)]
         json: bool,
     },
-    /// Authenticate a new envelope and atomically refresh the catalog cache.
+    /// Validate and atomically cache catalog metadata from a file or HTTPS URL.
     Refresh {
-        #[arg(
-            long,
-            required_unless_present = "envelope",
-            conflicts_with = "envelope"
-        )]
+        #[arg(long, required_unless_present = "file", conflicts_with = "file")]
         url: Option<String>,
         #[arg(long, required_unless_present = "url", conflicts_with = "url")]
-        envelope: Option<PathBuf>,
+        file: Option<PathBuf>,
         #[arg(long)]
         cache: PathBuf,
-        #[arg(long)]
-        trusted_keys: PathBuf,
-        #[arg(long, default_value_t = 1)]
-        minimum_revision: u64,
         #[arg(long)]
         json: bool,
     },

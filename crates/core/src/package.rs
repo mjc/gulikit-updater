@@ -1,5 +1,6 @@
 //! Offline inspection of reviewed official firmware packages.
 
+use gulikit_catalog::{Catalog, Entry, ParserId, SoftwareSupport};
 use object::read::pe::PeFile32;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,8 @@ use std::{fmt, str::FromStr};
 
 /// Upper bound checked before reading a package from an untrusted file.
 pub const MAX_ARCHIVE_SIZE: usize = 1_163_538;
+const MAX_CATALOG_ARCHIVE_SIZE: usize = 64 * 1024 * 1024;
+const MAX_CATALOG_MEMBER_SIZE: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,7 +84,7 @@ pub enum PackageError {
         expected: usize,
         actual: usize,
     },
-    #[error("{kind} SHA-256 does not match the reviewed release")]
+    #[error("{kind} SHA-256 does not match the package metadata")]
     Digest { kind: &'static str },
     #[error("invalid ZIP package: {0}")]
     Archive(#[from] zip::result::ZipError),
@@ -95,6 +98,10 @@ pub enum PackageError {
     EmbeddedRange,
     #[error("embedded firmware metadata does not match the reviewed release")]
     EmbeddedMetadata,
+    #[error("catalog entry is ambiguous or unsupported by this package parser")]
+    UnsupportedCatalogEntry,
+    #[error("catalog archive exceeds the inspection size limit")]
+    CatalogArchiveTooLarge,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -105,8 +112,8 @@ pub struct PackageInfo {
     pub payload_size: usize,
     pub payload_sha256: String,
     pub archive_sha256: String,
-    pub source_url: &'static str,
-    pub member: &'static str,
+    pub source_url: String,
+    pub member: String,
 }
 
 #[derive(Debug)]
@@ -117,7 +124,7 @@ pub struct VerifiedPackage {
 }
 
 impl VerifiedPackage {
-    /// Authenticate an original reviewed archive and extract its selected payload offline.
+    /// Validate an original archive against compiled reviewed hashes offline.
     ///
     /// # Errors
     ///
@@ -126,37 +133,8 @@ impl VerifiedPackage {
     /// executable metadata or address ranges. No embedded executable is run.
     pub fn inspect(bytes: &[u8], model: Model, component: Component) -> Result<Self, PackageError> {
         let release = release_from_archive(bytes, model, component)?;
-        let member = read_member(bytes, release.member, release.member_size)?;
-        verify_bytes(
-            &member,
-            release.member_size,
-            release.member_sha256,
-            "member",
-        )?;
-        let payload = match component {
-            Component::Main => member,
-            Component::Bluetooth => extract_bluetooth_payload(&member, release)?,
-        };
-        verify_bytes(
-            &payload,
-            release.payload_size,
-            release.payload_sha256,
-            "payload",
-        )?;
-        Ok(Self {
-            info: PackageInfo {
-                model,
-                component,
-                version: release.version.into(),
-                payload_size: payload.len(),
-                payload_sha256: release.payload_sha256.into(),
-                archive_sha256: release.archive_sha256.into(),
-                source_url: release.source_url,
-                member: release.member,
-            },
-            payload,
-            bluetooth_version: release.bluetooth_version,
-        })
+        let recipe = PackageRecipe::from_release(release);
+        inspect_with_metadata(bytes, model, component, &recipe)
     }
 
     #[must_use]
@@ -171,6 +149,238 @@ impl VerifiedPackage {
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
+}
+
+/// Read-only result of checking a package against catalog metadata.
+///
+/// This type has no payload accessor and cannot be passed to update transactions.
+/// Catalog hashes establish consistency with the supplied metadata, not vendor
+/// publication authenticity; callers must preserve the application's reviewed
+/// publication provenance separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CatalogPackageInspection {
+    info: PackageInfo,
+}
+
+impl CatalogPackageInspection {
+    /// Inspect a package selected from a parsed catalog without authorizing writes.
+    ///
+    /// # Errors
+    /// Rejects oversized archives, ambiguous/unsupported records, and archive,
+    /// member or payload size/digest mismatches.
+    pub fn inspect(
+        bytes: &[u8],
+        catalog: &Catalog,
+        model: Model,
+        component: Component,
+    ) -> Result<Self, PackageError> {
+        let recipe = catalog_recipe(bytes, catalog, model, component)?;
+        let checked = inspect_verified_archive(bytes, model, component, &recipe)?;
+        Ok(Self { info: checked.info })
+    }
+
+    #[must_use]
+    pub fn info(&self) -> &PackageInfo {
+        &self.info
+    }
+}
+
+struct PackageRecipe<'a> {
+    version: &'a str,
+    archive_size: usize,
+    archive_sha256: &'a str,
+    source_url: &'a str,
+    member: &'a str,
+    member_size: usize,
+    member_sha256: &'a str,
+    payload_size: usize,
+    payload_sha256: &'a str,
+    bluetooth_version: Option<u16>,
+}
+
+impl<'a> PackageRecipe<'a> {
+    fn from_release(release: &'a Release) -> Self {
+        Self {
+            version: release.version,
+            archive_size: release.archive_size,
+            archive_sha256: release.archive_sha256,
+            source_url: release.source_url,
+            member: release.member,
+            member_size: release.member_size,
+            member_sha256: release.member_sha256,
+            payload_size: release.payload_size,
+            payload_sha256: release.payload_sha256,
+            bluetooth_version: release.bluetooth_version,
+        }
+    }
+
+    fn from_entry(entry: &'a Entry) -> Result<Self, PackageError> {
+        if entry.software_support() != SoftwareSupport::Supported {
+            return Err(PackageError::UnsupportedCatalogEntry);
+        }
+        let bluetooth_version = match entry.parser_id() {
+            ParserId::Kk3MainBinaryV1
+                if entry.component() == "main"
+                    && entry.member_size() == 51_500
+                    && entry.payload_size() == 51_500 =>
+            {
+                None
+            }
+            ParserId::Kk3BluetoothPeV1 if entry.component() == "bluetooth" => {
+                Some(parse_bluetooth_version(entry.version())?)
+            }
+            _ => return Err(PackageError::UnsupportedCatalogEntry),
+        };
+        let archive_size = usize::try_from(entry.archive_size())
+            .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
+        let member_size = usize::try_from(entry.member_size())
+            .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
+        let payload_size = usize::try_from(entry.payload_size())
+            .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
+        if archive_size == 0
+            || archive_size > MAX_CATALOG_ARCHIVE_SIZE
+            || member_size == 0
+            || member_size > MAX_CATALOG_MEMBER_SIZE
+            || payload_size == 0
+            || payload_size > MAX_CATALOG_MEMBER_SIZE
+            || (bluetooth_version.is_some() && !payload_size.is_multiple_of(512))
+        {
+            return Err(PackageError::UnsupportedCatalogEntry);
+        }
+        Ok(Self {
+            version: entry.version(),
+            archive_size,
+            archive_sha256: entry.archive_sha256().as_str(),
+            source_url: entry.source_url(),
+            member: entry.member(),
+            member_size,
+            member_sha256: entry.member_sha256().as_str(),
+            payload_size,
+            payload_sha256: entry.payload_sha256().as_str(),
+            bluetooth_version,
+        })
+    }
+}
+
+fn catalog_recipe<'a>(
+    bytes: &[u8],
+    catalog: &'a Catalog,
+    model: Model,
+    component: Component,
+) -> Result<PackageRecipe<'a>, PackageError> {
+    if bytes.len() > MAX_CATALOG_ARCHIVE_SIZE {
+        return Err(PackageError::CatalogArchiveTooLarge);
+    }
+    let product = model.to_string();
+    let component_name = component.to_string();
+    let matching: Vec<_> = catalog
+        .entries()
+        .iter()
+        .filter(|entry| entry.product() == product && entry.component() == component_name)
+        .collect();
+    let first_match = matching
+        .first()
+        .ok_or(PackageError::UnsupportedCatalogEntry)?;
+    let expected = usize::try_from(first_match.archive_size()).unwrap_or(usize::MAX);
+    let byte_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let sized: Vec<_> = matching
+        .into_iter()
+        .filter(|entry| entry.archive_size() == byte_length)
+        .collect();
+    if sized.is_empty() {
+        return Err(PackageError::Size {
+            kind: "archive",
+            expected,
+            actual: bytes.len(),
+        });
+    }
+    let digest = Sha256::digest(bytes);
+    let mut matching_archive = sized
+        .into_iter()
+        .filter(|entry| digest_matches(&digest, entry.archive_sha256().as_str()));
+    let entry = matching_archive
+        .next()
+        .ok_or(PackageError::Digest { kind: "archive" })?;
+    if matching_archive.next().is_some() {
+        return Err(PackageError::UnsupportedCatalogEntry);
+    }
+    PackageRecipe::from_entry(entry)
+}
+
+fn parse_bluetooth_version(version: &str) -> Result<u16, PackageError> {
+    let (major, minor) = version
+        .split_once('.')
+        .ok_or(PackageError::UnsupportedCatalogEntry)?;
+    if minor.len() != 2
+        || !major.bytes().all(|byte| byte.is_ascii_digit())
+        || !minor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(PackageError::UnsupportedCatalogEntry);
+    }
+    let major = major
+        .parse::<u16>()
+        .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
+    let minor = minor
+        .parse::<u16>()
+        .map_err(|_| PackageError::UnsupportedCatalogEntry)?;
+    if format!("{major}.{minor:02}") != version {
+        return Err(PackageError::UnsupportedCatalogEntry);
+    }
+    major
+        .checked_mul(100)
+        .and_then(|value| value.checked_add(minor))
+        .ok_or(PackageError::UnsupportedCatalogEntry)
+}
+
+fn inspect_with_metadata(
+    bytes: &[u8],
+    model: Model,
+    component: Component,
+    recipe: &PackageRecipe<'_>,
+) -> Result<VerifiedPackage, PackageError> {
+    if bytes.len() != recipe.archive_size {
+        return Err(PackageError::Size {
+            kind: "archive",
+            expected: recipe.archive_size,
+            actual: bytes.len(),
+        });
+    }
+    verify_bytes(bytes, recipe.archive_size, recipe.archive_sha256, "archive")?;
+    inspect_verified_archive(bytes, model, component, recipe)
+}
+
+fn inspect_verified_archive(
+    bytes: &[u8],
+    model: Model,
+    component: Component,
+    recipe: &PackageRecipe<'_>,
+) -> Result<VerifiedPackage, PackageError> {
+    let member = read_member(bytes, recipe.member, recipe.member_size)?;
+    verify_bytes(&member, recipe.member_size, recipe.member_sha256, "member")?;
+    let payload = match component {
+        Component::Main => member,
+        Component::Bluetooth => extract_bluetooth_payload(&member, recipe)?,
+    };
+    verify_bytes(
+        &payload,
+        recipe.payload_size,
+        recipe.payload_sha256,
+        "payload",
+    )?;
+    Ok(VerifiedPackage {
+        info: PackageInfo {
+            model,
+            component,
+            version: recipe.version.to_owned(),
+            payload_size: payload.len(),
+            payload_sha256: recipe.payload_sha256.to_owned(),
+            archive_sha256: recipe.archive_sha256.to_owned(),
+            source_url: recipe.source_url.to_owned(),
+            member: recipe.member.to_owned(),
+        },
+        payload,
+        bluetooth_version: recipe.bluetooth_version,
+    })
 }
 
 /// Reviewed source data is compiled into the application, never loaded from a
@@ -386,7 +596,10 @@ fn pe_bytes<'a>(
     exe.get(start..end).ok_or(PackageError::EmbeddedRange)
 }
 
-fn extract_bluetooth_payload(exe: &[u8], release: &Release) -> Result<Vec<u8>, PackageError> {
+fn extract_bluetooth_payload(
+    exe: &[u8],
+    release: &PackageRecipe<'_>,
+) -> Result<Vec<u8>, PackageError> {
     let image = PeFile32::parse(exe)?;
     let identity = pe_bytes(&image, exe, 0x17_32d0, 16)?;
     let version = pe_bytes(&image, exe, 0x17_32e0, 2)?;
@@ -492,8 +705,22 @@ mod tests {
     #[test]
     fn malformed_executables_are_rejected_by_the_pe_parser() {
         assert!(matches!(
-            extract_bluetooth_payload(b"not a PE executable", &RELEASES[1]),
+            extract_bluetooth_payload(
+                b"not a PE executable",
+                &PackageRecipe::from_release(&RELEASES[1]),
+            ),
             Err(PackageError::Executable(_))
         ));
+    }
+
+    #[test]
+    fn catalog_bluetooth_versions_must_use_canonical_ascii_digits() {
+        assert_eq!(parse_bluetooth_version("3.24").unwrap(), 324);
+        for version in ["03.24", "3.+1", "3.2", "3.024", "3.x4"] {
+            assert!(matches!(
+                parse_bluetooth_version(version),
+                Err(PackageError::UnsupportedCatalogEntry)
+            ));
+        }
     }
 }

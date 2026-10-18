@@ -2,10 +2,8 @@
 //!
 //! Catalog entries describe files, parser capability, software support and
 //! hardware acceptance. [`Catalog::parse`] validates descriptive metadata only;
-//! [`auth`] binds signed metadata to caller-pinned keys. Neither operation
-//! constructs a `VerifiedPackage` or authorizes installation.
-
-pub mod auth;
+//! a digest match checks consistency with a catalog record. Catalog parsing
+//! does not establish vendor authenticity or authorize installation.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
