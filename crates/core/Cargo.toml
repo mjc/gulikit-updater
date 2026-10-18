@@ -13,7 +13,7 @@ thiserror.workspace = true
 sha2 = "0.11"
 hex = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate"] }
-object = { version = "0.39", default-features = false, features = [
+object = { version = "0.40", default-features = false, features = [
   "read_core",
   "pe",
   "std",

@@ -29,6 +29,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.99.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.15.0"
       - name: Build native release executables
         run: bash scripts/build_macos.sh
       - name: Import distribution credentials into a temporary keychain
@@ -55,7 +58,7 @@ jobs:
           if [ -f "$RUNNER_TEMP/gulikit-signing.keychain-db" ]; then
             /usr/bin/security delete-keychain "$RUNNER_TEMP/gulikit-signing.keychain-db"
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-${{ matrix.arch }}-notarized
           path: artifacts/distribution/*
@@ -63,7 +66,7 @@ jobs:
           retention-days: 14
       - name: Retain notarization diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-${{ matrix.arch }}-notary-diagnostics
           path: artifacts/distribution/*notary*.json
@@ -89,7 +92,7 @@ jobs:
           Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           ./scripts/package_windows.ps1 -Binaries target/x86_64-pc-windows-msvc/release
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-x86_64-unsigned
           path: artifacts/distribution/*

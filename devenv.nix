@@ -14,7 +14,7 @@
     with pkgs;
     [
       cargo-nextest
-      python3
+      python315
       uv
     ]
     ++ lib.optionals stdenv.hostPlatform.isLinux [
@@ -34,7 +34,10 @@
         taplo.enable = true;
         ruff-format.enable = true;
         prettier.enable = true;
-        clang-format.enable = true;
+        clang-format = {
+          enable = true;
+          package = pkgs.llvmPackages_23.clang-tools;
+        };
         google-java-format.enable = true;
       };
       settings.global.excludes = [ "artifacts/**" ];
