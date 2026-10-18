@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::{fs::File, io::Write};
 
+#[cfg(unix)]
 const ATTEMPT_SIZE_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Open the attempt itself without following a symlink or waiting for a FIFO writer.
