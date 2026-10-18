@@ -62,6 +62,7 @@ fn native_update_is_unavailable_before_package_io_or_dialogs() {
     assert!(inspect_selected_package(&path, Component::Main).is_err());
     let mut device = NativeDevice;
     let work = Work::Update {
+        policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
         path: path.clone(),
         component: Component::Main,
         attachment: Attachment {
@@ -167,6 +168,7 @@ fn selected_vendor_archives_are_inspectable_and_changed_archives_are_rejected() 
         std::fs::write(&selected, bytes).unwrap();
         assert!(inspect_selected_package(&selected, component).is_err());
         let work = Work::Update {
+            policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
             path: selected,
             component,
             attachment: Attachment {

@@ -145,6 +145,11 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     update_text(&mut state.status, status);
     update_log(&mut state.log, v.log);
     ui.set_state(state);
+    // Widget selection writes its in-out property. Reapply the model indices
+    // through two-way bindings after publishing each new choices model.
+    ui.set_catalog_product_index(v.catalog_product_index);
+    ui.set_catalog_component_index(v.catalog_component_index);
+    ui.set_catalog_version_index(v.catalog_version_index);
 }
 
 fn string_model(values: &[String]) -> slint::ModelRc<slint::SharedString> {

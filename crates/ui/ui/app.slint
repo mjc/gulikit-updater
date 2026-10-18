@@ -160,6 +160,9 @@ export component AppWindow inherits Window {
     callback cancel-operation();
     in-out property <bool> details-open: false;
     in-out property <bool> catalog-details-open: false;
+    in-out property <int> catalog-product-index: -1;
+    in-out property <int> catalog-component-index: -1;
+    in-out property <int> catalog-version-index: -1;
     in-out property <bool> log-open: false;
     in-out property <bool> rollback-allowed: false;
     property <length> sidebar-width: 280px;
@@ -237,15 +240,15 @@ export component AppWindow inherits Window {
                                     spacing: 8px;
                                     VerticalLayout { spacing: 3px; horizontal-stretch: 1; min-width: 0px;
                                         Label { text: "Product"; font-size: 11px; }
-                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog product"; model: root.state.catalog-products; current-index: root.state.catalog-product-index; selected(value) => { root.select-catalog-product(self.current-index); } }
+                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog product"; model: root.state.catalog-products; current-index <=> root.catalog-product-index; selected(value) => { root.select-catalog-product(self.current-index); } }
                                     }
                                     VerticalLayout { spacing: 3px; horizontal-stretch: 1; min-width: 0px;
                                         Label { text: "Component"; font-size: 11px; }
-                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog component"; model: root.state.catalog-components; current-index: root.state.catalog-component-index; selected(value) => { root.select-catalog-component(self.current-index); } }
+                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog component"; model: root.state.catalog-components; current-index <=> root.catalog-component-index; selected(value) => { root.select-catalog-component(self.current-index); } }
                                     }
                                     VerticalLayout { spacing: 3px; horizontal-stretch: 1; min-width: 0px;
                                         Label { text: "Version"; font-size: 11px; }
-                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog version"; model: root.state.catalog-versions; current-index: root.state.catalog-version-index; selected(value) => { root.select-catalog-version(self.current-index); } }
+                                        ComboBox { min-width: 80px; enabled: root.state.can-troubleshoot; accessible-label: "Catalog version"; model: root.state.catalog-versions; current-index <=> root.catalog-version-index; selected(value) => { root.select-catalog-version(self.current-index); } }
                                     }
                                 }
                                 HorizontalLayout {

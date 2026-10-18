@@ -80,9 +80,16 @@ class FirmwareArchiveTests(unittest.TestCase):
         self.run_git(self.source_repo, "branch", "-M", "main")
         self.source_head = self.run_git(self.source_repo, "rev-parse", "HEAD")
         self.archive = self.root / "archive.git"
-        self.run_git(self.root, "init", "--bare", str(self.archive))
+        self.init_archive(self.archive)
         self.zip1 = self.make_zip("one.zip", "firmware.bin", b"firmware one")
         self.zip2 = self.make_zip("two.zip", "firmware.bin", b"firmware two")
+
+    def init_archive(self, path, *options):
+        self.run_git(self.root, "init", "--bare", *options, str(path))
+        # Fresh CI runners have no global author identity. Keep fixture commits
+        # independent of developer configuration and preserve real importer policy.
+        self.run_git(path, "config", "user.name", "Archive Test")
+        self.run_git(path, "config", "user.email", "archive@example.test")
 
     def cleanup_gpg_agent(self):
         subprocess.run(
@@ -129,7 +136,71 @@ class FirmwareArchiveTests(unittest.TestCase):
                 len(data) if size is None else size,
             )
 
+    def append_signed_descendant(self, archive, tip, updates, message):
+        index = self.root / f"{archive.name}-{message.replace(' ', '-')}-index"
+        env = {**self.gpg_env, "GIT_INDEX_FILE": str(index)}
+        self.run_git(archive, "read-tree", tip, env=env)
+        for path, contents in updates.items():
+            blob = (
+                subprocess.run(
+                    ["git", f"--git-dir={archive}", "hash-object", "-w", "--stdin"],
+                    input=contents,
+                    env=self.gpg_env,
+                    check=True,
+                    capture_output=True,
+                )
+                .stdout.decode()
+                .strip()
+            )
+            self.run_git(
+                archive,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"100644,{blob},{path}",
+                env=env,
+            )
+        tree = self.run_git(archive, "write-tree", env=env)
+        commit = subprocess.run(
+            [
+                "git",
+                f"--git-dir={archive}",
+                "-c",
+                "gpg.format=openpgp",
+                "-c",
+                f"user.signingkey={self.key}",
+                "commit-tree",
+                tree,
+                "-p",
+                tip,
+                "-S",
+                "-m",
+                message,
+            ],
+            env=self.gpg_env,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        self.run_git(
+            archive,
+            "update-ref",
+            "refs/heads/archive",
+            commit,
+            tip,
+        )
+        return commit
+
     def test_two_signed_append_only_imports_preserve_hash_provenance_and_source(self):
+        self.run_git(
+            self.archive,
+            "config",
+            "filter.archive-test.clean",
+            "tr a-z A-Z",
+        )
+        self.run_git(self.archive, "config", "filter.archive-test.smudge", "cat")
+        (self.archive / "info" / "attributes").write_text("*.zip filter=archive-test\n")
+        self.assertNotEqual(self.zip1.read_bytes().upper(), self.zip1.read_bytes())
         first = self.import_one(self.zip1, "1.0")
         second = self.import_one(self.zip2, "2.0")
         self.assertEqual(
@@ -204,7 +275,7 @@ class FirmwareArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full GPG signing fingerprint"):
             self.import_one(self.zip1, "1", key=" ")
         with self.assertRaises(ValueError):
-            self.import_one(self.zip1, "1", key="missing-key")
+            self.import_one(self.zip1, "1", key="F" * 40)
         self.assertEqual(
             subprocess.run(
                 ["git", f"--git-dir={self.archive}", "show-ref"], capture_output=True
@@ -231,6 +302,75 @@ class FirmwareArchiveTests(unittest.TestCase):
             firmware_archive.safe_segment("../bad", "model", lower=True)
         with self.assertRaisesRegex(ValueError, "official HTTPS"):
             firmware_archive.official_source("https://www.gulikit.com/product/123?x=1")
+
+    def test_retrieved_at_requires_complete_utc_time(self):
+        self.assertEqual(
+            firmware_archive.validate_timestamp("2026-10-18T12:30:00Z"),
+            "2026-10-18T12:30:00Z",
+        )
+        self.assertEqual(
+            firmware_archive.validate_timestamp("2026-10-18T12:30:00.125Z"),
+            "2026-10-18T12:30:00.125Z",
+        )
+        for timestamp in [
+            "2026-10-18Z",
+            "2026-10-18T12:30Z",
+            "2026-10-18T12:30:00+00:00",
+            "2026-02-30T12:30:00Z",
+            "٢٠٢٦-10-18T12:30:00Z",
+        ]:
+            with self.subTest(timestamp=timestamp), self.assertRaises(ValueError):
+                firmware_archive.validate_timestamp(timestamp)
+
+    def test_historical_pairs_are_revalidated_before_append(self):
+        zip_path = "firmware/kk3-max/bluetooth/bad.zip"
+        provenance_path = "firmware/kk3-max/bluetooth/bad.json"
+        for case in (
+            "malformed provenance",
+            "size mismatch",
+            "hash mismatch",
+            "invalid ZIP",
+        ):
+            with self.subTest(case=case):
+                archive = self.root / (case.replace(" ", "-") + ".git")
+                self.init_archive(archive)
+                root = self.import_one(self.zip1, "root", archive=archive)
+                provenance_bytes = subprocess.run(
+                    [
+                        "git",
+                        f"--git-dir={archive}",
+                        "show",
+                        f"{root}:firmware/kk3-max/bluetooth/root.json",
+                    ],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+                provenance = json.loads(provenance_bytes)
+                provenance["version"] = "bad"
+                provenance["zip"] = zip_path
+                archive_bytes = self.zip1.read_bytes()
+                if case == "size mismatch":
+                    provenance["size"] += 1
+                elif case == "hash mismatch":
+                    provenance["sha256"] = "0" * 64
+                elif case == "invalid ZIP":
+                    archive_bytes = b"not a ZIP archive"
+                    provenance["size"] = len(archive_bytes)
+                    provenance["sha256"] = hashlib.sha256(archive_bytes).hexdigest()
+                bad_provenance = (
+                    json.dumps(provenance, sort_keys=True, indent=2) + "\n"
+                ).encode()
+                if case == "malformed provenance":
+                    bad_provenance = b"{"
+                # Add a new signed pair. Replacing the root pair would stop at
+                # the earlier append-only check and never test content validation.
+                updates = {zip_path: archive_bytes, provenance_path: bad_provenance}
+                tip = self.append_signed_descendant(archive, root, updates, case)
+                with self.assertRaisesRegex(ValueError, "provenance|size|SHA-256|ZIP"):
+                    self.import_one(self.zip2, "next", archive=archive)
+                self.assertEqual(
+                    self.run_git(archive, "rev-parse", "refs/heads/archive"), tip
+                )
 
     def test_zip_payload_crc_corruption_is_rejected(self):
         corrupt = self.root / "corrupt.zip"
@@ -349,7 +489,7 @@ class FirmwareArchiveTests(unittest.TestCase):
             self.import_one(self.zip2, "next")
 
         unsigned_archive = self.root / "unsigned.git"
-        self.run_git(self.root, "init", "--bare", str(unsigned_archive))
+        self.init_archive(unsigned_archive)
         signed_root = self.import_one(self.zip1, "root", archive=unsigned_archive)
         unsigned_tree = self.run_git(
             unsigned_archive, "rev-parse", f"{signed_root}^{{tree}}"
@@ -499,7 +639,7 @@ class FirmwareArchiveTests(unittest.TestCase):
         self.import_one(self.zip2, "subkey-two", key=primary)
 
         wrong_identity_archive = self.root / "wrong-identity.git"
-        self.run_git(self.root, "init", "--bare", str(wrong_identity_archive))
+        self.init_archive(wrong_identity_archive)
         original_tip = self.import_one(
             self.zip1, "wrong", archive=wrong_identity_archive, key=self.key
         )
@@ -514,9 +654,7 @@ class FirmwareArchiveTests(unittest.TestCase):
 
     def test_sha256_bare_archive_and_compare_and_swap_race(self):
         sha_archive = self.root / "sha256.git"
-        self.run_git(
-            self.root, "init", "--bare", "--object-format=sha256", str(sha_archive)
-        )
+        self.init_archive(sha_archive, "--object-format=sha256")
         first = self.import_one(self.zip1, "1", archive=sha_archive)
         self.assertEqual(len(first), 64)
         self.assertEqual(
@@ -553,9 +691,7 @@ class FirmwareArchiveTests(unittest.TestCase):
     ):
         archive_tip = self.import_one(self.zip1, "catalog")
         catalog_repo = self.root / "catalog.git"
-        self.run_git(
-            self.root, "init", "--bare", "--initial-branch=main", str(catalog_repo)
-        )
+        self.init_archive(catalog_repo, "--initial-branch=main")
         self.run_git(
             self.root,
             "--git-dir",

@@ -6,7 +6,7 @@ use gulikit_catalog::{
 use gulikit_core::{
     package::{Component, Model, PackageInfo, catalog},
     update::{Outcome, Progress, verify_restart},
-    version::VersionDecision,
+    version::{VersionDecision, VersionPolicy},
 };
 use gulikit_updater::updater::{
     Attachment, Attempt, Inspection, PriorAttempt, Readback, ReceiptIdentity,
@@ -29,6 +29,7 @@ pub enum Work {
         component: Component,
         attachment: Attachment,
         confirmed: bool,
+        policy: VersionPolicy,
     },
     Verify {
         attempt: PathBuf,
@@ -545,6 +546,9 @@ impl LiveApp {
     }
 
     pub fn set_allow_rollback(&mut self, allow: bool) {
+        if !self.can_catalog_action() {
+            return;
+        }
         if !allow {
             self.allow_rollback = false;
         } else if self.can_allow_rollback() {
@@ -618,12 +622,14 @@ impl LiveApp {
             && self.selected_decision() == Some(VersionDecision::Eligible)
     }
     fn selected_decision(&self) -> Option<VersionDecision> {
-        let policy = if self.allow_rollback {
-            gulikit_core::version::VersionPolicy::AllowDowngrade
+        self.selected_decision_with_policy(self.selected_policy())
+    }
+    fn selected_policy(&self) -> VersionPolicy {
+        if self.allow_rollback {
+            VersionPolicy::AllowDowngrade
         } else {
-            gulikit_core::version::VersionPolicy::UpgradeOnly
-        };
-        self.selected_decision_with_policy(policy)
+            VersionPolicy::UpgradeOnly
+        }
     }
     fn selected_decision_with_policy(
         &self,
@@ -645,6 +651,7 @@ impl LiveApp {
             component: self.component,
             attachment: self.attachment?,
             confirmed: self.confirmed,
+            policy: self.selected_policy(),
         };
         self.progress = Progress {
             submitted: 0,
@@ -854,7 +861,8 @@ impl LiveApp {
         }
     }
     fn transfer_matches_request(&self, result: &Attempt) -> bool {
-        result.package.component == self.component
+        result.transfer.version_policy == self.selected_policy()
+            && result.package.component == self.component
             && self.attachment == Some(Attachment::from(&result.target))
             && self
                 .package

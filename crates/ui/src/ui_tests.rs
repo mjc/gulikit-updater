@@ -275,11 +275,41 @@ fn catalog_controls_render_and_select_reviewed_historical_release_without_contro
         "Catalog hashes check consistency with supplied metadata; publisher authenticity is not established.",
     );
     element(&app.ui, "Parser: kk3_bluetooth_pe_v1");
+    scroll_catalog(&app.ui, 1000.);
     click(&app.ui, "Import downloaded ZIP…");
     match app.work.try_recv().expect("import request emitted") {
         gulikit_ui::live::Work::ImportRelease(entry) => assert_eq!(entry.version(), "3.23"),
         other => panic!("unexpected catalog action: {other:?}"),
     }
+}
+
+#[test]
+fn catalog_selectors_follow_model_after_user_selection_and_scope_reset() {
+    let catalog =
+        gulikit_catalog::Catalog::parse(include_bytes!("../../../catalog/official.json")).unwrap();
+    let app = LiveHarness::new_catalog(catalog);
+    choose_combo_option(&app.ui, "Catalog component", "bluetooth");
+    choose_combo_option(&app.ui, "Catalog version", "3.23");
+    assert_eq!(
+        element(&app.ui, "Catalog version")
+            .accessible_value()
+            .unwrap(),
+        "3.23"
+    );
+    // Re-selecting a product resets the model to its newest component release.
+    // A one-way widget index binding would stay broken at historical index 2.
+    choose_combo_option(&app.ui, "Catalog product", "kk3-max");
+    assert_eq!(app.ui.get_state().catalog_version_index, 0);
+    assert_eq!(
+        element(&app.ui, "Catalog version")
+            .accessible_value()
+            .unwrap(),
+        "5.07"
+    );
+    click(&app.ui, "Import downloaded ZIP…");
+    assert!(
+        matches!(app.work.try_recv().unwrap(), gulikit_ui::live::Work::ImportRelease(entry) if entry.version() == "5.07")
+    );
 }
 
 fn assert_selector_text_visible(ui: &AppWindow, label: &str) {

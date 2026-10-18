@@ -1,4 +1,5 @@
 use gulikit_core::package::Component;
+use gulikit_core::version::VersionPolicy;
 use gulikit_ui::{
     Page,
     backend::Device,
@@ -116,4 +117,64 @@ fn simulated_cancellation_after_submission_keeps_the_outcome_uncertain() {
     assert_eq!(app.view().page, Page::Failed);
     assert!(app.view().notice.contains("No retry"));
     assert!(app.view().progress.confirmed < app.view().progress.total);
+}
+
+#[test]
+fn explicit_downgrade_policy_reaches_demo_transfer_and_requires_fresh_readback() {
+    use gulikit_ui::demo::Profile;
+
+    let mut device = DemoDevice::with_transfer_wait(|_| {});
+    let mut app = LiveApp::default();
+    let cancelled = AtomicBool::new(false);
+    let setup = app.configure_demo(Profile::Newer).unwrap();
+    app.accept(device.run(setup, &cancelled, &mut |_| {}).unwrap());
+    let selection = app.choose_package().unwrap();
+    app.accept(device.run(selection, &cancelled, &mut |_| {}).unwrap());
+
+    assert!(app.view().can_allow_rollback);
+    assert!(app.start().is_none(), "downgrade needs explicit consent");
+    app.set_allow_rollback(true);
+    let work = app.start().expect("consented downgrade is eligible");
+    app.set_allow_rollback(false);
+    assert!(
+        app.view().allow_rollback,
+        "pending request keeps its captured policy"
+    );
+    let Work::Update {
+        path,
+        component,
+        attachment,
+        confirmed,
+        policy,
+    } = &work
+    else {
+        panic!("expected update request")
+    };
+    assert_eq!(*policy, VersionPolicy::AllowDowngrade);
+
+    // The worker independently enforces the policy carried by the request.
+    let refused = Work::Update {
+        path: path.clone(),
+        component: *component,
+        attachment: *attachment,
+        confirmed: *confirmed,
+        policy: VersionPolicy::UpgradeOnly,
+    };
+    assert!(device.run(refused, &cancelled, &mut |_| {}).is_err());
+
+    let result = device
+        .run(work, &cancelled, &mut |event| app.accept(event))
+        .unwrap();
+    app.accept(result);
+    assert_eq!(app.view().page, Page::Restart);
+    assert_eq!(app.view().installed, "6.0");
+    assert_ne!(app.view().installed, app.view().target);
+
+    app.confirm_same_controller(true);
+    let verification = app.primary().expect("restart requires readback");
+    assert!(matches!(&verification, Work::Verify { .. }));
+    app.accept(device.run(verification, &cancelled, &mut |_| {}).unwrap());
+    assert_eq!(app.view().page, Page::Verified);
+    assert_eq!(app.view().installed, "5.9");
+    assert_eq!(app.view().installed, app.view().target);
 }

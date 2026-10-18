@@ -156,7 +156,7 @@ fn symlink_cache_is_refused_without_following_or_replacing_target() {
 
 #[test]
 fn shared_reader_bounds_local_files_and_refuses_special_files() {
-    let (directory, path) = setup();
+    let (_directory, path) = setup();
     fs::write(&path, b"12345").expect("regular file");
     assert_eq!(read_catalog_file(&path, 5).expect("at limit"), b"12345");
     assert!(matches!(
@@ -167,16 +167,17 @@ fn shared_reader_bounds_local_files_and_refuses_special_files() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-        let target = directory.path().join("target");
+        let directory = path.parent().expect("fixture directory");
+        let target = directory.join("target");
         fs::write(&target, b"data").expect("target");
-        let link = directory.path().join("link");
+        let link = directory.join("link");
         symlink(target, &link).expect("symlink");
         assert!(matches!(
             read_catalog_file(&link, 32),
             Err(CatalogCacheError::UnsafeFile)
         ));
 
-        let fifo = directory.path().join("fifo");
+        let fifo = directory.join("fifo");
         nix::unistd::mkfifo(
             &fifo,
             nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
@@ -220,4 +221,31 @@ fn concurrent_refreshes_leave_one_complete_parseable_catalog() {
         cache.load().expect("complete cached metadata").unwrap(),
         Catalog::parse(&bytes).unwrap()
     );
+}
+
+#[test]
+fn readers_do_not_require_a_writable_lock_path_or_exclude_each_other() {
+    let (_directory, path) = setup();
+    fs::write(&path, include_bytes!("../../../catalog/official.json")).expect("cached metadata");
+    // A directory cannot be opened as a lock file even by an elevated test user.
+    // Reading an existing cache must never try to create or acquire this path.
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    fs::create_dir(std::path::PathBuf::from(lock_path)).expect("unusable lock path");
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                cache(&path)
+                    .load()
+                    .expect("read without writer lock")
+                    .expect("cache exists")
+                    .entries()
+                    .len()
+            })
+        })
+        .collect();
+    for reader in readers {
+        assert_eq!(reader.join().unwrap(), 4);
+    }
 }

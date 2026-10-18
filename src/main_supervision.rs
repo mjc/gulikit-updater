@@ -22,7 +22,7 @@ use std::{
 struct Request {
     archive: Vec<u8>,
     record: Vec<u8>,
-    catalog: Option<Vec<u8>>,
+    catalog: Option<String>,
     model: String,
     allow_downgrade: bool,
     confirm_ns39: bool,
@@ -45,6 +45,10 @@ pub fn update(command: Command, catalog: Option<Vec<u8>>) -> Result<Value, AppEr
     else {
         return Err("Main update request required".into());
     };
+    let catalog = catalog
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|error| AppError::new("catalog_rejected", 3, error.to_string()))?;
     let request = Request {
         archive: path.as_os_str().as_bytes().to_vec(),
         record: record.as_os_str().as_bytes().to_vec(),
@@ -138,7 +142,7 @@ fn inspect_worker_package(
         .model
         .parse()
         .map_err(|error: gulikit_core::package::SelectionError| error.to_string())?;
-    let package = if let Some(bytes) = request.catalog.as_deref() {
+    let package = if let Some(bytes) = request.catalog.as_deref().map(str::as_bytes) {
         let catalog = Catalog::parse(bytes)
             .map_err(|error| AppError::new("catalog_rejected", 3, error.to_string()))?;
         gulikit_platform::inspect_catalog_package(&archive, &catalog, model, Component::Main)
@@ -206,6 +210,7 @@ pub fn internal(command: &Command) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gulikit_catalog::MAX_CATALOG_BYTES;
     use sha2::{Digest, Sha256};
     use std::io::Write;
     use zip::{ZipWriter, write::SimpleFileOptions};
@@ -248,11 +253,41 @@ mod tests {
             .expect("catalog serializes")
     }
 
+    fn dense_catalog_bytes() -> Vec<u8> {
+        let entries = (0..16)
+            .map(|index| {
+                serde_json::json!({
+                    "product": "kk3-max",
+                    "component": "main",
+                    "version": format!("1.{index}"),
+                    "archive": "future.zip",
+                    "archive_size": 1,
+                    "archive_sha256": "a".repeat(64),
+                    "member": "firmware.bin",
+                    "member_size": 1,
+                    "member_sha256": "b".repeat(64),
+                    "payload_size": 1,
+                    "payload_sha256": "c".repeat(64),
+                    "source_url": format!(
+                        "https://www.gulikit.com/{}",
+                        "z".repeat(if index == 15 { 15_801 } else { 15_823 })
+                    ),
+                    "parser_id": "none",
+                    "software_support": "metadata_only",
+                    "hardware_acceptance": "unqualified",
+                    "hardware_evidence": null
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&json!({"schema_version": 1, "entries": entries}))
+            .expect("dense catalog serializes")
+    }
+
     fn request(archive_path: &std::path::Path, catalog: Vec<u8>) -> Request {
         Request {
             archive: archive_path.as_os_str().as_bytes().to_vec(),
             record: b"/tmp/operation.jsonl".to_vec(),
-            catalog: Some(catalog),
+            catalog: Some(String::from_utf8(catalog).expect("catalog JSON is UTF-8")),
             model: "kk3-max".into(),
             allow_downgrade: false,
             confirm_ns39: true,
@@ -274,7 +309,10 @@ mod tests {
         std::fs::write(&source, b"replaced source file").expect("source changes");
         let received: Request = serde_json::from_slice(&encoded).expect("request deserializes");
 
-        assert_eq!(received.catalog.as_deref(), Some(catalog.as_slice()));
+        assert_eq!(
+            received.catalog.as_deref().map(str::as_bytes),
+            Some(catalog.as_slice())
+        );
         let (_archive, _model, package) =
             inspect_worker_package(&received).expect("worker uses request snapshot");
         assert_eq!(package.info().version, "6.1");
@@ -309,5 +347,50 @@ mod tests {
         assert_eq!(error.kind, "catalog_rejected");
         assert_eq!(error.code, 3);
         assert_eq!(child_error_kind(error.kind), "catalog_rejected");
+    }
+
+    #[test]
+    fn near_limit_catalog_snapshot_fits_worker_request_frame() {
+        const MAX_MAIN_WORKER_FRAME_BYTES: usize = 1_048_576;
+
+        let catalog = dense_catalog_bytes();
+        assert_eq!(catalog.len(), MAX_CATALOG_BYTES);
+        Catalog::parse(&catalog).expect("dense metadata-only catalog remains valid");
+        let mut request = request(std::path::Path::new("/tmp/firmware.zip"), catalog.clone());
+        let short_component = "z".repeat(255);
+        let final_component = "z".repeat(240);
+        let long_path =
+            format!("/tmp/{short_component}/{short_component}/{short_component}/{final_component}");
+        assert!(long_path.len() < 1_023);
+        request.archive = long_path.as_bytes().to_vec();
+        request.record = long_path.into_bytes();
+
+        let request_value = serde_json::to_value(&request).expect("request serializes");
+        let frame = serde_json::to_vec(&Message::Request(request_value))
+            .expect("worker request frame serializes");
+        assert!(
+            frame.len() <= MAX_MAIN_WORKER_FRAME_BYTES,
+            "request frame of {} bytes exceeds its {}-byte limit",
+            frame.len(),
+            MAX_MAIN_WORKER_FRAME_BYTES
+        );
+
+        let mut legacy_value = serde_json::to_value(&request).expect("request serializes");
+        legacy_value["catalog"] = json!(catalog);
+        let legacy_frame = serde_json::to_vec(&Message::Request(legacy_value))
+            .expect("legacy numeric-array frame serializes");
+        assert!(
+            legacy_frame.len() > MAX_MAIN_WORKER_FRAME_BYTES,
+            "legacy numeric-array frame unexpectedly fits in {} bytes",
+            legacy_frame.len()
+        );
+
+        let received: Request =
+            serde_json::from_slice(&serde_json::to_vec(&request).expect("request JSON serializes"))
+                .expect("request JSON deserializes");
+        assert_eq!(
+            received.catalog.as_deref().map(str::as_bytes),
+            Some(catalog.as_slice())
+        );
     }
 }

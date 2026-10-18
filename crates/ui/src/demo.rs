@@ -6,7 +6,7 @@ use crate::{
 use gulikit_core::{
     package::{Component, Model, PackageInfo, catalog},
     update::{Outcome, Progress, TransferRecord, Verification, verify_restart},
-    version::{BT_SIGNATURE, MainVersion, VersionDecision, bluetooth_info},
+    version::{BT_SIGNATURE, MainVersion, VersionDecision, VersionPolicy, bluetooth_info},
 };
 use gulikit_platform::discovery::NativeCandidate;
 use gulikit_updater::updater::{
@@ -166,31 +166,44 @@ impl DemoDevice {
         self.selected = Some((path.clone(), info.clone()));
         Ok(Event::Package { path, info })
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The demo checks each typed Update request field before simulating I/O."
+    )]
     fn transfer(
         &mut self,
         path: &Path,
         component: Component,
         attachment: Attachment,
         confirmed: bool,
+        policy: VersionPolicy,
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
         updater::check_attachment(Some(attachment), &self.target())?;
-        if self.observe(component, confirmed)?.decision != VersionDecision::Eligible {
-            return Err("Installed version does not permit an update.".into());
-        }
+        let observed = self.observe(component, confirmed)?;
         let (_, package) = self
             .selected
             .as_ref()
             .filter(|(selected, info)| selected.as_path() == path && info.component == component)
             .ok_or("Select a simulated package first")?;
-        let transfer = simulate_transfer(
+        if package
+            .decision_for_installed(&observed.installed_version, policy)
+            .map_err(|error| error.to_string())?
+            != VersionDecision::Eligible
+        {
+            return Err(
+                "Installed version does not permit an update under the selected policy.".into(),
+            );
+        }
+        let mut transfer = simulate_transfer(
             package.payload_size,
             self.profile,
             &mut self.wait,
             cancelled,
             emit,
         );
+        transfer.version_policy = policy;
         if transfer.outcome == Outcome::TransferCompletedAwaitingVerification {
             self.versions[index(component)] = match self.profile {
                 Profile::VerificationFailure => self.versions[index(component)],
@@ -344,7 +357,10 @@ impl Device for DemoDevice {
                 component,
                 attachment,
                 confirmed,
-            } => self.transfer(&path, component, attachment, confirmed, cancelled, emit),
+                policy,
+            } => self.transfer(
+                &path, component, attachment, confirmed, policy, cancelled, emit,
+            ),
             Work::Verify {
                 attempt,
                 confirmed,

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -23,6 +24,11 @@ MAX_UNCOMPRESSED_SIZE = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 10_000
 MAX_MEMBER_SIZE = 512 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 1_000
+MAX_ARCHIVE_HISTORY_ENTRIES = 1_024
+MAX_ARCHIVE_HISTORY_SIZE = 2 * 1024 * 1024 * 1024
+MAX_ARCHIVE_HISTORY_UNCOMPRESSED_SIZE = 4 * 1024 * 1024 * 1024
+MAX_PROVENANCE_SIZE = 16 * 1024
+MAX_MARKER_SIZE = 1_024
 
 
 def git(
@@ -76,7 +82,7 @@ def safe_segment(value: str, label: str, *, lower: bool = False) -> str:
     return value
 
 
-def validate_zip(path: Path) -> None:
+def validate_zip(path: Path) -> int:
     if not zipfile.is_zipfile(path):
         raise ValueError("input must be a valid ZIP archive")
     try:
@@ -134,12 +140,27 @@ def validate_zip(path: Path) -> None:
                     raise ValueError(
                         f"ZIP member size does not match its directory entry: {info.filename!r}"
                     )
-    except (zipfile.BadZipFile, OSError) as exc:
+    except (
+        zipfile.BadZipFile,
+        OSError,
+        RuntimeError,
+        EOFError,
+        NotImplementedError,
+        zlib.error,
+    ) as exc:
         raise ValueError(f"invalid ZIP archive: {exc}") from exc
+    return actual_total
 
 
 def validate_timestamp(value: str) -> str:
-    if not value.endswith("Z"):
+    if (
+        not isinstance(value, str)
+        or len(value) > 64
+        or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z",
+            value,
+        )
+    ):
         raise ValueError("retrieved-at must be a UTC timestamp ending in Z")
     try:
         datetime.fromisoformat(value[:-1] + "+00:00")
@@ -162,6 +183,18 @@ def official_source(value: str) -> str:
         or parsed.fragment
     ):
         raise ValueError("source must be an official HTTPS URL on gulikit.com")
+    return value
+
+
+def validate_original_filename(value: str) -> str:
+    if (
+        not value
+        or len(value.encode("utf-8")) > 255
+        or not value.lower().endswith(".zip")
+        or value in {".", ".."}
+        or any(ord(char) < 32 or ord(char) == 127 or char in "/\\" for char in value)
+    ):
+        raise ValueError("invalid original ZIP filename")
     return value
 
 
@@ -201,14 +234,160 @@ def verify_pinned_signature(
     return False
 
 
-def archive_root(repo: Path, tip: str, signing_fingerprint: str) -> str:
-    roots = git(repo, "rev-list", "--max-parents=0", tip).splitlines()
-    if len(roots) != 1:
-        raise ValueError("existing ref is not a single-root firmware archive")
-    root = roots[0]
-    commits = git(repo, "rev-list", "--reverse", tip).splitlines()
+def read_blob(repo: Path, commit: str, path: str, limit: int) -> bytes:
+    oid = git(repo, "rev-parse", "--verify", f"{commit}:{path}")
+    if git(repo, "cat-file", "-t", oid) != "blob":
+        raise ValueError("archive entry is not a Git blob")
+    size = int(git(repo, "cat-file", "-s", oid))
+    if size < 0 or size > limit:
+        raise ValueError("archive blob exceeds the historical validation limit")
+    result = subprocess.run(
+        ["git", f"--git-dir={repo}", "cat-file", "blob", oid],
+        env=clean_env(),
+        capture_output=True,
+    )
+    if result.returncode or len(result.stdout) != size:
+        raise ValueError("could not read the complete archive blob")
+    return result.stdout
+
+
+def verify_stored_archive_blob(repo: Path, oid: str, size: int, sha256: str) -> None:
+    if git(repo, "cat-file", "-t", oid) != "blob":
+        raise ValueError("stored ZIP object is not a Git blob")
+    if int(git(repo, "cat-file", "-s", oid)) != size:
+        raise ValueError("stored ZIP blob size differs from the reviewed original")
+    result = subprocess.run(
+        ["git", f"--git-dir={repo}", "cat-file", "blob", oid],
+        env=clean_env(),
+        capture_output=True,
+    )
+    if result.returncode or len(result.stdout) != size:
+        raise ValueError("could not read the complete stored ZIP blob")
+    if hashlib.sha256(result.stdout).hexdigest() != sha256:
+        raise ValueError("stored ZIP blob differs from the reviewed original")
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def validate_historical_pair(
+    repo: Path, commit: str, zip_path: str, provenance_path: str
+) -> tuple[int, int]:
+    provenance_bytes = read_blob(repo, commit, provenance_path, MAX_PROVENANCE_SIZE)
+    try:
+        provenance = json.loads(provenance_bytes, object_pairs_hook=unique_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("historical archive provenance is invalid JSON") from exc
+    required = {
+        "component",
+        "filename",
+        "model",
+        "retrieved_at",
+        "schema",
+        "sha256",
+        "size",
+        "source",
+        "version",
+        "zip",
+    }
+    if not isinstance(provenance, dict) or set(provenance) != required:
+        raise ValueError("historical archive provenance has an invalid schema")
+    if type(provenance["schema"]) is not int or provenance["schema"] != 1:
+        raise ValueError("historical archive provenance has an unsupported schema")
+    if not isinstance(provenance["filename"], str):
+        raise ValueError(
+            "historical archive provenance has an invalid original filename"
+        )
+    validate_original_filename(provenance["filename"])
+    if (
+        not isinstance(provenance["model"], str)
+        or safe_segment(provenance["model"], "model", lower=True) != provenance["model"]
+    ):
+        raise ValueError("historical archive provenance model is not normalized")
+    if (
+        not isinstance(provenance["component"], str)
+        or safe_segment(provenance["component"], "component", lower=True)
+        != provenance["component"]
+    ):
+        raise ValueError("historical archive provenance component is not normalized")
+    if not isinstance(provenance["version"], str):
+        raise ValueError("historical archive provenance version is invalid")
+    safe_segment(provenance["version"], "version")
+    expected_path = (
+        f"firmware/{provenance['model']}/{provenance['component']}/"
+        f"{provenance['version']}.zip"
+    )
+    if provenance["zip"] != zip_path or zip_path != expected_path:
+        raise ValueError(
+            "historical archive provenance does not match its immutable path"
+        )
+    if not isinstance(provenance["source"], str):
+        raise ValueError("historical archive provenance source is invalid")
+    official_source(provenance["source"])
+    if not isinstance(provenance["retrieved_at"], str):
+        raise ValueError("historical archive provenance timestamp is invalid")
+    validate_timestamp(provenance["retrieved_at"])
+    if (
+        type(provenance["size"]) is not int
+        or provenance["size"] <= 0
+        or provenance["size"] > MAX_ARCHIVE_SIZE
+    ):
+        raise ValueError("historical archive provenance size is invalid")
+    if not isinstance(provenance["sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", provenance["sha256"]
+    ):
+        raise ValueError("historical archive provenance SHA-256 is invalid")
+
+    archive_bytes = read_blob(repo, commit, zip_path, MAX_ARCHIVE_SIZE)
+    if len(archive_bytes) != provenance["size"]:
+        raise ValueError("historical archive size does not match its provenance")
+    if hashlib.sha256(archive_bytes).hexdigest() != provenance["sha256"]:
+        raise ValueError("historical archive SHA-256 does not match its provenance")
+    with tempfile.TemporaryDirectory(prefix="firmware-archive-history-") as temp:
+        snapshot = Path(temp) / "original.zip"
+        snapshot.write_bytes(archive_bytes)
+        uncompressed_size = validate_zip(snapshot)
+    return len(archive_bytes), uncompressed_size
+
+
+def archive_root(
+    repo: Path,
+    tip: str,
+    signing_fingerprint: str,
+    *,
+    append_size: int = 0,
+    append_uncompressed_size: int = 0,
+) -> str:
+    reverse_commits = []
+    current = tip
+    while True:
+        if len(reverse_commits) >= MAX_ARCHIVE_HISTORY_ENTRIES:
+            raise ValueError("archive history exceeds the supported append limit")
+        commit_line = git(repo, "rev-list", "--parents", "-n", "1", current).split()
+        if not commit_line or commit_line[0] != current:
+            raise ValueError("archive history contains an invalid commit chain")
+        parents = commit_line[1:]
+        if len(parents) > 1:
+            raise ValueError("archive history must be linear and contain no merges")
+        reverse_commits.append(current)
+        if not parents:
+            break
+        current = parents[0]
+    commits = list(reversed(reverse_commits))
+    if len(commits) >= MAX_ARCHIVE_HISTORY_ENTRIES:
+        raise ValueError("archive history leaves no room for another append")
+    root = commits[0]
     prior_files: set[str] = set()
     parent = None
+    history_size = 0
+    history_uncompressed_size = 0
+    archive_entries = 0
     for commit in commits:
         parents = git(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:]
         if parents != ([] if parent is None else [parent]):
@@ -277,6 +456,19 @@ def archive_root(repo: Path, tip: str, signing_fingerprint: str) -> str:
             )
         if prior_files & added:
             raise ValueError("archive history reuses an immutable path")
+        archive_size, uncompressed_size = validate_historical_pair(
+            repo, commit, zip_paths[0], json_paths[0]
+        )
+        archive_entries += 1
+        history_size += archive_size
+        history_uncompressed_size += uncompressed_size
+        if (
+            archive_entries + 1 > MAX_ARCHIVE_HISTORY_ENTRIES
+            or history_size + append_size > MAX_ARCHIVE_HISTORY_SIZE
+            or history_uncompressed_size + append_uncompressed_size
+            > MAX_ARCHIVE_HISTORY_UNCOMPRESSED_SIZE
+        ):
+            raise ValueError("archive history exceeds the bounded validation limits")
         prior_files.update(added)
         tree = git(repo, "ls-tree", "-r", commit)
         for line in tree.splitlines():
@@ -288,19 +480,15 @@ def archive_root(repo: Path, tip: str, signing_fingerprint: str) -> str:
                     "archive tree contains a non-regular or non-blob entry"
                 )
         parent = commit
-    marker = subprocess.run(
-        ["git", f"--git-dir={repo}", "show", f"{root}:{ARCHIVE_MARKER}"],
-        env=clean_env(),
-        text=True,
-        capture_output=True,
-    )
-    if marker.returncode:
+    try:
+        marker_bytes = read_blob(repo, root, ARCHIVE_MARKER, MAX_MARKER_SIZE)
+    except ValueError as exc:
         raise ValueError(
             "existing ref is not a marked firmware archive; refusing arbitrary repository history"
-        )
+        ) from exc
     try:
-        data = json.loads(marker.stdout)
-    except json.JSONDecodeError as exc:
+        data = json.loads(marker_bytes, object_pairs_hook=unique_json_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("existing archive marker is invalid") from exc
     if data != {"schema": ARCHIVE_SCHEMA, "type": "gulikit-firmware-archive"}:
         raise ValueError(
@@ -366,12 +554,11 @@ def import_archive(
         raise ValueError("archive ref must not be symbolic")
     if not archive.is_file():
         raise ValueError("input ZIP does not exist or is not a regular file")
+    validate_original_filename(archive.name)
 
     object_format = git(repo, "rev-parse", "--show-object-format")
     zero_oid = "0" * (64 if object_format == "sha256" else 40)
     old = git(repo, "rev-parse", "--verify", ref, check=False) or None
-    if old:
-        archive_root(repo, old, signing_key)
     old_oid = old or zero_oid
 
     zip_rel = f"firmware/{model}/{component}/{version}.zip"
@@ -399,7 +586,15 @@ def import_archive(
             )
         if sha256.lower() != expected_sha256.lower():
             raise ValueError("ZIP SHA-256 does not match the reviewed expected value")
-        validate_zip(snapshot)
+        uncompressed_size = validate_zip(snapshot)
+        if old:
+            archive_root(
+                repo,
+                old,
+                signing_key,
+                append_size=size,
+                append_uncompressed_size=uncompressed_size,
+            )
 
         provenance = {
             "component": component,
@@ -420,7 +615,8 @@ def import_archive(
             git(repo, "read-tree", old, env=env)
         else:
             git(repo, "read-tree", "--empty", env=env)
-        blob = git(repo, "hash-object", "-w", str(snapshot))
+        blob = git(repo, "hash-object", "--no-filters", "-w", str(snapshot))
+        verify_stored_archive_blob(repo, blob, size, sha256)
         meta = subprocess.run(
             ["git", f"--git-dir={repo}", "hash-object", "-w", "--stdin"],
             input=(json.dumps(provenance, sort_keys=True, indent=2) + "\n"),

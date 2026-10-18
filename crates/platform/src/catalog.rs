@@ -135,7 +135,8 @@ impl CatalogCache {
     /// # Errors
     /// Returns an error for unsafe files, malformed catalog JSON, or I/O failure.
     pub fn load(&self) -> Result<Option<Catalog>, CatalogCacheError> {
-        let _guard = CacheLock::acquire(&self.lock_path)?;
+        // Publication is atomic. Readers hold the opened file descriptor and
+        // need neither write permission nor the writer's exclusive lock.
         let Some(bytes) = read_bounded_regular_file(&self.path)? else {
             return Ok(None);
         };

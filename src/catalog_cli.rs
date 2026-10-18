@@ -2,7 +2,7 @@
 
 use gulikit_catalog::{Catalog, Entry, MAX_CATALOG_BYTES};
 use gulikit_platform::{
-    catalog::{CatalogCache, CatalogCacheError, read_catalog_file},
+    catalog::{CatalogCache, CatalogCacheError, CatalogFetchError, read_catalog_file},
     download::{
         DownloadError, DownloadResult, download_release, open_official_changelog,
         open_official_source,
@@ -33,9 +33,10 @@ enum Report {
 
 fn cache_error(error: &CatalogCacheError) -> AppError {
     let (kind, code) = match error {
-        CatalogCacheError::Io(_) | CatalogCacheError::UnsafeFile | CatalogCacheError::Lock(_) => {
-            ("catalog_io", 4)
-        }
+        CatalogCacheError::Io(_)
+        | CatalogCacheError::UnsafeFile
+        | CatalogCacheError::Lock(_)
+        | CatalogCacheError::Fetch(CatalogFetchError::Request(_)) => ("catalog_io", 4),
         CatalogCacheError::PublishedButDurabilityUnknown(_) => ("catalog_durability_unknown", 8),
         _ => ("catalog_rejected", 3),
     };
@@ -307,6 +308,31 @@ pub(super) fn run(
                 writeln!(err, "{}", error.message)?;
             }
             Ok(ExitCode::from(error.code))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_failures_are_io_errors_and_response_refusals_are_rejections() {
+        let transport = cache_error(&CatalogCacheError::Fetch(CatalogFetchError::Request(
+            "offline".into(),
+        )));
+        assert_eq!(transport.kind, "catalog_io");
+        assert_eq!(transport.code, 4);
+        for rejection in [
+            CatalogFetchError::HttpsRequired,
+            CatalogFetchError::Status(404),
+            CatalogFetchError::CompressedResponse,
+            CatalogFetchError::InvalidContentLength,
+            CatalogFetchError::TooLarge,
+        ] {
+            let error = cache_error(&CatalogCacheError::Fetch(rejection));
+            assert_eq!(error.kind, "catalog_rejected");
+            assert_eq!(error.code, 3);
         }
     }
 }
