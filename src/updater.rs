@@ -584,7 +584,7 @@ mod tests {
             },
             ReceiptIdentity {
                 expected_version: "5.07".into(),
-                ..identity.clone()
+                ..identity
             },
         ] {
             assert_eq!(

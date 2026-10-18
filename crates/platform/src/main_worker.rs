@@ -270,7 +270,7 @@ fn guardian_with_clock(
                     _ => return Err("Main worker exited in an unexpected protocol phase".into()),
                 }
             }
-            parent.send(&result.unwrap_or(Message::Unknown {
+            parent.send(&result.unwrap_or_else(|| Message::Unknown {
                 reason: "Main worker exited without a final result".into(),
                 worker_stopped: true,
             }))?;

@@ -200,6 +200,7 @@ impl From<&str> for SubmissionError {
 }
 
 /// An exclusive, quiesced transport bound to one attachment and a live topology watcher.
+///
 /// Each command must validate OS success and passed transport status. F0 requires
 /// exact OUT512; F1 exact IN20; F2 requests IN20 and consumes a nonempty 1..20-byte
 /// status reply with exact residue, except the observed NS39 one-byte `00` reply

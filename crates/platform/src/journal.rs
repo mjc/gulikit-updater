@@ -735,7 +735,7 @@ mod verification_tests {
             ]
         );
         let mut readonly = File::open(temporary.path()).unwrap();
-        let failed = finalize_record(&mut readonly, input.clone());
+        let failed = finalize_record(&mut readonly, input);
         assert_eq!(failed["record_finalized"], false);
         assert_eq!(failed["transfer"]["outcome"], "installed_verified");
         assert!(
@@ -767,7 +767,7 @@ pub fn create_host_record(
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
+        .unwrap_or_else(|| std::path::Path::new("."));
     let name = path
         .file_name()
         .ok_or("Attempt record requires a filename")?;
