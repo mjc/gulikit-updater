@@ -1,0 +1,97 @@
+name: Distribution builds
+
+# No release publication or tag creation. Download the checked artifacts from
+# this manually dispatched run; signing credentials never enter a PR job.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: Signed macOS (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.98.1
+      - name: Build native release executables
+        run: bash scripts/build_macos.sh
+      - name: Import distribution credentials into a temporary keychain
+        run: bash scripts/import_macos_signing.sh
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      - name: Sign, notarize, staple and verify the extracted package
+        run: >-
+          python3 scripts/package_macos.py release
+          --binaries target/release --arch '${{ matrix.arch }}'
+          --notary-profile gulikit-release --keychain "$MACOS_SIGNING_KEYCHAIN"
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      - name: Remove signing credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/gulikit-signing.p12"
+          if [ -f "$RUNNER_TEMP/gulikit-signing.keychain-db" ]; then
+            /usr/bin/security delete-keychain "$RUNNER_TEMP/gulikit-signing.keychain-db"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-${{ matrix.arch }}-notarized
+          path: artifacts/distribution/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain notarization diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-${{ matrix.arch }}-notary-diagnostics
+          path: artifacts/distribution/*notary*.json
+          if-no-files-found: ignore
+          retention-days: 14
+  windows:
+    name: Unsigned Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.98.1
+      - name: Build with the static MSVC runtime
+        run: cargo build --release --workspace --bins --locked --target x86_64-pc-windows-msvc
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+      - name: Check and package the extracted executables
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          ./scripts/package_windows.ps1 -Binaries target/x86_64-pc-windows-msvc/release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-x86_64-unsigned
+          path: artifacts/distribution/*
+          if-no-files-found: error
+          retention-days: 14

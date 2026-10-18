@@ -1,5 +1,9 @@
 // Slint’s generated bindings contain their own unsafe FFI; application code may not.
 #![deny(unsafe_code)]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 use slint::ComponentHandle;
 slint::include_modules!();
 

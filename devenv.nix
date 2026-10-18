@@ -74,6 +74,7 @@
   tasks."check:all".exec = ''
     set -euo pipefail
     treefmt --fail-on-change --no-cache
+    python3 -m unittest discover -s scripts -p 'test_*.py' -v
     cargo build --workspace --bins --all-features --locked
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
     cargo nextest run --workspace --all-features --locked

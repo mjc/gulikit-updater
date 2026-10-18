@@ -1,6 +1,8 @@
 /target
 /artifacts/vendor/
 /artifacts/research/
+/artifacts/distribution/
+/scripts/__pycache__/
 /.devenv/
 /.pre-commit-config.yaml
 /research/__pycache__/

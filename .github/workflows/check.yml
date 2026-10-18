@@ -46,6 +46,40 @@ jobs:
       - run: cargo test --workspace --doc --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: Exercise macOS bundle and signing guards
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      - name: Build macOS release executables
+        if: runner.os == 'macOS'
+        run: bash scripts/build_macos.sh
+      - name: Smoke-test macOS release packaging without distribution credentials
+        if: runner.os == 'macOS'
+        run: python3 scripts/package_macos.py smoke --binaries target/release --arch "$(uname -m)"
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      - name: Build Windows release with the static runtime
+        if: runner.os == 'Windows'
+        run: cargo build --release --workspace --bins --locked --target x86_64-pc-windows-msvc
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+      - name: Smoke-test extracted unsigned Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          ./scripts/package_windows.ps1 -Binaries target/x86_64-pc-windows-msvc/release
+      - name: Retain the checked Windows package
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-x86_64-unsigned
+          path: artifacts/distribution/*
+          if-no-files-found: error
+          retention-days: 14
   research:
     name: Research harness guards
     runs-on: ubuntu-latest

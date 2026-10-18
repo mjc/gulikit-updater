@@ -1,5 +1,8 @@
 # GuliKit updater
 
+Desktop distribution build and signing instructions are in
+[scripts/README.md](scripts/README.md).
+
 The updater supports reviewed KK3 Max NS39 Main 5.9 and Bluetooth 3.23 / 3.24 / 5.07
 packages. The original ZIP selects the release; the CLI does not silently replace
 that selection with the newest version. The shared Rust core owns component
