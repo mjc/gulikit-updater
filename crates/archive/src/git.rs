@@ -77,11 +77,12 @@ impl GitArchive {
         }
         fs::create_dir(path)?;
         let output = clean_git()
+            .current_dir(path)
             .arg("init")
             .arg("--quiet")
             .arg("--bare")
             .arg("--initial-branch=firmware")
-            .arg(path)
+            .arg(".")
             .output()?;
         check_output(output)?;
         Self::open(path)
@@ -506,7 +507,8 @@ impl GitArchive {
     ) -> Result<Vec<u8>, GitArchiveError> {
         let mut command = clean_git();
         command
-            .arg(format!("--git-dir={}", self.path.display()))
+            .current_dir(&self.path)
+            .arg("--git-dir=.")
             .args(args);
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);
