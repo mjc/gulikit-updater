@@ -72,6 +72,30 @@
         "size": 44048,
         "sha256": "45e306d7e2cdd26bff54718066a45df21865ec5860fbc70ca7bcedda708c4f98"
       }
+    },
+    {
+      "component": "base",
+      "version": "2.9",
+      "filename": "GuliKit_NS39_V2.9.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40376/download",
+      "changelog": "1. Added to turn the logo light into purple in APG datas sharing mode, and the controller will automatically power off after 10 minutes of inactivity.\r\n2. Fixed occasional unresponsiveness of the D-pad left and right buttons in the D-pad 4-directions mode.\r\n3. Fixed gyroscopic jumping issue in Switch mode.\r\n\r\n-----------------------------------------------------------------------------------------------------",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40376/download",
+      "firmware_member": "GuliKit_NS39_V2.9.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v2.9/GuliKit_NS39_V2.9.zip",
+      "size": 46311,
+      "sha256": "277caf79bfc8d78702ac2336064723a0d013a6fbb95909ca241870a9967e0ced",
+      "firmware_file": {
+        "size": 44368,
+        "sha256": "7b5ca099ec313428cc6a8adfb1ed27ca59f2d6a460cafb79ae2165b7b30dd845"
+      },
+      "payload": {
+        "size": 44368,
+        "sha256": "7b5ca099ec313428cc6a8adfb1ed27ca59f2d6a460cafb79ae2165b7b30dd845"
+      }
     }
   ]
 }
