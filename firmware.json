@@ -120,6 +120,30 @@
         "size": 44604,
         "sha256": "c1a2376cadf9e0cf02dc11c63b3ded11653d8cd92720c552fca5416bf7fbac17"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.1",
+      "filename": "GuliKit_NS39_V3.1.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40378/download",
+      "changelog": "1.Fixed the issue in XINPUT mode where the left motor vibration frequency would increase upon restarting.\r\n\r\n2.Based on user feedback, adjustments are made to the back button mapping. Now, when setting up back button mapping, it no longer needs to follow the rapid-fire function of the front buttons. This allows for front buttons to have rapid-fire functionality while the back button mapping retains the long-press function. Players can freely choose between using long-press or rapid-fire functionality in games.\r\n\r\n-----------------------------------------------------------------------------------------------------",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40378/download",
+      "firmware_member": "GuliKit_NS39_V3.1.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.1/GuliKit_NS39_V3.1.zip",
+      "size": 47029,
+      "sha256": "1d27be2dc8a9d623c93ab56acf6aa6829176f911e62840d53cb5f00481444000",
+      "firmware_file": {
+        "size": 44948,
+        "sha256": "03f875bbd92c4e527c36ddb39416788b210e7ab8ec64d70be3975f31c6e1fa0c"
+      },
+      "payload": {
+        "size": 44948,
+        "sha256": "03f875bbd92c4e527c36ddb39416788b210e7ab8ec64d70be3975f31c6e1fa0c"
+      }
     }
   ]
 }
