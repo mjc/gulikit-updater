@@ -984,6 +984,30 @@
         "size": 361472,
         "sha256": "69a14c630c70a5b48eb23a5171da681310e928cc1277c27cdb5c12bc7598c708"
       }
+    },
+    {
+      "component": "bluetooth",
+      "version": "3.30",
+      "filename": "GuliKit_NS38_NS39_NS59_BT_V3.30.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/history",
+      "released_at": "2025-05-23",
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/version/41503/download",
+      "changelog": "Optimize PC Bluetooth compatibility.\nOptimize NFC compatibility.（NS39）",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "GuliKit_NS38_NS39_NS59_BT_V3.30.exe",
+      "published_hashes": [],
+      "path": "/kk3-max/bluetooth/v3.30/GuliKit_NS38_NS39_NS59_BT_V3.30.zip",
+      "size": 1163519,
+      "sha256": "4bc405937b8a691c98dd6f304a887a540c65d7481d899c828ccd380e40e85400",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "f182b288594c8c85eedfd71677e7976191e6bab7d5395d4128e5e7086b470cc3"
+      },
+      "payload": {
+        "size": 361472,
+        "sha256": "f3a12c1e90cfa572a803b6870f749c822999c47b25e5cb2c4e1922244580f0c8"
+      }
     }
   ]
 }
