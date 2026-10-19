@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fmt, str::FromStr};
+use std::{collections::HashSet, fmt, str::FromStr};
 use url::Url;
 
 /// Maximum serialized manifest size.
@@ -143,7 +143,8 @@ pub struct ReleaseMetadata {
 impl ReleaseMetadata {
     fn validate(&self) -> Result<(), Error> {
         validate_product_slug(&self.product)?;
-        if self.member_kind == FirmwareMemberKind::Kk3 && self.product != DEFAULT_PRODUCT_SLUG {
+        let is_kk3_product = self.product == DEFAULT_PRODUCT_SLUG;
+        if (self.member_kind == FirmwareMemberKind::Kk3) != is_kk3_product {
             return Err(Error::InvalidMetadata("member_kind"));
         }
         validate_version(&self.version)?;
@@ -619,8 +620,16 @@ impl FirmwareIndex {
             return Err(Error::TooManyReleases);
         }
         let mut index = Self::empty();
+        let mut paths = HashSet::with_capacity(raw.releases.len());
         for raw_release in raw.releases {
-            index.add(raw_release.into_record()?)?;
+            let release = raw_release.into_record()?;
+            if !paths.insert(release.path().to_owned()) {
+                return Err(Error::DuplicatePath);
+            }
+            index.releases.push(release);
+        }
+        if index.serialized_len()? > MAX_INDEX_BYTES {
+            return Err(Error::OutputTooLarge);
         }
         Ok(index)
     }

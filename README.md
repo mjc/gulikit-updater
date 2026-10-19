@@ -93,7 +93,7 @@ one release in a GPG-signed commit. Configure Git's author and OpenPGP signing
 key before importing. The repository contains `/firmware.json` and paths such as
 `/kk3-max/bluetooth/v3.24/NS38_NS39_BT_V3.24.zip`.
 
-Commit signature checks use the operator's local GPG keyring. Choose the archive
+Archive commands disable repository-controlled Git hooks. Commit signature checks use the operator's local GPG keyring. Choose the archive
 remote and revision separately; a valid commit signature is not manufacturer
 authentication. No project firmware signing keys or signer registry is required.
 

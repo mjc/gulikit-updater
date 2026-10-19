@@ -214,6 +214,68 @@ fn parser_rejects_unknown_fields_and_invalid_metadata() {
 }
 
 #[test]
+fn parser_requires_kk3_and_generic_member_kinds_in_their_product_namespaces() {
+    let mut index = FirmwareIndex::empty();
+    index
+        .add(record(Component::Base, "5.9", "firmware.zip", b"zip"))
+        .unwrap();
+    let mut value: Value = serde_json::from_slice(&index.to_json().unwrap()).unwrap();
+
+    // Old KK3 records omit both fields; explicitly selecting generic parsing
+    // must not let that legacy namespace bypass KK3 validation.
+    value["releases"][0]["member_kind"] = json!("raw_binary");
+    assert_eq!(
+        FirmwareIndex::parse(&serde_json::to_vec(&value).unwrap()),
+        Err(Error::InvalidMetadata("member_kind"))
+    );
+
+    value["releases"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("member_kind");
+    value["releases"][0]["product"] = json!("other-controller");
+    assert_eq!(
+        FirmwareIndex::parse(&serde_json::to_vec(&value).unwrap()),
+        Err(Error::InvalidMetadata("member_kind"))
+    );
+}
+
+#[test]
+fn parser_handles_maximum_bounded_manifest_and_rejects_duplicate_at_end() {
+    let mut single = FirmwareIndex::empty();
+    single
+        .add(record(Component::Base, "5.0", "firmware.zip", b"zip"))
+        .unwrap();
+    let single: Value = serde_json::from_slice(&single.to_json().unwrap()).unwrap();
+    let release = single["releases"][0].clone();
+    let mut releases = Vec::with_capacity(MAX_RELEASES);
+    for number in 0..MAX_RELEASES {
+        let mut release = release.clone();
+        let version = format!("5.{number}");
+        release["version"] = json!(version);
+        release["path"] = json!(format!("/kk3-max/base/v{version}/firmware.zip"));
+        releases.push(release);
+    }
+    let value = json!({ "schema_version": 1, "releases": releases });
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let parsed = FirmwareIndex::parse(&bytes).unwrap();
+    assert_eq!(parsed.releases().len(), MAX_RELEASES);
+    assert_eq!(parsed.releases()[0].version(), "5.0");
+    assert_eq!(
+        parsed.releases()[MAX_RELEASES - 1].version(),
+        format!("5.{}", MAX_RELEASES - 1)
+    );
+
+    let mut duplicated = value;
+    let first = duplicated["releases"][0].clone();
+    duplicated["releases"][MAX_RELEASES - 1] = first;
+    assert_eq!(
+        FirmwareIndex::parse(&serde_json::to_vec(&duplicated).unwrap()),
+        Err(Error::DuplicatePath)
+    );
+}
+
+#[test]
 fn published_sha256_claims_must_match_the_measured_target() {
     let sample = record(Component::Base, "5.9", "firmware.zip", b"archive bytes");
     let mut metadata = metadata(Component::Base, "5.9", "firmware.zip");

@@ -9,10 +9,13 @@ use crate::manifest::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::Arc,
 };
 use thiserror::Error;
 
@@ -67,6 +70,24 @@ pub struct GitArchive {
     path: PathBuf,
     object_id_len: usize,
     gpg: GpgContext,
+    hooks: HookDirectory,
+}
+
+#[derive(Clone, Debug)]
+struct HookDirectory {
+    _owner: Arc<tempfile::TempDir>,
+    path: PathBuf,
+}
+
+impl HookDirectory {
+    fn new() -> Result<Self, GitArchiveError> {
+        let owner = Arc::new(tempfile::TempDir::new()?);
+        let path = fs::canonicalize(owner.path())?;
+        Ok(Self {
+            _owner: owner,
+            path,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -118,8 +139,11 @@ impl GitArchive {
             Err(error) => return Err(error.into()),
         }
         fs::create_dir(path)?;
-        let output = clean_git()
-            .current_dir(path)
+        let hooks = HookDirectory::new()?;
+        let mut command = clean_git();
+        command.current_dir(path);
+        add_hooks_path(&mut command, &hooks.path);
+        let output = command
             .arg("init")
             .arg("--quiet")
             .arg("--bare")
@@ -155,6 +179,7 @@ impl GitArchive {
             return Err(GitArchiveError::InvalidRepositoryPath);
         }
         let path = fs::canonicalize(path)?;
+        let hooks = HookDirectory::new()?;
         if !path.join("HEAD").is_file()
             || !path.join("objects").is_dir()
             || !path.join("refs").is_dir()
@@ -165,6 +190,7 @@ impl GitArchive {
             path,
             object_id_len: 0,
             gpg,
+            hooks,
         };
         if archive.git(&["rev-parse", "--is-bare-repository"], None)? != b"true\n" {
             return Err(GitArchiveError::NotBare);
@@ -385,6 +411,11 @@ impl GitArchive {
         let mut parents = Vec::new();
         for line in header {
             if let Some(value) = line.strip_prefix(b"tree ") {
+                if tree.is_some() {
+                    return Err(GitArchiveError::InvalidHistory(
+                        "commit has duplicate tree headers",
+                    ));
+                }
                 tree = Some(String::from_utf8_lossy(value).into_owned());
             } else if let Some(value) = line.strip_prefix(b"parent ") {
                 parents.push(String::from_utf8_lossy(value).into_owned());
@@ -443,8 +474,10 @@ impl GitArchive {
     }
 
     fn tree_output(&self, oid: &str) -> Result<Vec<u8>, GitArchiveError> {
-        let mut child = clean_git()
-            .current_dir(&self.path)
+        let mut command = clean_git();
+        command.current_dir(&self.path);
+        add_hooks_path(&mut command, &self.hooks.path);
+        let mut child = command
             .arg("--git-dir=.")
             .args(["ls-tree", "-rz", "--full-tree", oid])
             .stdin(Stdio::null())
@@ -586,8 +619,9 @@ impl GitArchive {
         let program = self.gpg.program()?;
         let program = program.to_string_lossy();
         let mut command = clean_git();
+        command.current_dir(&self.path);
+        add_hooks_path(&mut command, &self.hooks.path);
         command
-            .current_dir(&self.path)
             .arg("-c")
             .arg(format!("gpg.program={program}"))
             .arg("-c")
@@ -609,10 +643,9 @@ impl GitArchive {
         input: Option<&[u8]>,
     ) -> Result<Vec<u8>, GitArchiveError> {
         let mut command = clean_git();
-        command
-            .current_dir(&self.path)
-            .arg("--git-dir=.")
-            .args(args);
+        command.current_dir(&self.path);
+        add_hooks_path(&mut command, &self.hooks.path);
+        command.arg("--git-dir=.").args(args);
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);
         }
@@ -751,6 +784,12 @@ fn clean_git() -> Command {
         }
     }
     command
+}
+
+fn add_hooks_path(command: &mut Command, path: &Path) {
+    let mut value = OsString::from("core.hooksPath=");
+    value.push(path);
+    command.arg("-c").arg(value);
 }
 
 fn canonical_gpg_home(home: &Path) -> Result<PathBuf, GitArchiveError> {

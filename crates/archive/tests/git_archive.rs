@@ -238,6 +238,13 @@ fn duplicate_identity_and_invalid_zip_leave_the_archive_ref_unchanged() {
             metadata(Component::Base, "5.9", "KK3_NS38_NS39_V5.9.zip"),
         )
         .unwrap();
+    fs::write(&package, synthetic_duplicate_member_zip(b"one")).unwrap();
+    assert!(matches!(
+        archive.import(&package, metadata(Component::Base, "5.8", "duplicate-names.zip")),
+        Err(GitArchiveError::Zip(message)) if message.contains("duplicate file names")
+    ));
+    assert_eq!(archive.index().unwrap().releases().len(), 1);
+    fs::write(&package, synthetic_zip("firmware.bin", b"one")).unwrap();
     let mut missing_member = metadata(Component::Base, "5.8", "historical.zip");
     missing_member.firmware_member = "missing.bin".to_owned();
     assert!(matches!(
@@ -487,6 +494,85 @@ fn repository_local_gpg_helpers_cannot_sign_or_forge_verification() {
 }
 
 #[test]
+#[cfg(unix)]
+fn repository_reference_transaction_hooks_are_never_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SignedFixture::new(temp.path());
+    let repo = temp.path().join("archive.git");
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
+    configure_archive(&repo, &fixture, true);
+
+    let hook_dir = temp.path().join("repository-hooks");
+    fs::create_dir(&hook_dir).unwrap();
+    let marker = temp.path().join("reference-hook-ran");
+    let marker_shell = marker.display().to_string().replace('\'', "'\\''");
+    let hook = hook_dir.join("reference-transaction");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\nprintf invoked > '{marker_shell}'\nexit 1\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    git(&[
+        "--git-dir",
+        &repo.display().to_string(),
+        "config",
+        "core.hooksPath",
+        &hook_dir.display().to_string(),
+    ]);
+
+    let package = temp.path().join("main.zip");
+    fs::write(&package, synthetic_zip("firmware.bin", b"firmware")).unwrap();
+    archive
+        .import(&package, metadata(Component::Base, "5.9", "original.zip"))
+        .unwrap();
+
+    assert!(!marker.exists());
+    assert_eq!(archive.index().unwrap().releases().len(), 1);
+}
+
+#[test]
+fn duplicate_tree_headers_are_rejected_before_signature_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SignedFixture::new(temp.path());
+    let repo = temp.path().join("archive.git");
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
+    configure_archive(&repo, &fixture, true);
+    let package = temp.path().join("main.zip");
+    fs::write(&package, synthetic_zip("firmware.bin", b"firmware")).unwrap();
+    let parent = archive
+        .import(&package, metadata(Component::Base, "5.9", "original.zip"))
+        .unwrap();
+    let tree = git_text(&repo, &["rev-parse", &format!("{parent}^{{tree}}")]);
+    let commit = format!(
+        "tree {tree}\nparent {parent}\nauthor Archive Test <archive-test@example.invalid> 1792329600 +0000\ncommitter Archive Test <archive-test@example.invalid> 1792329600 +0000\ntree {tree}\n\nmalformed duplicate-tree commit\n"
+    );
+    let commit_file = temp.path().join("duplicate-tree-commit");
+    fs::write(&commit_file, commit).unwrap();
+    let malformed = git_text(
+        &repo,
+        &[
+            "hash-object",
+            "--literally",
+            "-t",
+            "commit",
+            "-w",
+            &commit_file.display().to_string(),
+        ],
+    );
+    git_repo(&repo, &["update-ref", BRANCH, &malformed, &parent]);
+
+    assert!(matches!(
+        archive.index(),
+        Err(GitArchiveError::InvalidHistory(
+            "commit has duplicate tree headers"
+        ))
+    ));
+}
+
+#[test]
 fn open_refuses_a_working_source_repository_and_init_refuses_existing_paths() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -524,6 +610,36 @@ fn metadata(component: Component, version: &str, filename: &str) -> ReleaseMetad
         firmware_member: "firmware.bin".to_owned(),
         published_hashes: Vec::new(),
     }
+}
+
+fn synthetic_duplicate_member_zip(content: &[u8]) -> Vec<u8> {
+    let first_name = "firmware.bin";
+    let second_name = "not-used.bin";
+    assert_eq!(first_name.len(), second_name.len());
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let contents: [&[u8]; 2] = [content, b"different duplicate content"];
+    for (index, data) in contents.into_iter().enumerate() {
+        let member_name = if index == 0 { first_name } else { second_name };
+        writer
+            .start_file(member_name, SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(data).unwrap();
+    }
+    let mut bytes = writer.finish().unwrap().into_inner();
+    let positions: Vec<_> = bytes
+        .windows(second_name.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == second_name.as_bytes()).then_some(index))
+        .collect();
+    for position in &positions {
+        bytes[*position..*position + first_name.len()].copy_from_slice(first_name.as_bytes());
+    }
+    assert_eq!(
+        positions.len(),
+        2,
+        "expected local and central name records"
+    );
+    bytes
 }
 
 fn synthetic_zip(name: &str, contents: &[u8]) -> Vec<u8> {
