@@ -1624,6 +1624,32 @@
         "size": 58972,
         "sha256": "096a0af3b4bdef0f24a249e39c5ed53bb896126cc48c83bd4d1c49897346304e"
       }
+    },
+    {
+      "product": "es",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "4.6",
+      "filename": "ES_ES-PRO_ES-MAX_V4.6_Firmware.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/1076221.html",
+      "released_at": "2026-10-09",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/3047059",
+      "changelog": "Added controller usage-time tracking and button-press-count tracking, viewable in the app.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/1076221.html",
+      "firmware_member": "ES_V4.6.bin",
+      "published_hashes": [],
+      "path": "/es/base/v4.6/ES_ES-PRO_ES-MAX_V4.6_Firmware.zip",
+      "size": 230653,
+      "sha256": "8649c9332307f3b60e323078ce13206460d797372ea898c0df171efb4fedbb4c",
+      "firmware_file": {
+        "size": 74656,
+        "sha256": "6b2d4bc1b7240d1e1ac9938da540cd6cafc41933ba963ef359dbb8589e008a6c"
+      },
+      "payload": {
+        "size": 74656,
+        "sha256": "6b2d4bc1b7240d1e1ac9938da540cd6cafc41933ba963ef359dbb8589e008a6c"
+      }
     }
   ]
 }
