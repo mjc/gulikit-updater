@@ -672,6 +672,30 @@
         "size": 48540,
         "sha256": "ea58f61e71941882f78bb6207502673538902fccf02e7f9dd5bdbe691e042233"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.2",
+      "filename": "KK3_NS38_NS39_V5.2.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41185/download",
+      "changelog": "1. The power shutdown function of the Home button has been changed from pressing and holding 4 seconds to 10 seconds.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41185/download",
+      "firmware_member": "NS39_KK3_MAX_V5.2.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.2/KK3_NS38_NS39_V5.2.zip",
+      "size": 99772,
+      "sha256": "af46fec929fa1d9f5485bf2141275d36dfc993f316ddc2e30ae167fcd15a33e9",
+      "firmware_file": {
+        "size": 48536,
+        "sha256": "cae3745aea36b04e1a3e8d27d9b54b79625387dad8f8be2aad4159362911cb7f"
+      },
+      "payload": {
+        "size": 48536,
+        "sha256": "cae3745aea36b04e1a3e8d27d9b54b79625387dad8f8be2aad4159362911cb7f"
+      }
     }
   ]
 }
