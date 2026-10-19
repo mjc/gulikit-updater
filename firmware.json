@@ -240,6 +240,30 @@
         "size": 47692,
         "sha256": "b6ea062b300bc78d62e415c0ef51de5732b30154c77029c10cca37571ae4dfbd"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.6",
+      "filename": "GuliKit_NS39_V3.6.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40493/download",
+      "changelog": "1. Fine-tune PC motion sensing aim assist to improve its sensitivity in the left and right directions.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40493/download",
+      "firmware_member": "GuliKit_NS39_V3.6.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.6/GuliKit_NS39_V3.6.zip",
+      "size": 49668,
+      "sha256": "d653aeb26667309ff08078e81983823032342854dec0e1c3ba8a749f4b4797d1",
+      "firmware_file": {
+        "size": 47636,
+        "sha256": "7db41670817671c9ab847928290e184514ba6577457e0f7f9e5eaf6a3bd2fd16"
+      },
+      "payload": {
+        "size": 47636,
+        "sha256": "7db41670817671c9ab847928290e184514ba6577457e0f7f9e5eaf6a3bd2fd16"
+      }
     }
   ]
 }
