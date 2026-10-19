@@ -1080,6 +1080,32 @@
         "size": 345088,
         "sha256": "2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826"
       }
+    },
+    {
+      "product": "kk3-pro",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "5.8",
+      "filename": "KK3_NS38_NS39_V5.9.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/887152.html",
+      "released_at": "2026-03-02",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2990583",
+      "changelog": "Fixed an issue where a slow double-press of the APG key would trigger an extra keystroke before the first playback.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/887152.html",
+      "firmware_member": "NS38_KK3_PRO_V5.8.bin",
+      "published_hashes": [],
+      "path": "/kk3-pro/base/v5.8/KK3_NS38_NS39_V5.9.zip",
+      "size": 107606,
+      "sha256": "b4d3c74bc2b0f6570523f121d7d8feb8842f239bdfc5e87bffd7af6aee520b67",
+      "firmware_file": {
+        "size": 51624,
+        "sha256": "433ae3fc2753c2308e047979c7eef1d0b6f48de472b7b86c76489fae4a934a30"
+      },
+      "payload": {
+        "size": 51624,
+        "sha256": "433ae3fc2753c2308e047979c7eef1d0b6f48de472b7b86c76489fae4a934a30"
+      }
     }
   ]
 }
