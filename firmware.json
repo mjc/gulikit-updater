@@ -336,6 +336,30 @@
         "size": 47692,
         "sha256": "ec8b8d5a9eebebb3a723f7ca25654563d45361e3d74f538f077017d532afad99"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.9",
+      "filename": "GuliKit_NS39_V3.9.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40593/download",
+      "changelog": "1. Fixed an issue where the controller had slight vibrations even after disabling vibration in Super Haptic mode and HD Linear mode in Switch mode.\r\n2. Increased the default vibration intensity in Super Haptic mode and HD Linear mode by 20% for the controller in Switch mode.\r\n3. Fixed an issue where the controller occasionally automatically threw the hat in the game Super Mar** Odyssey in Switch mode.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40593/download",
+      "firmware_member": "GuliKit_NS39_V3.9.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.9/GuliKit_NS39_V3.9.zip",
+      "size": 50282,
+      "sha256": "ae853481cc05bad6825573a320da9745f21a7605cde92333a3ecc4f0db990737",
+      "firmware_file": {
+        "size": 47832,
+        "sha256": "0ea528cd31c40ca0d9052512faa5f7b6ee517496a8f70bcc598f120cfee8f5c8"
+      },
+      "payload": {
+        "size": 47832,
+        "sha256": "0ea528cd31c40ca0d9052512faa5f7b6ee517496a8f70bcc598f120cfee8f5c8"
+      }
     }
   ]
 }
