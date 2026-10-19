@@ -864,6 +864,30 @@
         "size": 51500,
         "sha256": "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4"
       }
+    },
+    {
+      "component": "bluetooth",
+      "version": "3.23",
+      "filename": "NS39_BT_V3.23.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "released_at": "2024-04-30",
+      "retrieved_at": "2026-10-17T23:35:48.241434Z",
+      "retrieved_from": "https://gulikit.com/filedownload/123020",
+      "changelog": "Optimized the data processing method of the controller, resulting in faster wireless transmission speed.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "NS39_BT_V3.23.exe",
+      "published_hashes": [],
+      "path": "/kk3-max/bluetooth/v3.23/NS39_BT_V3.23.zip",
+      "size": 1163454,
+      "sha256": "39d678170e8d86488d65eb815873c708ff31b096d69d93714a0177086d5db938",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "825cca9b36fa9078d8198f31ab4bf0ecebb4a6a8bd100303801ba1d1363c4dd6"
+      },
+      "payload": {
+        "size": 361472,
+        "sha256": "783d206c08253c1e2291a8b0bc99b04f95fc4054c2215447a30933f623cf9dfe"
+      }
     }
   ]
 }
