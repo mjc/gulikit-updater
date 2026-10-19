@@ -600,6 +600,30 @@
         "size": 48304,
         "sha256": "3fd6f4ddc5f244c2ec72bca72a36eca1ef7fc42f6d3452c9b7a7f7f0088b8979"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.0",
+      "filename": "KK3_NS38_NS39_V5.0.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41166/download",
+      "changelog": "1.Fixed the issue where the button occasionally does not trigger when held down for a long time in PC adapter mode on controller.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41166/download",
+      "firmware_member": "NS39_KK3_MAX_V5.0.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.0/KK3_NS38_NS39_V5.0.zip",
+      "size": 99735,
+      "sha256": "e38396a133cae9d42cb53e98c445e2ebae265f2d6bd09235c519a29c1c9a98ba",
+      "firmware_file": {
+        "size": 48512,
+        "sha256": "9c266bbc17bc68209fd021774adfa973c31c943af8069204261ea2995927afe0"
+      },
+      "payload": {
+        "size": 48512,
+        "sha256": "9c266bbc17bc68209fd021774adfa973c31c943af8069204261ea2995927afe0"
+      }
     }
   ]
 }
