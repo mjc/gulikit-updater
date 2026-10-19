@@ -168,6 +168,30 @@
         "size": 47564,
         "sha256": "9f074ca85f1116c694fbba2b1ce9715da46a31af3c3e112c90eec3aaec69a57b"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.3",
+      "filename": "GuliKit_NS39_V3.3.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40440/download",
+      "changelog": "1.Refined the trigger mechanism to enable faster and more accurate triggering in digital trigger mode.\r\n\r\n2.Fixed the problem where the controller would enter APG sharing mode when power on if the USB cable was not disconnected after flashing the firmware on XINPUT mode.\r\n\r\n3. Fixed the problem where the controller would have USB cable disconnected on XINPUT wired mode when setting the joystick star-ring lighting mode.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40440/download",
+      "firmware_member": "GuliKit_NS39_V3.3.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.3/GuliKit_NS39_V3.3.zip",
+      "size": 49942,
+      "sha256": "cc85e50e3980c297f526fc47c4804531891555a94a854d36fcd56c279422960b",
+      "firmware_file": {
+        "size": 47652,
+        "sha256": "45f6cca0fb43fb27b75f7a8fdeea1fbd248b686c4860f64585ee23a226226b0b"
+      },
+      "payload": {
+        "size": 47652,
+        "sha256": "45f6cca0fb43fb27b75f7a8fdeea1fbd248b686c4860f64585ee23a226226b0b"
+      }
     }
   ]
 }
