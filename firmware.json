@@ -792,6 +792,30 @@
         "size": 51456,
         "sha256": "7f7ad10616d907caf21d4d8aaa81e648fd593f22821c136708a4ddc66c896ca5"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.7",
+      "filename": "KK3_NS38_NS39_V5.7.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41632/download",
+      "changelog": "1. Fixed the issue that the controller in the game is abnormal.\r\n2. Updated the color picker for RGB lighting settings, now the color settings are richer, and the brightness parameter is added for brightness settings.\r\n3. Added the function of manually filling in the color parameters on the RGB lighting color picker to set the lighting.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41632/download",
+      "firmware_member": "NS39_KK3_MAX_V5.7.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.7/KK3_NS38_NS39_V5.7.zip",
+      "size": 105822,
+      "sha256": "f2dbc0dd34944c72581666af0908c98d786a1af3e13afae82865d6d7112b04b4",
+      "firmware_file": {
+        "size": 51432,
+        "sha256": "9869fa67d7c76fee659ca0d0f39c5e78924b3813374713f73f4224d28a56c2d1"
+      },
+      "payload": {
+        "size": 51432,
+        "sha256": "9869fa67d7c76fee659ca0d0f39c5e78924b3813374713f73f4224d28a56c2d1"
+      }
     }
   ]
 }
