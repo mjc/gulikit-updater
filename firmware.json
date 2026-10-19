@@ -744,6 +744,30 @@
         "size": 48624,
         "sha256": "5cf093c0f92a0fccff80925d090255c8c96b265ee15b215712d100ef03593095"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.5",
+      "filename": "KK3_NS38_NS39_V5.5.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41502/download",
+      "changelog": "1. Add the function of customizing the settings for game controllers through the cloud-based web page.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41502/download",
+      "firmware_member": "NS39_KK3_MAX_V5.5.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.5/KK3_NS38_NS39_V5.5.zip",
+      "size": 108952,
+      "sha256": "3bc207165c8dfe4c15ac9df4d63dc3554103b2595ff88e3871be90fb03fd6ccf",
+      "firmware_file": {
+        "size": 53144,
+        "sha256": "f31544c8faa8edfea597b2b74ed8e28d95edaca4ca23482127a5bf4daa40021e"
+      },
+      "payload": {
+        "size": 53144,
+        "sha256": "f31544c8faa8edfea597b2b74ed8e28d95edaca4ca23482127a5bf4daa40021e"
+      }
     }
   ]
 }
