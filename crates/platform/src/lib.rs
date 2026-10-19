@@ -5,6 +5,8 @@
 pub mod macos;
 
 pub mod acquisition;
+#[cfg(any(target_os = "macos", test))]
+mod completion;
 pub mod discovery;
 pub mod journal;
 #[cfg(unix)]

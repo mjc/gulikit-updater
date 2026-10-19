@@ -998,7 +998,21 @@ impl BluetoothPort for BluetoothSession {
         })
     }
     fn completion_detached(&mut self) -> Result<bool, String> {
-        Ok(self.session.completion_observation()?.decision() == CompletionDecision::ExpectedDetach)
+        // The KK3 normally reboots after accepting the last DATA block, before
+        // its CSW. OS removal notifications can lag that reboot. Wait only on
+        // host observations; never send F2, F1, a retry, or a reset here.
+        let started = Instant::now();
+        crate::completion::wait_for_expected_reboot(
+            || self.session.completion_observation(),
+            || {
+                let remaining = Duration::from_secs(5).saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return false;
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
+                true
+            },
+        )
     }
     fn finish(&mut self) -> Result<(), String> {
         if self.finished {
@@ -1007,7 +1021,13 @@ impl BluetoothPort for BluetoothSession {
         self.finished = true;
         if let Some(mut usb) = self.usb.take() {
             let preserve = usb.firmware_may_have_been_submitted();
-            let detached = preserve && self.completion_detached().unwrap_or(false);
+            let detached = preserve
+                && self
+                    .session
+                    .completion_observation()
+                    .is_ok_and(|observation| {
+                        observation.decision() == CompletionDecision::ExpectedDetach
+                    });
             if usb.io_mut().diagnostic {
                 eprintln!(
                     "Cleanup disposition: {}",

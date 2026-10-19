@@ -249,6 +249,8 @@ pub trait BluetoothPort {
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError>;
     /// Observe only the selected device's removal, with complete discovery and
     /// no intervening USB arrival or additional recognized update candidate.
+    /// Allow bounded host-notification delay after the controller's normal
+    /// final-block reboot. This observation must not send device commands.
     ///
     /// # Errors
     ///
@@ -414,9 +416,11 @@ fn stream_bluetooth_payload(
                 && error.completion == SubmissionCompletion::DataSentStatusMissing
                 && !error.audit_failure
             {
-                // Hardware can restart after accepting the last DATA OUT,
-                // before returning its CSW. Preserve that command's error
-                // and unconfirmed block; only a fresh F1 can prove install.
+                // A KK3 normally reboots after accepting the last DATA OUT,
+                // before returning its CSW. This is the expected completion
+                // path, not a reason to retry the block or send another F2.
+                // The adapter waits for host removal notifications to converge.
+                // Preserve the missing CSW; fresh F1 still proves installation.
                 if port.completion_detached()? {
                     record.outcome = Outcome::TransferSubmittedPendingCompletion;
                     return Ok(());
@@ -1175,6 +1179,31 @@ mod tests {
         assert_eq!(record.outcome, Outcome::OutcomeUnknown);
         assert_eq!(record.bytes_submitted, 361_472);
         assert_eq!(record.bytes_confirmed, 360_960);
+    }
+
+    #[test]
+    fn kk3_normal_last_block_reboot_waits_for_readback_without_retrying_firmware() {
+        let mut port = Fake {
+            version: 323,
+            missing_status: Some(708),
+            ..Fake::default()
+        };
+        let record = bluetooth_release(
+            &mut port,
+            &vec![0x5a; 361_472],
+            324,
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(record.outcome, Outcome::TransferSubmittedPendingCompletion);
+        assert_eq!(record.bytes_submitted, 361_472);
+        assert_eq!(record.bytes_confirmed, 360_960);
+        assert_eq!(port.calls.len(), 708);
+        assert_eq!(port.calls.last(), Some(&0xf0));
+        assert_eq!(port.calls[2], 0xf2);
+        assert!(record.commands.last().unwrap().error.is_some());
+        assert!(record.error.is_none());
+        assert!(port.cleanup);
     }
 
     #[test]
