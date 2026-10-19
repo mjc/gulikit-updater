@@ -17,6 +17,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 tempfile = "3"
 clap = { version = "4.6", features = ["derive"] }
 url = "2"
+ureq = { version = "3.4.2", default-features = false, features = [
+  "rustls",
+  "platform-verifier",
+] }
 gulikit-core = { path = "../core" }
 object = { version = "0.40", default-features = false, features = [
   "read_core",

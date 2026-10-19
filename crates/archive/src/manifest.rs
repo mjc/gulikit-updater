@@ -253,6 +253,7 @@ pub enum Error {
     PayloadSizeMismatch,
     PayloadHashMismatch,
     PublishedHashMismatch,
+    InvalidArchive,
 }
 
 impl fmt::Display for Error {
@@ -284,6 +285,7 @@ impl fmt::Display for Error {
             Self::PublishedHashMismatch => {
                 f.write_str("published SHA-256 does not match measured content")
             }
+            Self::InvalidArchive => f.write_str("firmware ZIP is invalid or exceeds safety limits"),
         }
     }
 }
@@ -461,6 +463,26 @@ impl ReleaseRecord {
             _ => return Err(Error::PayloadSizeMismatch),
         }
         Ok(())
+    }
+
+    /// Verify a complete ZIP archive, its selected firmware member, and measured payload.
+    ///
+    /// # Errors
+    /// Returns an error if the ZIP is malformed, its selected member is unsafe,
+    /// or any measured size or digest differs from this record.
+    pub fn verify_archive_bytes(&self, archive_bytes: &[u8]) -> Result<(), Error> {
+        if archive_bytes.is_empty() || archive_bytes.len() > MAX_ARCHIVE_BYTES {
+            return Err(if archive_bytes.is_empty() {
+                Error::ArchiveEmpty
+            } else {
+                Error::ArchiveTooLarge
+            });
+        }
+        crate::git::validate_zip(archive_bytes).map_err(|_| Error::InvalidArchive)?;
+        let (firmware_file, payload) =
+            crate::content::firmware_bytes(&self.metadata, archive_bytes)
+                .map_err(|_| Error::InvalidArchive)?;
+        self.verify_optional(archive_bytes, &firmware_file, payload.as_deref())
     }
 
     fn validate_published_hashes(&self) -> Result<(), Error> {
