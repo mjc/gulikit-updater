@@ -127,6 +127,7 @@ pub struct ReceiptIdentity {
     pub outcome: Outcome,
     pub generation: u64,
     pub expected_version: String,
+    pub package: serde_json::Value,
 }
 
 /// A receipt can only request a fresh observation; it cannot authorize a transfer.
@@ -147,19 +148,21 @@ impl PriorAttempt {
             outcome: self.outcome,
             generation: self.generation,
             expected_version: self.expected_version.clone(),
+            package: self.record["package"].clone(),
         }
     }
 
     /// Refuse a replaced receipt before opening a controller session.
     ///
     /// # Errors
-    /// Returns an error if the component, outcome, generation or expected version
+    /// Returns an error if the component, outcome, generation, package or expected version
     /// differs from the receipt the user confirmed.
     pub fn require_identity(&self, expected: &ReceiptIdentity) -> Result<(), String> {
         if self.component == expected.component
             && self.outcome == expected.outcome
             && self.generation == expected.generation
             && self.expected_version == expected.expected_version
+            && self.record["package"] == expected.package
         {
             Ok(())
         } else {
@@ -395,7 +398,7 @@ fn execute_frontend(
                 policy,
                 confirm_ns39,
                 expected_attachment,
-                expected_archive_sha256: Some(package.info().archive_sha256.clone()),
+                expected_package: Some(package.info().clone()),
             },
             cancelled,
             progress,
@@ -649,8 +652,9 @@ mod tests {
             payload_size: release.payload_size(),
             payload_sha256: release.payload_sha256().into(),
             archive_sha256: release.archive_sha256.into(),
-            source_url: release.source_url,
-            member: release.member,
+            source_url: release.source_url.into(),
+            member: release.member.into(),
+            archive_selection: None,
         }
     }
 
@@ -825,6 +829,10 @@ mod tests {
             },
             ReceiptIdentity {
                 expected_version: "5.07".into(),
+                ..identity.clone()
+            },
+            ReceiptIdentity {
+                package: serde_json::json!({"version":"3.24", "archive_sha256":"replaced"}),
                 ..identity
             },
         ] {

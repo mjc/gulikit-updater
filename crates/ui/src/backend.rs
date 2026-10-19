@@ -372,8 +372,9 @@ mod tests {
                 payload_size: release.payload_size(),
                 payload_sha256: release.payload_sha256().into(),
                 archive_sha256: release.archive_sha256.into(),
-                source_url: release.source_url,
-                member: release.member,
+                source_url: release.source_url.into(),
+                member: release.member.into(),
+                archive_selection: None,
             },
             attachment: updater::Attachment {
                 ancestor: 42,

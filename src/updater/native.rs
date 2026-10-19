@@ -505,6 +505,21 @@ fn read_bluetooth_version(
 pub(super) fn attempt_target(
     prior: &Value,
 ) -> Result<(gulikit_core::package::Component, String), String> {
+    let package = &prior["package"];
+    // A receipt may request observation of its original target, never a transfer.
+    // A malformed snapshot must not fall back to legacy compiled admission.
+    if package.get("archive_selection").is_some() {
+        let info: gulikit_core::package::PackageInfo = serde_json::from_value(package.clone())
+            .map_err(|error| format!("Invalid original archive package: {error}"))?;
+        let selection = info
+            .archive_selection
+            .as_ref()
+            .ok_or("Missing original archive selection")?;
+        if !info.matches_archive_selection(selection) {
+            return Err("Original attempt package disagrees with its archive selection".into());
+        }
+        return Ok((info.component, info.version));
+    }
     let component = prior["package"]["component"]
         .as_str()
         .ok_or("Missing component")?
@@ -513,7 +528,6 @@ pub(super) fn attempt_target(
     let version = prior["package"]["version"]
         .as_str()
         .ok_or("Missing package version")?;
-    let package = &prior["package"];
     let recognized = gulikit_core::package::catalog().iter().any(|release| {
         let model = match release.model {
             gulikit_core::package::Model::Kk3Max => "kk3-max",
@@ -778,6 +792,82 @@ mod tests {
         );
         // This production boundary returns before Session::open; the test never
         // creates a controller session or verification output record.
+    }
+
+    #[test]
+    fn archive_receipts_use_the_original_snapshot_and_reject_inconsistent_metadata() {
+        use gulikit_core::package::{
+            ArchiveParserKind, ArchiveSelection, ArchiveSelectionData, Component, Model,
+            PackageInfo,
+        };
+        let selection = ArchiveSelection::try_from(ArchiveSelectionData {
+            archive_revision: "a".repeat(40),
+            path: "/kk3-max/base/v3.1/GuliKit_NS39_V3.1.zip".into(),
+            component: Component::Main,
+            version: "3.1".into(),
+            archive: "GuliKit_NS39_V3.1.zip".into(),
+            archive_size: 100_000,
+            archive_sha256: "b".repeat(64),
+            firmware_member: "GuliKit_NS39_V3.1.bin".into(),
+            member_size: 43_140,
+            member_sha256: "c".repeat(64),
+            payload_size: 43_140,
+            payload_sha256: "c".repeat(64),
+            source_url: "https://www.gulikit.com/newsinfo/887152.html".into(),
+            parser: ArchiveParserKind::MainBinV1,
+        })
+        .unwrap();
+        let data = selection.data();
+        let package = PackageInfo {
+            model: Model::Kk3Max,
+            component: data.component,
+            version: data.version.clone(),
+            payload_size: 43_140,
+            payload_sha256: data.payload_sha256.clone(),
+            archive_sha256: data.archive_sha256.clone(),
+            source_url: data.source_url.clone(),
+            member: data.firmware_member.clone(),
+            archive_selection: Some(selection),
+        };
+        let prior = serde_json::json!({"package":package});
+        assert_eq!(
+            attempt_target(&prior).unwrap(),
+            (Component::Main, "3.1".into())
+        );
+        for (field, value) in [
+            ("version", serde_json::json!("3.2")),
+            ("payload_size", serde_json::json!(1)),
+            ("payload_sha256", serde_json::json!("d".repeat(64))),
+            ("archive_sha256", serde_json::json!("d".repeat(64))),
+            ("member", serde_json::json!("other.bin")),
+            (
+                "source_url",
+                serde_json::json!("https://example.com/changed"),
+            ),
+            ("archive_selection", Value::Null),
+            ("archive_selection", serde_json::json!({})),
+        ] {
+            let mut changed = prior.clone();
+            changed["package"][field] = value;
+            assert!(
+                attempt_target(&changed).is_err(),
+                "accepted changed {field}"
+            );
+        }
+        let mut malformed = prior;
+        malformed["package"]["archive_selection"]["path"] = "/other.zip".into();
+        assert!(attempt_target(&malformed).is_err());
+    }
+
+    #[test]
+    fn malformed_archive_snapshot_never_falls_back_to_a_compiled_release() {
+        let prior = serde_json::json!({"package":gulikit_core::package::catalog()[0]});
+        assert!(attempt_target(&prior).is_ok());
+        for snapshot in [Value::Null, serde_json::json!({}), serde_json::json!(false)] {
+            let mut changed = prior.clone();
+            changed["package"]["archive_selection"] = snapshot;
+            assert!(attempt_target(&changed).is_err());
+        }
     }
 
     #[test]

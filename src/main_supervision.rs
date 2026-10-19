@@ -36,7 +36,7 @@ pub fn update(command: Command) -> Result<Value, AppError> {
                 VersionPolicy::UpgradeOnly
             },
             expected_attachment: None,
-            expected_archive_sha256: None,
+            expected_package: None,
         },
         &mut || cancelled.load(Ordering::Acquire),
         &mut |_| {},

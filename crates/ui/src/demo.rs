@@ -163,8 +163,9 @@ impl DemoDevice {
             },
             payload_sha256: "simulated payload; no firmware bytes".into(),
             archive_sha256: release.archive_sha256.into(),
-            source_url: release.source_url,
-            member: release.member,
+            source_url: release.source_url.into(),
+            member: release.member.into(),
+            archive_selection: None,
         };
         self.selected = Some((path.clone(), info.clone()));
         Ok(Event::Package { path, info })

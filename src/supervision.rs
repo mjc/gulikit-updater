@@ -1,7 +1,7 @@
 //! Main filesystem workers shared by the CLI and desktop executable.
 use crate::updater::{self, ApplicationError, Attachment};
 use gulikit_core::{
-    package::{Component, Model},
+    package::{Component, Model, PackageInfo},
     update::Progress,
     version::VersionPolicy,
 };
@@ -31,7 +31,7 @@ pub struct MainUpdate {
     pub policy: VersionPolicy,
     pub confirm_ns39: bool,
     pub expected_attachment: Option<Attachment>,
-    pub expected_archive_sha256: Option<String>,
+    pub expected_package: Option<PackageInfo>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,7 +42,7 @@ struct WorkerRequest {
     allow_downgrade: bool,
     confirm_ns39: bool,
     expected_attachment: Option<Attachment>,
-    expected_archive_sha256: Option<String>,
+    expected_package: Option<PackageInfo>,
 }
 
 fn subprocess(argument: &str) -> Result<Command, ApplicationError> {
@@ -68,7 +68,7 @@ pub fn update(
         allow_downgrade: request.policy == VersionPolicy::AllowDowngrade,
         confirm_ns39: request.confirm_ns39,
         expected_attachment: request.expected_attachment,
-        expected_archive_sha256: request.expected_archive_sha256,
+        expected_package: request.expected_package,
     };
     let response = gulikit_platform::main_worker::run_with_progress(
         subprocess("__main-guardian")?,
@@ -119,11 +119,21 @@ fn worker(channel: &mut Channel) -> Result<(), ApplicationError> {
         .model
         .parse()
         .map_err(|error: gulikit_core::package::SelectionError| error.to_string())?;
-    let package = gulikit_platform::inspect_package(&archive, model, Component::Main)?;
-    if request
-        .expected_archive_sha256
+    let package = match request
+        .expected_package
         .as_ref()
-        .is_some_and(|hash| hash != &package.info().archive_sha256)
+        .and_then(|info| info.archive_selection.as_ref())
+    {
+        Some(selection) => gulikit_platform::inspect_archive_package(&archive, selection)?,
+        None => gulikit_platform::inspect_package(&archive, model, Component::Main)?,
+    };
+    if package.info().model != model || package.info().component != Component::Main {
+        return Err("Main worker requires the selected model's Main firmware.".into());
+    }
+    if request
+        .expected_package
+        .as_ref()
+        .is_some_and(|expected| expected != package.info())
     {
         return Err("Firmware package changed since selection. Select and review it again.".into());
     }

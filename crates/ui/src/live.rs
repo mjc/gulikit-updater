@@ -584,7 +584,9 @@ impl LiveApp {
                         component: result.package.component,
                         outcome: result.transfer.outcome,
                         generation: result.target.generation,
-                        expected_version: result.package.version,
+                        expected_version: result.package.version.clone(),
+                        package: serde_json::to_value(&result.package)
+                            .expect("package metadata serializes"),
                     },
                 });
                 self.page = Page::Restart;
@@ -699,6 +701,7 @@ impl LiveApp {
                 outcome: prior.outcome,
                 generation: prior.generation,
                 expected_version: prior.expected_version,
+                package: prior.record["package"].clone(),
             },
         });
         self.package = None;

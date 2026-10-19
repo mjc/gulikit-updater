@@ -616,7 +616,15 @@ pub fn update_main_with_progress(
         }
         return record;
     }
-    run_main_transaction(port, package.payload(), policy, cancelled, progress)
+    run_main_transaction(
+        port,
+        package.payload(),
+        &package.info().version,
+        package.info().payload_size,
+        policy,
+        cancelled,
+        progress,
+    )
 }
 
 #[cfg(test)]
@@ -626,11 +634,13 @@ fn main_transfer(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    run_main_transaction(port, payload, policy, cancelled, |_| {})
+    run_main_transaction(port, payload, "5.9", 51_500, policy, cancelled, |_| {})
 }
 fn run_main_transaction(
     port: &mut impl MainPort,
     payload: &[u8],
+    expected_version: &str,
+    expected_payload_size: usize,
     policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(Progress),
@@ -648,7 +658,14 @@ fn run_main_transaction(
         let raw = port.read_version()?;
         let version = crate::version::MainVersion::parse(&raw).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
-        match version.decision_with_policy(policy) {
+        match crate::version::release_decision(
+            Component::Main,
+            &version.to_string(),
+            expected_version,
+            policy,
+        )
+        .map_err(|error| error.to_string())?
+        {
             VersionDecision::AlreadyCurrent => {
                 record.outcome = Outcome::AlreadyCurrent;
                 return Ok(());
@@ -659,7 +676,7 @@ fn run_main_transaction(
             }
             VersionDecision::Eligible => {}
         }
-        if payload.len() != 51500 {
+        if payload.len() != expected_payload_size {
             return Err("Incorrect Main payload size".into());
         }
         port.prepare_write()?;
@@ -884,12 +901,53 @@ mod tests {
     }
 
     #[test]
+    fn selected_main_target_drives_downgrade_policy_and_expected_transfer_size() {
+        let mut port = main_port();
+        let payload = vec![0x6d; 1536];
+        let record = run_main_transaction(
+            &mut port,
+            &payload,
+            "3.1",
+            payload.len(),
+            VersionPolicy::AllowDowngrade,
+            || false,
+            |_| {},
+        );
+
+        assert_eq!(
+            record.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(port.written, payload);
+    }
+
+    #[test]
+    fn selected_main_target_rejects_a_payload_length_mismatch_before_creation() {
+        let mut port = main_port();
+        let record = run_main_transaction(
+            &mut port,
+            &[0x6d; 512],
+            "3.1",
+            1024,
+            VersionPolicy::AllowDowngrade,
+            || false,
+            |_| {},
+        );
+
+        assert_eq!(record.outcome, Outcome::Refused);
+        assert_eq!(port.events, ["finish"]);
+        assert_eq!(record.bytes_submitted, 0);
+    }
+
+    #[test]
     fn progress_reports_confirmed_short_writes_and_never_guesses_completion() {
         let mut port = main_port();
         let mut progress = Vec::new();
         let result = run_main_transaction(
             &mut port,
             &vec![0; 51500],
+            "5.9",
+            51_500,
             VersionPolicy::UpgradeOnly,
             || false,
             |p| progress.push(p),
