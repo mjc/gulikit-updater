@@ -264,6 +264,30 @@
         "size": 47636,
         "sha256": "7db41670817671c9ab847928290e184514ba6577457e0f7f9e5eaf6a3bd2fd16"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.6",
+      "filename": "GuliKit_NS39_V3.6a.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40494/download",
+      "changelog": null,
+      "changelog_source_url": null,
+      "firmware_member": "GuliKit_NS39_V3.6.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.6/GuliKit_NS39_V3.6a.zip",
+      "size": 49672,
+      "sha256": "dc576f660db9215829de15e1d6cdd9e0ab4e7e4eab51e3d2d950d5d5ace4b83c",
+      "firmware_file": {
+        "size": 47640,
+        "sha256": "9632a967306b69ed93913efca22d55fd6a214b040afc44ca973304b5b4d96af5"
+      },
+      "payload": {
+        "size": 47640,
+        "sha256": "9632a967306b69ed93913efca22d55fd6a214b040afc44ca973304b5b4d96af5"
+      }
     }
   ]
 }
