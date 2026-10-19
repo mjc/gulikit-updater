@@ -1128,6 +1128,28 @@
         "size": 2245632,
         "sha256": "3dc8fd352597de4b619efcf139933fbbccc5c1c335aa580455bf5f64f4b9c97a"
       }
+    },
+    {
+      "product": "elves-2-pro",
+      "member_kind": "opaque_updater_exe",
+      "component": "bluetooth",
+      "version": "5.07",
+      "filename": "GuliKit_NS38_NS39_NS59_BT_V5.07.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "released_at": "2025-12-10",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2976391",
+      "changelog": "Fixed an issue where pressing HOME to power on a controller connected to a PC by USB could also wake a previously paired Switch.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "GuliKit_NS38_NS39_NS59_BT_V5.07.exe",
+      "published_hashes": [],
+      "path": "/elves-2-pro/bluetooth/v5.07/GuliKit_NS38_NS39_NS59_BT_V5.07.zip",
+      "size": 1148144,
+      "sha256": "6ce3db166031d30ff9f61e83387c6f8cb0475eef57321c2347ee32afe9152dad",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "3dc8fd352597de4b619efcf139933fbbccc5c1c335aa580455bf5f64f4b9c97a"
+      }
     }
   ]
 }
