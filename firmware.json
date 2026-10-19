@@ -192,6 +192,30 @@
         "size": 47652,
         "sha256": "45f6cca0fb43fb27b75f7a8fdeea1fbd248b686c4860f64585ee23a226226b0b"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.4",
+      "filename": "GuliKit_NS39_V3.4.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40445/download",
+      "changelog": "1. Fixed the problem where the key combination for joystick calibration would not work after the replacement of A&B buttons.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40445/download",
+      "firmware_member": "GuliKit_NS39_V3.4.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.4/GuliKit_NS39_V3.4.zip",
+      "size": 50022,
+      "sha256": "7914d12f42378bf2e106a392af0fab8e49aa173a2617dd8fe1b217b5876ec43e",
+      "firmware_file": {
+        "size": 47648,
+        "sha256": "9706427e5161d6c293f6994f95a89375322cb49981b1dc9c42bfc1f962014e12"
+      },
+      "payload": {
+        "size": 47648,
+        "sha256": "9706427e5161d6c293f6994f95a89375322cb49981b1dc9c42bfc1f962014e12"
+      }
     }
   ]
 }
