@@ -456,6 +456,30 @@
         "size": 48120,
         "sha256": "3b5dbdc61fdd6904a61c207270910c3cbcb2a179de7dbb754004beea34653cfb"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.4",
+      "filename": "KK3_NS38_NS39_V4.4.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40792/download",
+      "changelog": "1. Added one more level option to set vibration intensity, changed from 2 levels(Weak/Strong) of vibration intensity setting options to 3 levels(Weak/Middle/Strong). \r\n    The default setting is at the 2nd level (Middle).",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40792/download",
+      "firmware_member": "NS39_KK3_MAX_V4.4.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.4/KK3_NS38_NS39_V4.4.zip",
+      "size": 98956,
+      "sha256": "249a3d0336fa3cd34b0f889b5db31f6845d3a29c45cba4f1823adb5a11b2ac5e",
+      "firmware_file": {
+        "size": 48148,
+        "sha256": "c25924fb91dca3ea60123dcc9903402a9c8a814f0f20d8236f6d931a8b046f91"
+      },
+      "payload": {
+        "size": 48148,
+        "sha256": "c25924fb91dca3ea60123dcc9903402a9c8a814f0f20d8236f6d931a8b046f91"
+      }
     }
   ]
 }
