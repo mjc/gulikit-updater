@@ -1709,6 +1709,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
 
 [[package]]
+name = "gulikit-archive"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "gulikit-core",
+ "hex",
+ "nix",
+ "object",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "url",
+ "zip",
+]
+
+[[package]]
 name = "gulikit-core"
 version = "0.1.0"
 dependencies = [
