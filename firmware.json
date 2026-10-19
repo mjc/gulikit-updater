@@ -1780,6 +1780,32 @@
         "size": 134744,
         "sha256": "8511f6633024a7cf47842bc8e785e405f55e26db42b2939a0be06e44e0317f66"
       }
+    },
+    {
+      "product": "switch-2-dock-ns35",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "00.00.7E.10",
+      "filename": "NS35_Firmware_Auto-Updater1.40.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/3202393.html",
+      "released_at": "2026-06-26",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/3024880",
+      "changelog": "Added compatibility with the new Switch 2 system.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/3202393.html",
+      "firmware_member": "bin/NS35_V00.00.7E.10.bin",
+      "published_hashes": [],
+      "path": "/switch-2-dock-ns35/base/v00.00.7E.10/NS35_Firmware_Auto-Updater1.40.zip",
+      "size": 17402591,
+      "sha256": "58a2ae7800a22b9586ed5fa1e0b521853026d47439c0dc62a58d447ce65f67b8",
+      "firmware_file": {
+        "size": 245760,
+        "sha256": "36528aec1ac7b1b604bbb5809f8d971042a8518a1723d71e3d160123bce4ac36"
+      },
+      "payload": {
+        "size": 245760,
+        "sha256": "36528aec1ac7b1b604bbb5809f8d971042a8518a1723d71e3d160123bce4ac36"
+      }
     }
   ]
 }
