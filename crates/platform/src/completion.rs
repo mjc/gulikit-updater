@@ -15,7 +15,7 @@ pub(crate) fn wait_for_expected_reboot(
             CompletionDecision::Pending => {}
         }
         if !wait() {
-            return Ok(false);
+            return observe()?.at_deadline().map_err(str::to_owned);
         }
     }
 }
@@ -81,6 +81,17 @@ mod tests {
             .unwrap()
         );
         assert_eq!(waits, 3);
+    }
+
+    #[test]
+    fn deadline_rejects_pending_one_sided_removal_evidence() {
+        let pending = observation(true, 1);
+
+        assert!(
+            wait_for_expected_reboot(|| Ok(CompletionObservation { ..pending }), || false,)
+                .is_err(),
+            "one-sided removal evidence at the deadline is invalidated, not a normal timeout"
+        );
     }
 
     #[test]

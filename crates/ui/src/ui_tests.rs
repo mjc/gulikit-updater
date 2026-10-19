@@ -1265,7 +1265,8 @@ fn archive_historical_download_offers_an_accessible_one_attempt_downgrade_contro
     let checkbox = scroll_until_visible(&app.ui, "Allow downgrade to selected firmware", true);
     assert_eq!(checkbox.accessible_enabled(), Some(true));
     inside_window(&app.ui, &checkbox);
-    click(&app.ui, "Allow downgrade to selected firmware");
+    checkbox.invoke_accessible_default_action();
+    layout(&app.ui);
     assert!(app.ui.get_allow_downgrade());
 
     if cfg!(target_os = "macos") {

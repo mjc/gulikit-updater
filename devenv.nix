@@ -11,10 +11,10 @@
   };
 
   # cc-rs uses Apple's macosx target spelling, which the Nix wrapper warns about.
-  env = lib.optionalAttrs config.stdenv.hostPlatform.isDarwin {
-    "CC_${lib.replaceStrings [ "-" ] [ "_" ] config.stdenv.hostPlatform.rust.rustcTarget}" =
-      "${config.stdenv.cc.cc}/bin/clang";
-    "CFLAGS_${lib.replaceStrings [ "-" ] [ "_" ] config.stdenv.hostPlatform.rust.rustcTarget}" =
+  env = lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+    "CC_${lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.rust.rustcTarget}" =
+      "${pkgs.stdenv.cc.cc}/bin/clang";
+    "CFLAGS_${lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.rust.rustcTarget}" =
       "-Werror=unguarded-availability";
   };
 

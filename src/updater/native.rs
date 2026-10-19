@@ -316,12 +316,11 @@ fn verify_attempt(
     let previous = prior.outcome;
     let generation = prior.generation;
     let prior = prior.record;
-    let (target, mut journal, readback) = if retained.is_some() {
-        if component != Component::Bluetooth {
-            return Err("The inspected component does not match the original attempt.".into());
-        }
-        let (port, (target, journal)) = prepare_retained_port(retained, |port| {
-            port.check_session()?;
+    let retained = prepare_retained_verification(
+        retained,
+        component,
+        BluetoothPort::check_session,
+        |port| {
             let target = port.target().clone();
             let mut journal = port.create_record(record).map_err(AppError::host_io)?;
             start_verification(
@@ -332,7 +331,10 @@ fn verify_attempt(
                 confirm_same_controller,
             )?;
             Ok((target, journal))
-        })?;
+        },
+        gulikit_platform::macos::BluetoothSession::surrender,
+    )?;
+    let (target, mut journal, readback) = if let Some((port, (target, journal))) = retained {
         (target, journal, read_bluetooth_version(port, cancelled))
     } else {
         let mut session = Session::open(confirm_ns39, component)?;
@@ -399,6 +401,34 @@ fn verify_attempt(
             "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
         }),
     ))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn prepare_retained_verification<P, T>(
+    retained: &mut Option<P>,
+    component: gulikit_core::package::Component,
+    mut check_session: impl FnMut(&mut P) -> Result<(), String>,
+    prepare: impl FnOnce(&mut P) -> Result<T, super::ApplicationError>,
+    surrender: impl FnOnce(P),
+) -> Result<Option<(P, T)>, super::ApplicationError> {
+    if component != gulikit_core::package::Component::Bluetooth {
+        if let Some(port) = retained.take() {
+            surrender(port);
+        }
+        return Ok(None);
+    }
+
+    let Some(port) = retained.as_mut() else {
+        return Ok(None);
+    };
+    if check_session(port).is_err() {
+        if let Some(port) = retained.take() {
+            surrender(port);
+        }
+        return Ok(None);
+    }
+
+    prepare_retained_port(retained, prepare).map(Some)
 }
 
 #[cfg(target_os = "macos")]
@@ -650,6 +680,117 @@ fn read_version<P>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct RetainedSession {
+        live: bool,
+    }
+
+    fn check_fake_session(session: &mut RetainedSession) -> Result<(), String> {
+        if session.live {
+            Ok(())
+        } else {
+            Err("USB topology changed".into())
+        }
+    }
+
+    #[test]
+    fn main_verification_releases_unrelated_bluetooth_session_for_fresh_open() {
+        let mut retained = Some(RetainedSession { live: true });
+        let mut released = false;
+        let prepared = prepare_retained_verification::<_, ()>(
+            &mut retained,
+            gulikit_core::package::Component::Main,
+            |_| panic!("Main verification must not validate a retained Bluetooth session"),
+            |_| panic!("Main verification must use a fresh Main session"),
+            |_| released = true,
+        )
+        .unwrap();
+
+        assert!(prepared.is_none(), "None selects the fresh session path");
+        assert!(retained.is_none());
+        assert!(released, "the retained claim is surrendered without reset");
+    }
+
+    #[test]
+    fn stale_bluetooth_session_is_released_for_fresh_verification() {
+        let mut retained = Some(RetainedSession { live: false });
+        let mut released = false;
+        let prepared = prepare_retained_verification::<_, ()>(
+            &mut retained,
+            gulikit_core::package::Component::Bluetooth,
+            check_fake_session,
+            |_| panic!("stale session must not create a verification record"),
+            |_| released = true,
+        )
+        .unwrap();
+
+        assert!(prepared.is_none(), "None selects fresh discovery/session");
+        assert!(retained.is_none());
+        assert!(released, "stale capture must be surrendered");
+    }
+
+    #[test]
+    fn session_invalidated_during_record_preparation_preserves_original_error() {
+        let mut retained = Some(RetainedSession { live: true });
+        let mut released = false;
+        let error = prepare_retained_verification::<_, ()>(
+            &mut retained,
+            gulikit_core::package::Component::Bluetooth,
+            check_fake_session,
+            |session| {
+                session.live = false;
+                Err(super::super::ApplicationError::host_io(
+                    "USB topology changed while creating the record".into(),
+                ))
+            },
+            |_| released = true,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "USB topology changed while creating the record"
+        );
+        assert!(retained.as_ref().is_some_and(|session| !session.live));
+        assert!(!released, "do not hide the failed record preparation");
+
+        let prepared = prepare_retained_verification::<_, ()>(
+            &mut retained,
+            gulikit_core::package::Component::Bluetooth,
+            check_fake_session,
+            |_| panic!("stale session must be released before another record is created"),
+            |_| released = true,
+        )
+        .unwrap();
+
+        assert!(prepared.is_none(), "retry selects a fresh session");
+        assert!(retained.is_none());
+        assert!(released);
+    }
+
+    #[test]
+    fn live_bluetooth_session_survives_host_record_failure_for_retry() {
+        let mut retained = Some(RetainedSession { live: true });
+        let mut released = false;
+        let error = prepare_retained_verification::<_, ()>(
+            &mut retained,
+            gulikit_core::package::Component::Bluetooth,
+            check_fake_session,
+            |_| {
+                Err(super::super::ApplicationError::host_io(
+                    "record path unavailable".into(),
+                ))
+            },
+            |_| released = true,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "record path unavailable");
+        assert!(retained.as_ref().is_some_and(|session| session.live));
+        assert!(!released, "a healthy inspected session remains retryable");
+    }
+
     #[test]
     fn failed_host_preparation_keeps_the_inspected_port_for_a_corrected_record_path() {
         let mut retained = Some(vec!["inspected"]);
