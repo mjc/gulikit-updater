@@ -936,6 +936,30 @@
         "size": 361472,
         "sha256": "143a5dc1935eebd1c9c7a395ac64ee8113ac8d5222fbe406c3ceaf22eb05098a"
       }
+    },
+    {
+      "component": "bluetooth",
+      "version": "3.26",
+      "filename": "NS38_NS39_BT_V3.26.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/history",
+      "released_at": "2024-10-30",
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/version/41085/download",
+      "changelog": "Optimized the Bluetooth wireless connection speed of the controller in Switch and PC modes, increasing polling rate and reducing latency.\nOptimized the gyro sensitivity speed of the controller in Switch mode.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "GuliKit_NS38_NS39_BT_V3.26.exe",
+      "published_hashes": [],
+      "path": "/kk3-max/bluetooth/v3.26/NS38_NS39_BT_V3.26.zip",
+      "size": 1163604,
+      "sha256": "97c36c7f2073f3e7c6e92ddf28411a32d4983ed2ab6d74594c07874796b3bb0c",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "960444a9c28779ebca774b19097d7d0d6897dc2b8659bdb7be5770a6c007beb4"
+      },
+      "payload": {
+        "size": 361472,
+        "sha256": "f5c170918ff2432c164c1a38602345382107cc16da1605fdcdd7999b388e6dbb"
+      }
     }
   ]
 }
