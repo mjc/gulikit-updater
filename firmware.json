@@ -1702,6 +1702,32 @@
         "size": 76640,
         "sha256": "af7eae86363057249f2dd10d99c640fee280713206f9ea16a281d7462fa59149"
       }
+    },
+    {
+      "product": "goku-2",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "3.4",
+      "filename": "NS36_V3.4.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/3196031.html",
+      "released_at": "2026-07-27",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/3026283",
+      "changelog": "Fixed an issue where a PS5 controller would not vibrate when used with an Xbox console.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/3196031.html",
+      "firmware_member": "NS36_V3.4.bin",
+      "published_hashes": [],
+      "path": "/goku-2/base/v3.4/NS36_V3.4.zip",
+      "size": 90096,
+      "sha256": "d4760209d7ea52282bf19615c860f6cd0a26ad7d4930d4fed20ad37f8affecc1",
+      "firmware_file": {
+        "size": 131072,
+        "sha256": "787fb076258743dc263bf188d52aa4a114875b2d9d639e53a3d116efc032f676"
+      },
+      "payload": {
+        "size": 131072,
+        "sha256": "787fb076258743dc263bf188d52aa4a114875b2d9d639e53a3d116efc032f676"
+      }
     }
   ]
 }
