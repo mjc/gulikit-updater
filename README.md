@@ -85,6 +85,75 @@ result can be recorded go to stderr. Exit codes: 0 success/already current,
 2 usage, 3 rejected package, 4 host I/O, 5 device/preflight refusal,
 7 awaiting verification, 8 cleanup/audit attention, 9 uncertain submission.
 
+## Maintain the firmware archive
+
+`gulikit-archive` stores complete original firmware ZIPs in an isolated bare Git
+repository. Its `firmware` branch starts with an orphan commit; each import adds
+one release in a GPG-signed commit. Configure Git's author and OpenPGP signing
+key before importing. The repository contains `/firmware.json` and paths such as
+`/kk3-max/bluetooth/v3.24/NS38_NS39_BT_V3.24.zip`.
+
+Archive commands disable repository-controlled Git hooks. Commit signature checks use the operator's local GPG keyring. Choose the archive
+remote and revision separately; a valid commit signature is not manufacturer
+authentication. No project firmware signing keys or signer registry is required.
+
+Create a metadata JSON file for each original ZIP:
+
+```json
+{
+  "component": "bluetooth",
+  "version": "3.24",
+  "filename": "NS38_NS39_BT_V3.24.zip",
+  "source_url": "https://www.gulikit.com/newsinfo/915900.html",
+  "released_at": "2024-09-06",
+  "changelog": "Fixed vibration not stopping in a wired Switch-mode connection to a PC.",
+  "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+  "firmware_member": "GuliKit_NS38_NS39_BT_V3.24.exe"
+}
+```
+
+Use `base` for the controller's main firmware. Keep the manufacturer's original
+ZIP filename and record the actual download URL in `retrieved_from` and its UTC
+timestamp in `retrieved_at` when known. Missing dates and release notes remain
+null. A community mirror's URL records that provenance; a locally measured
+hash does not authenticate it as a manufacturer download.
+
+```sh
+cargo run -p gulikit-archive -- init /path/to/new-archive.git
+cargo run -p gulikit-archive -- import /path/to/new-archive.git /path/to/NS38_NS39_BT_V3.24.zip --metadata /path/to/release.json
+cargo run -p gulikit-archive -- list /path/to/new-archive.git
+cargo run -p gulikit-archive -- read /path/to/new-archive.git --path /kk3-max/bluetooth/v3.24/NS38_NS39_BT_V3.24.zip --output /path/to/new-output.zip
+```
+
+The index always records size and SHA-256 for the complete ZIP and the selected
+`firmware_member` file. Existing KK3 Max records also contain the payload digest:
+base firmware is a BIN, and Bluetooth firmware is read from the reviewed PE32
+layout without executing the Windows updater. An unrecognized image or
+mismatched embedded version is refused.
+
+For other products, set `product` to a stable lowercase slug and `member_kind`
+to `raw_binary` for a BIN or `opaque_updater_exe` for an updater whose embedded
+payload has not been parsed. Raw BIN records include their payload digest;
+opaque updater records omit it rather than claiming the EXE is the firmware
+payload. Each record selects one product, component and actual member version.
+A ZIP shared by several products is preserved intact at each applicable path.
+For example, the shared KK3 package contains Max 5.9 and Pro 5.8; TT packages
+contain separate base and Bluetooth versions. Adding those records preserves
+all earlier KK3 Max metadata and ZIPs.
+
+`published_hashes` retains any publisher-provided checksums with `target`
+(`zip`, `firmware_file`, or `payload`), `algorithm`, `value`, and `source_url`.
+It is an empty list when no published checksums were found. SHA-256 claims are
+compared with the measured content; other algorithms are retained as sourced
+claims. These claims remain separate from the locally computed SHA-256 values.
+
+Imports validate ZIP members without extracting or executing them. Existing releases cannot be
+replaced, and readback verifies the stored bytes before creating a new output
+file. Select the full index path for readback: a version can have multiple
+original ZIPs, such as 5.1 and its later FIX package, under the same version
+directory. Archive storage is separate from the updater's reviewed-package checks;
+adding an archive does not make that version eligible for installation.
+
 ## Development
 
 The devenv pins the Rust toolchain and installs treefmt and strict Clippy commit
