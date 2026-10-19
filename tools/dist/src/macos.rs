@@ -179,6 +179,7 @@ fn stage(
 <key>CFBundleVersion</key><string>{version}</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>LSUIElement</key><true/>
 </dict></plist>
 "#
         ),

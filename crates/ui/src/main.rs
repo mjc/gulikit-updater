@@ -54,6 +54,8 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    initialize_desktop_backend()?;
     let (worker, events) = if demo {
         Worker::spawn(DemoDevice::default())
     } else {
@@ -70,6 +72,22 @@ fn main() -> Result<(), slint::PlatformError> {
     drop(ui);
     drop(worker);
     result
+}
+
+#[cfg(target_os = "macos")]
+fn initialize_desktop_backend() -> Result<(), slint::PlatformError> {
+    use slint::winit_030::winit::{
+        event_loop::EventLoop,
+        platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS},
+    };
+    // The bundle starts as an agent so the authorization launcher has no icon.
+    // Only the actual GUI (elevated or demo) becomes a regular application.
+    let mut builder = EventLoop::with_user_event();
+    builder.with_activation_policy(ActivationPolicy::Regular);
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .with_winit_event_loop_builder(builder)
+        .select()
 }
 
 #[cfg(target_os = "macos")]
