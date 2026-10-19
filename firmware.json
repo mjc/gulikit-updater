@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "releases": [
+    {
+      "component": "base",
+      "version": "2.6",
+      "filename": "GuliKit_NS39_V2.6.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40372/download",
+      "changelog": "1. Optimized the vibration effects in certain scenes for Switch console.\r\n\r\n2. Added the ability to cancel back button mapping. When a button mapping is set for the back button, pressing the Setting button followed by the back button will cancel the current back button mapping, accompanied by a long vibration as a reminder.\r\n\r\n3. Fixed an issue where having multiple back button mappings with button rapid fire functionality would affect other back buttons.\r\n\r\n-----------------------------------------------------------------------------------------------------",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40372/download",
+      "firmware_member": "GuliKit_NS39_V2.6.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v2.6/GuliKit_NS39_V2.6.zip",
+      "size": 45174,
+      "sha256": "d2311c4951940090f9d6511465dc42cbbf018abbffd957f0d3c1d4ce4d487324",
+      "firmware_file": {
+        "size": 43140,
+        "sha256": "68dca9be33652a5282191b9edfde38ef20e5b1ad97560f3252b3c4953f7e8774"
+      },
+      "payload": {
+        "size": 43140,
+        "sha256": "68dca9be33652a5282191b9edfde38ef20e5b1ad97560f3252b3c4953f7e8774"
+      }
+    }
+  ]
+}
