@@ -1008,6 +1008,30 @@
         "size": 361472,
         "sha256": "f3a12c1e90cfa572a803b6870f749c822999c47b25e5cb2c4e1922244580f0c8"
       }
+    },
+    {
+      "component": "bluetooth",
+      "version": "3.31",
+      "filename": "GuliKit_NS38_NS39_NS59_BT_V3.31.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/history",
+      "released_at": "2025-07-24",
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/version/41717/download",
+      "changelog": "Added auto-off for controllers when Switch 2 enters Sleep Mode.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "GuliKit_NS38_NS39_NS59_BT_V3.31.exe",
+      "published_hashes": [],
+      "path": "/kk3-max/bluetooth/v3.31/GuliKit_NS38_NS39_NS59_BT_V3.31.zip",
+      "size": 1163522,
+      "sha256": "70da553a1c4b82ea1019f1cf15c8bbd7dc7b973c81bcfd04453d258b7a0b11ec",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "89d98bb117de5cd2aa3c0f56743d4f1037c4cca859c51f58062e2fcdcf8df03e"
+      },
+      "payload": {
+        "size": 361472,
+        "sha256": "5a289a659f80d33ab9383c512a51066b12814903e028dca03aae416811cd07e5"
+      }
     }
   ]
 }
