@@ -1,4 +1,4 @@
-use super::{AppWindow, Page};
+use super::{AppWindow, Page, Palette};
 use gulikit_core::{package::Component, update::Progress};
 use gulikit_ui::{
     Page as ModelPage,
@@ -289,6 +289,9 @@ pub fn create_mode(
     demo: bool,
 ) -> Result<(AppWindow, slint::Timer), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    // Native widgets must use the same light palette as the fixed app surfaces.
+    ui.global::<Palette>()
+        .set_color_scheme(slint::language::ColorScheme::Light);
     ui.set_demo_mode(demo);
     let driver = Rc::new(RefCell::new(Driver {
         app: LiveApp::default(),
