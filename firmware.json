@@ -24,6 +24,30 @@
         "size": 43140,
         "sha256": "68dca9be33652a5282191b9edfde38ef20e5b1ad97560f3252b3c4953f7e8774"
       }
+    },
+    {
+      "component": "base",
+      "version": "2.7",
+      "filename": "GuliKit_NS39_V2.7.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40373/download",
+      "changelog": "1. Optimized the startup connection speed.\r\n2. Improved the output method when lightly pressing the trigger.\r\n3. Enhanced vibration stability when the battery is low.\r\n4. Improved wireless transmission stability.\r\n5. Added a dead zone mode for the joysticks, with the default being no dead zone. You can set the joystick to have a dead zone mode by pressing the Set button and the Screenshot button, which will be accompanied by a short vibration as a reminder.\r\n6. Fixed an issue where the back buttons couldn't map to the triggers in PC mode.\r\n\r\n-----------------------------------------------------------------------------------------------------",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40373/download",
+      "firmware_member": "GuliKit_NS39_V2.7.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v2.7/GuliKit_NS39_V2.7.zip",
+      "size": 45780,
+      "sha256": "319ac4dafcac6230302ac7599b002d4b421cbd61018532a8db67fee4f67fe4b4",
+      "firmware_file": {
+        "size": 43668,
+        "sha256": "6983f39c1bcc0853c6f2792b701211bebd7787b7935fa09ddd18c9722bb6dfad"
+      },
+      "payload": {
+        "size": 43668,
+        "sha256": "6983f39c1bcc0853c6f2792b701211bebd7787b7935fa09ddd18c9722bb6dfad"
+      }
     }
   ]
 }
