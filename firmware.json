@@ -384,6 +384,30 @@
         "size": 47912,
         "sha256": "db68f349f6aab0fded198aea679b2edab2ad585d1b52c689e314ebe4b5de9e0f"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.1",
+      "filename": "GuliKit_NS39_V4.1.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40675/download",
+      "changelog": "1. Optimized the data processing method of the controller, resulting in faster wireless transmission speed.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40675/download",
+      "firmware_member": "GuliKit_NS39_V4.1.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.1/GuliKit_NS39_V4.1.zip",
+      "size": 50339,
+      "sha256": "ef2095393077a4d36de9be536df405bea785e97e593e9b8595d45892b1d8414b",
+      "firmware_file": {
+        "size": 48052,
+        "sha256": "d28a41eec7e611596d196100aa85b59afe1952241ca714040d24c754931de1ed"
+      },
+      "payload": {
+        "size": 48052,
+        "sha256": "d28a41eec7e611596d196100aa85b59afe1952241ca714040d24c754931de1ed"
+      }
     }
   ]
 }
