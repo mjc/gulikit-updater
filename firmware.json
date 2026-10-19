@@ -144,6 +144,30 @@
         "size": 44948,
         "sha256": "03f875bbd92c4e527c36ddb39416788b210e7ab8ec64d70be3975f31c6e1fa0c"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.2",
+      "filename": "GuliKit_NS39_V3.2.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40423/download",
+      "changelog": "1. Add 3 kinds of joystick star ring lighting effects. Setting is still made with the \"Set button + D-pad left button\". Star ring lighting modes are: Default steady on, Joystick-activated flowing lighting, Vibration -activated lighting, Trigger -activated flowing lighting, Off.\r\n\r\n2. Fixed an issue where certain controllers cannot be started after upgrade for the first time.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40423/download",
+      "firmware_member": "GuliKit_NS39_V3.2.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.2/GuliKit_NS39_V3.2.zip",
+      "size": 49560,
+      "sha256": "73da14434c7ab7e6ce1cf3134a973054a7f0fcd60a9a7c27896bb1a0da66ccb6",
+      "firmware_file": {
+        "size": 47564,
+        "sha256": "9f074ca85f1116c694fbba2b1ce9715da46a31af3c3e112c90eec3aaec69a57b"
+      },
+      "payload": {
+        "size": 47564,
+        "sha256": "9f074ca85f1116c694fbba2b1ce9715da46a31af3c3e112c90eec3aaec69a57b"
+      }
     }
   ]
 }
