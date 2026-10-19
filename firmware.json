@@ -360,6 +360,30 @@
         "size": 47832,
         "sha256": "0ea528cd31c40ca0d9052512faa5f7b6ee517496a8f70bcc598f120cfee8f5c8"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.0",
+      "filename": "GuliKit_NS39_V4.0.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40597/download",
+      "changelog": "1.Added a feature where, when the lighting settings are turned off, the logo light will still illuminate in purple as a reminder when pressing key combinations to set the controller into APG Recording File Share Mode.\r\n2.Optimized the joystick's flowing light mode to address the occasional issue where the joystick returns to the center but the lights don't fully turn off.\r\n3.Improved the speed of certain system operations.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40597/download",
+      "firmware_member": "GuliKit_NS39_V4.0.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.0/GuliKit_NS39_V4.0.zip",
+      "size": 50433,
+      "sha256": "0dd4663018da2a1ffa53bd29fd7b57fc26d91663a66a45fea68a1857d2b9b9f3",
+      "firmware_file": {
+        "size": 47912,
+        "sha256": "db68f349f6aab0fded198aea679b2edab2ad585d1b52c689e314ebe4b5de9e0f"
+      },
+      "payload": {
+        "size": 47912,
+        "sha256": "db68f349f6aab0fded198aea679b2edab2ad585d1b52c689e314ebe4b5de9e0f"
+      }
     }
   ]
 }
