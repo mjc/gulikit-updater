@@ -214,6 +214,18 @@ impl Release {
         self.payload_size
     }
 
+    /// Exact selected member length pinned to this reviewed release.
+    #[must_use]
+    pub fn member_size(&self) -> usize {
+        self.member_size
+    }
+
+    /// SHA-256 of the selected archive member pinned to this reviewed release.
+    #[must_use]
+    pub fn member_sha256(&self) -> &'static str {
+        self.member_sha256
+    }
+
     /// SHA-256 of the payload pinned to this reviewed release.
     #[must_use]
     pub fn payload_sha256(&self) -> &'static str {
