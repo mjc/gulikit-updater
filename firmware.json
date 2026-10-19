@@ -1498,6 +1498,28 @@
         "size": 45232,
         "sha256": "ed76d1148d640b0770412d9365c407d0b32e7c40983ced849d7a2d5b40b8d842"
       }
+    },
+    {
+      "product": "kk2t",
+      "member_kind": "opaque_updater_exe",
+      "component": "bluetooth",
+      "version": "6.06",
+      "filename": "KK2T_NS09T_BT_V6.06.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/998414.html",
+      "released_at": "2025-07-03",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/161182",
+      "changelog": "Optimized Nintendo Switch Bluetooth and NFC compatibility.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/998414.html",
+      "firmware_member": "KK2T_NS09T_BT_V6.06.exe",
+      "published_hashes": [],
+      "path": "/kk2t/bluetooth/v6.06/KK2T_NS09T_BT_V6.06.zip",
+      "size": 1167670,
+      "sha256": "3dc3ec211dd22aeb881e5d1fdba1c4a8f744be5bb97eb32a74196710deeed9b4",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "ffb1c8d9e1974c6d5885ad03ed3fc817d96ce31bb6f757904cef68582bd85d40"
+      }
     }
   ]
 }
