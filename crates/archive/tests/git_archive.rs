@@ -284,7 +284,7 @@ fn failed_gpg_signing_does_not_publish_a_ref() {
             )
             .is_err()
     );
-    assert!(archive.index().unwrap().releases().is_empty());
+    assert_eq!(archive.index().unwrap().releases(), []);
     assert!(git_fails(&[
         "--git-dir",
         &repo.display().to_string(),
