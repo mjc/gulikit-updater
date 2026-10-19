@@ -10,7 +10,7 @@ use std::{
 #[derive(Parser)]
 #[command(
     version,
-    about = "Maintain original KK3 Max ZIPs in a separate firmware branch"
+    about = "Maintain original firmware ZIPs in a separate firmware branch"
 )]
 struct Cli {
     #[command(subcommand)]

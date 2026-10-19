@@ -18,7 +18,7 @@ fn two_imports_are_signed_orphan_then_linear_append_without_source_checkout_chan
     let (source, source_head, source_status) = source_fixture(temp.path(), &fixture);
 
     let repo = temp.path().join("archive.git");
-    let archive = GitArchive::init(&repo).unwrap();
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
     configure_archive(&repo, &fixture, true);
 
     let main_zip = temp.path().join("main.zip");
@@ -113,7 +113,7 @@ fn two_imports_are_signed_orphan_then_linear_append_without_source_checkout_chan
         ]
     );
 
-    check_export_and_invalid_append(temp.path(), &repo, &archive, &second);
+    check_export_and_invalid_append(temp.path(), &repo, &archive, &second, &fixture.home);
 }
 
 fn source_fixture(temp: &Path, fixture: &SignedFixture) -> (PathBuf, String, Vec<u8>) {
@@ -150,12 +150,19 @@ fn source_fixture(temp: &Path, fixture: &SignedFixture) -> (PathBuf, String, Vec
     (source, source_head, source_status)
 }
 
-fn check_export_and_invalid_append(temp: &Path, repo: &Path, archive: &GitArchive, second: &str) {
+fn check_export_and_invalid_append(
+    temp: &Path,
+    repo: &Path,
+    archive: &GitArchive,
+    second: &str,
+    gpg_home: &Path,
+) {
     let exported = temp.join("export.zip");
     let binary = assert_cmd::cargo::cargo_bin!("gulikit-archive");
     assert_cmd::Command::new(binary)
         .arg("read")
         .arg(repo)
+        .env("GNUPGHOME", gpg_home)
         .args(["--path", "/kk3-max/base/v5.8/NS39_V5.8.zip", "--output"])
         .arg(&exported)
         .assert()
@@ -164,6 +171,7 @@ fn check_export_and_invalid_append(temp: &Path, repo: &Path, archive: &GitArchiv
     assert_cmd::Command::new(binary)
         .arg("read")
         .arg(repo)
+        .env("GNUPGHOME", gpg_home)
         .args([
             "--path",
             "/kk3-max/base/v5.9/KK3_NS38_NS39_V5.9.zip",
@@ -220,7 +228,7 @@ fn duplicate_identity_and_invalid_zip_leave_the_archive_ref_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     let fixture = SignedFixture::new(temp.path());
     let repo = temp.path().join("archive.git");
-    let archive = GitArchive::init(&repo).unwrap();
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
     configure_archive(&repo, &fixture, true);
     let package = temp.path().join("main.zip");
     fs::write(&package, synthetic_zip("firmware.bin", b"one")).unwrap();
@@ -270,7 +278,7 @@ fn signed_same_length_blob_replacement_is_rejected_before_listing_or_extending()
     let temp = tempfile::tempdir().unwrap();
     let fixture = SignedFixture::new(temp.path());
     let repo = temp.path().join("archive.git");
-    let archive = GitArchive::init(&repo).unwrap();
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
     configure_archive(&repo, &fixture, true);
     let package = temp.path().join("original.zip");
     fs::write(&package, synthetic_zip("firmware.bin", b"one")).unwrap();
@@ -310,7 +318,7 @@ fn signed_same_length_blob_replacement_is_rejected_before_listing_or_extending()
     );
     git_repo(&repo, &["update-ref", BRANCH, &rewritten, &original]);
     assert!(matches!(
-        GitArchive::open(&repo),
+        GitArchive::open_with_gpg_home(&repo, &fixture.home),
         Err(GitArchiveError::InvalidBlob)
     ));
     assert!(matches!(archive.index(), Err(GitArchiveError::InvalidBlob)));
@@ -326,7 +334,7 @@ fn recursive_tree_expansion_is_rejected_despite_a_small_root_tree() {
     let temp = tempfile::tempdir().unwrap();
     let fixture = SignedFixture::new(temp.path());
     let repo = temp.path().join("archive.git");
-    let archive = GitArchive::init(&repo).unwrap();
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
     configure_archive(&repo, &fixture, true);
     let package = temp.path().join("original.zip");
     fs::write(&package, synthetic_zip("firmware.bin", b"one")).unwrap();
@@ -378,7 +386,7 @@ fn recursive_tree_expansion_is_rejected_despite_a_small_root_tree() {
     );
     git_repo(&repo, &["update-ref", BRANCH, &rewritten, &original]);
     assert!(matches!(
-        GitArchive::open(&repo),
+        GitArchive::open_with_gpg_home(&repo, &fixture.home),
         Err(GitArchiveError::InvalidTree)
     ));
 }
@@ -402,7 +410,7 @@ fn failed_gpg_signing_does_not_publish_a_ref() {
     let temp = tempfile::tempdir().unwrap();
     let fixture = SignedFixture::without_key(temp.path());
     let repo = temp.path().join("archive.git");
-    let archive = GitArchive::init(&repo).unwrap();
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
     configure_archive(&repo, &fixture, false);
     let package = temp.path().join("main.zip");
     fs::write(&package, synthetic_zip("firmware.bin", b"main firmware")).unwrap();
@@ -426,6 +434,59 @@ fn failed_gpg_signing_does_not_publish_a_ref() {
 }
 
 #[test]
+#[cfg(unix)]
+fn repository_local_gpg_helpers_cannot_sign_or_forge_verification() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SignedFixture::new(temp.path());
+    let repo = temp.path().join("archive.git");
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
+    configure_archive(&repo, &fixture, true);
+
+    let marker = temp.path().join("malicious-gpg-helper-ran");
+    let marker_shell = marker.display().to_string().replace('\'', "'\\''");
+    let malicious_helper = temp.path().join("fake-gpg");
+    fs::write(
+        &malicious_helper,
+        format!(
+            "#!/bin/sh\nprintf invoked >> '{marker_shell}'\nprintf '[GNUPG:] GOODSIG 0123456789012345678901234567890123456789 Forged\\n[GNUPG:] VALIDSIG 0123456789012345678901234567890123456789 2026-10-18 1792329600 0 4 0 1 10 00 0123456789012345678901234567890123456789\\n'\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&malicious_helper, fs::Permissions::from_mode(0o700)).unwrap();
+    for key in ["gpg.program", "gpg.openpgp.program"] {
+        git(&[
+            "--git-dir",
+            &repo.display().to_string(),
+            "config",
+            key,
+            &malicious_helper.display().to_string(),
+        ]);
+    }
+
+    let package = temp.path().join("original.zip");
+    fs::write(&package, synthetic_zip("firmware.bin", b"firmware")).unwrap();
+    let signed = archive
+        .import(&package, metadata(Component::Base, "5.9", "original.zip"))
+        .unwrap();
+    assert_eq!(archive.index().unwrap().releases().len(), 1);
+    assert!(!marker.exists());
+
+    let tree = git_text(&repo, &["rev-parse", &format!("{signed}^{{tree}}")]);
+    let unsigned = git_text(
+        &repo,
+        &["commit-tree", &tree, "-p", &signed, "-m", "unsigned child"],
+    );
+    git_repo(&repo, &["update-ref", BRANCH, &unsigned, &signed]);
+    assert!(matches!(
+        GitArchive::open_with_gpg_home(&repo, &fixture.home),
+        Err(GitArchiveError::Git(_))
+    ));
+    assert!(!marker.exists());
+}
+
+#[test]
 fn open_refuses_a_working_source_repository_and_init_refuses_existing_paths() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -445,6 +506,8 @@ const BRANCH: &str = "refs/heads/firmware";
 
 fn metadata(component: Component, version: &str, filename: &str) -> ReleaseMetadata {
     ReleaseMetadata {
+        product: "kk3-max".to_owned(),
+        member_kind: gulikit_archive::manifest::FirmwareMemberKind::Kk3,
         component,
         version: version.to_owned(),
         filename: filename.to_owned(),
@@ -509,6 +572,13 @@ fn configure_archive(repo: &Path, fixture: &SignedFixture, signing: bool) {
         &repo.display().to_string(),
         "config",
         "gpg.program",
+        &fixture.wrapper.display().to_string(),
+    ]);
+    git(&[
+        "--git-dir",
+        &repo.display().to_string(),
+        "config",
+        "gpg.openpgp.program",
         &fixture.wrapper.display().to_string(),
     ]);
     if signing {

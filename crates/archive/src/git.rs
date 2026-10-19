@@ -41,6 +41,10 @@ pub enum GitArchiveError {
     InvalidBlob,
     #[error("Git command failed: {0}")]
     Git(String),
+    #[error("could not resolve an absolute host GPG executable from PATH")]
+    GpgProgramUnavailable,
+    #[error("GPG home is not an existing directory")]
+    InvalidGpgHome,
     #[error("archive ZIP is invalid or exceeds safety limits: {0}")]
     Zip(String),
     #[error("package path is not a regular file")]
@@ -62,6 +66,29 @@ pub enum GitArchiveError {
 pub struct GitArchive {
     path: PathBuf,
     object_id_len: usize,
+    gpg: GpgContext,
+}
+
+#[derive(Clone, Debug)]
+struct GpgContext {
+    program: Option<PathBuf>,
+    home: Option<PathBuf>,
+}
+
+impl GpgContext {
+    fn from_host(home: Option<&Path>) -> Result<Self, GitArchiveError> {
+        let home = home.map(canonical_gpg_home).transpose()?;
+        Ok(Self {
+            program: resolve_host_gpg_program(),
+            home,
+        })
+    }
+
+    fn program(&self) -> Result<&Path, GitArchiveError> {
+        self.program
+            .as_deref()
+            .ok_or(GitArchiveError::GpgProgramUnavailable)
+    }
 }
 
 impl GitArchive {
@@ -70,6 +97,21 @@ impl GitArchive {
     /// # Errors
     /// Rejects an existing path or a failed bare-repository initialization.
     pub fn init(path: &Path) -> Result<Self, GitArchiveError> {
+        Self::init_with_context(path, GpgContext::from_host(None)?)
+    }
+
+    /// Create a bare archive using the caller-selected GPG home directory.
+    ///
+    /// The GPG executable is still resolved from the caller's host PATH, never
+    /// from repository configuration.
+    ///
+    /// # Errors
+    /// Rejects an existing path, invalid GPG home, or failed initialization.
+    pub fn init_with_gpg_home(path: &Path, home: &Path) -> Result<Self, GitArchiveError> {
+        Self::init_with_context(path, GpgContext::from_host(Some(home))?)
+    }
+
+    fn init_with_context(path: &Path, gpg: GpgContext) -> Result<Self, GitArchiveError> {
         match fs::symlink_metadata(path) {
             Ok(_) => return Err(GitArchiveError::AlreadyExists),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -85,7 +127,7 @@ impl GitArchive {
             .arg(".")
             .output()?;
         check_output(output)?;
-        Self::open(path)
+        Self::open_with_context(path, gpg)
     }
 
     /// Open and validate an existing bare archive repository.
@@ -93,6 +135,21 @@ impl GitArchive {
     /// # Errors
     /// Rejects non-bare repositories, unexpected refs, invalid history, or invalid trees.
     pub fn open(path: &Path) -> Result<Self, GitArchiveError> {
+        Self::open_with_context(path, GpgContext::from_host(None)?)
+    }
+
+    /// Open an archive using the caller-selected GPG home directory.
+    ///
+    /// The GPG executable is resolved from the caller's host PATH, never from
+    /// repository configuration.
+    ///
+    /// # Errors
+    /// Rejects an invalid GPG home, non-bare repositories, unexpected refs, or invalid history.
+    pub fn open_with_gpg_home(path: &Path, home: &Path) -> Result<Self, GitArchiveError> {
+        Self::open_with_context(path, GpgContext::from_host(Some(home))?)
+    }
+
+    fn open_with_context(path: &Path, gpg: GpgContext) -> Result<Self, GitArchiveError> {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(GitArchiveError::InvalidRepositoryPath);
@@ -107,6 +164,7 @@ impl GitArchive {
         let archive = Self {
             path,
             object_id_len: 0,
+            gpg,
         };
         if archive.git(&["rev-parse", "--is-bare-repository"], None)? != b"true\n" {
             return Err(GitArchiveError::NotBare);
@@ -162,7 +220,8 @@ impl GitArchive {
         let bytes = read_package(package)?;
         validate_zip(&bytes)?;
         let (firmware_file, payload) = crate::content::firmware_bytes(&metadata, &bytes)?;
-        let record = ReleaseRecord::measure(metadata, &bytes, &firmware_file, &payload)?;
+        let record =
+            ReleaseRecord::measure_optional(metadata, &bytes, &firmware_file, payload.as_deref())?;
         let mut index = parent
             .as_ref()
             .map_or_else(FirmwareIndex::empty, |snapshot| snapshot.index.clone());
@@ -215,7 +274,7 @@ impl GitArchive {
         validate_zip(&bytes)?;
         let (firmware_file, payload) = crate::content::firmware_bytes(record.metadata(), &bytes)?;
         record
-            .verify(&bytes, &firmware_file, &payload)
+            .verify_optional(&bytes, &firmware_file, payload.as_deref())
             .map_err(|_| GitArchiveError::InvalidBlob)?;
         Ok(bytes)
     }
@@ -275,13 +334,12 @@ impl GitArchive {
 
             let introduced = if let Some(parent) = &previous {
                 if index.releases().len() != parent.index.releases().len() + 1
+                    || !index.releases().starts_with(parent.index.releases())
                     || parent.index.releases().iter().any(|old| {
-                        index.find(old.path()) != Some(old)
-                            || old
-                                .path()
-                                .strip_prefix('/')
-                                .and_then(|path| parent.tree.get(path))
-                                != old.path().strip_prefix('/').and_then(|path| tree.get(path))
+                        old.path()
+                            .strip_prefix('/')
+                            .and_then(|path| parent.tree.get(path))
+                            != old.path().strip_prefix('/').and_then(|path| tree.get(path))
                     })
                 {
                     return Err(GitArchiveError::InvalidHistory("commit is not append-only"));
@@ -424,7 +482,7 @@ impl GitArchive {
     }
 
     fn verify_commit(&self, oid: &str) -> Result<(), GitArchiveError> {
-        self.git(&["-c", "gpg.format=openpgp", "verify-commit", oid], None)?;
+        self.git_with_gpg(&["verify-commit", oid], None)?;
         Ok(())
     }
 
@@ -496,23 +554,19 @@ impl GitArchive {
         record: &ReleaseRecord,
     ) -> Result<String, GitArchiveError> {
         let message = format!(
-            "Add KK3 Max {} firmware {}\n",
+            "Add {} {} firmware {}\n",
+            record.metadata().product,
             record.component(),
             record.version()
         );
-        let mut args = vec![
-            "-c".to_owned(),
-            "gpg.format=openpgp".to_owned(),
-            "commit-tree".to_owned(),
-            tree.to_owned(),
-        ];
+        let mut args = vec!["commit-tree".to_owned(), tree.to_owned()];
         if let Some(parent) = parent {
             args.push("-p".to_owned());
             args.push(parent.to_owned());
         }
         args.push("-S".to_owned());
         let args: Vec<_> = args.iter().map(String::as_str).collect();
-        let oid = self.git_input(&args, message.as_bytes())?;
+        let oid = self.git_with_gpg(&args, Some(message.as_bytes()))?;
         Ok(String::from_utf8_lossy(&oid).trim().to_owned())
     }
 
@@ -522,6 +576,30 @@ impl GitArchive {
 
     fn git_input(&self, args: &[&str], input: &[u8]) -> Result<Vec<u8>, GitArchiveError> {
         self.run_git(args, None, Some(input))
+    }
+
+    fn git_with_gpg(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<Vec<u8>, GitArchiveError> {
+        let program = self.gpg.program()?;
+        let program = program.to_string_lossy();
+        let mut command = clean_git();
+        command
+            .current_dir(&self.path)
+            .arg("-c")
+            .arg(format!("gpg.program={program}"))
+            .arg("-c")
+            .arg(format!("gpg.openpgp.program={program}"))
+            .arg("-c")
+            .arg("gpg.format=openpgp")
+            .arg("--git-dir=.")
+            .args(args);
+        if let Some(home) = &self.gpg.home {
+            command.env("GNUPGHOME", home);
+        }
+        run_command(command, input)
     }
 
     fn run_git(
@@ -673,6 +751,51 @@ fn clean_git() -> Command {
         }
     }
     command
+}
+
+fn canonical_gpg_home(home: &Path) -> Result<PathBuf, GitArchiveError> {
+    let home = fs::canonicalize(home).map_err(|_| GitArchiveError::InvalidGpgHome)?;
+    if !home.is_dir() {
+        return Err(GitArchiveError::InvalidGpgHome);
+    }
+    Ok(home)
+}
+
+fn resolve_host_gpg_program() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const EXECUTABLE_NAMES: [&str; 2] = ["gpg.exe", "gpg"];
+    #[cfg(not(windows))]
+    const EXECUTABLE_NAMES: [&str; 1] = ["gpg"];
+
+    let search_path = env::var_os("PATH")?;
+    for directory in env::split_paths(&search_path) {
+        if !directory.is_absolute() {
+            continue;
+        }
+        for name in EXECUTABLE_NAMES {
+            let candidate = directory.join(name);
+            let Ok(metadata) = fs::metadata(&candidate) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+            }
+            if let Ok(program) = fs::canonicalize(candidate)
+                && program.to_str().is_some()
+            {
+                return Some(program);
+            }
+        }
+    }
+    None
 }
 
 fn run_command(mut command: Command, input: Option<&[u8]>) -> Result<Vec<u8>, GitArchiveError> {

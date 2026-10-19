@@ -87,7 +87,7 @@ result can be recorded go to stderr. Exit codes: 0 success/already current,
 
 ## Maintain the firmware archive
 
-`gulikit-archive` stores complete original KK3 Max ZIPs in an isolated bare Git
+`gulikit-archive` stores complete original firmware ZIPs in an isolated bare Git
 repository. Its `firmware` branch starts with an orphan commit; each import adds
 one release in a GPG-signed commit. Configure Git's author and OpenPGP signing
 key before importing. The repository contains `/firmware.json` and paths such as
@@ -125,12 +125,21 @@ cargo run -p gulikit-archive -- list /path/to/new-archive.git
 cargo run -p gulikit-archive -- read /path/to/new-archive.git --path /kk3-max/bluetooth/v3.24/NS38_NS39_BT_V3.24.zip --output /path/to/new-output.zip
 ```
 
-The index always records size and SHA-256 for the complete ZIP, the selected
-`firmware_member` file, and the firmware payload. For base releases the file and
-payload are the same BIN. For Bluetooth releases the file is the Windows EXE;
-the payload is its embedded firmware, read through the reviewed PE32 layout
-without executing the program. An unrecognized image or mismatched embedded
-version is refused.
+The index always records size and SHA-256 for the complete ZIP and the selected
+`firmware_member` file. Existing KK3 Max records also contain the payload digest:
+base firmware is a BIN, and Bluetooth firmware is read from the reviewed PE32
+layout without executing the Windows updater. An unrecognized image or
+mismatched embedded version is refused.
+
+For other products, set `product` to a stable lowercase slug and `member_kind`
+to `raw_binary` for a BIN or `opaque_updater_exe` for an updater whose embedded
+payload has not been parsed. Raw BIN records include their payload digest;
+opaque updater records omit it rather than claiming the EXE is the firmware
+payload. Each record selects one product, component and actual member version.
+A ZIP shared by several products is preserved intact at each applicable path.
+For example, the shared KK3 package contains Max 5.9 and Pro 5.8; TT packages
+contain separate base and Bluetooth versions. Adding those records preserves
+all earlier KK3 Max metadata and ZIPs.
 
 `published_hashes` retains any publisher-provided checksums with `target`
 (`zip`, `firmware_file`, or `payload`), `algorithm`, `value`, and `source_url`.

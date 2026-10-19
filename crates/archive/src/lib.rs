@@ -6,4 +6,4 @@ pub mod git;
 pub mod manifest;
 
 pub use git::{GitArchive, GitArchiveError};
-pub use manifest::{Component, FirmwareIndex, ReleaseMetadata, ReleaseRecord};
+pub use manifest::{Component, FirmwareIndex, FirmwareMemberKind, ReleaseMetadata, ReleaseRecord};

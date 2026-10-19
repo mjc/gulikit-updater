@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 
 fn metadata(component: Component, version: &str, filename: &str) -> ReleaseMetadata {
     ReleaseMetadata {
+        product: "kk3-max".to_owned(),
+        member_kind: gulikit_archive::manifest::FirmwareMemberKind::Kk3,
         component,
         version: version.to_owned(),
         filename: filename.to_owned(),
@@ -15,7 +17,12 @@ fn metadata(component: Component, version: &str, filename: &str) -> ReleaseMetad
         retrieved_from: None,
         changelog: None,
         changelog_source_url: None,
-        firmware_member: "NS39/firmware.bin".to_owned(),
+        firmware_member: if component == Component::Base {
+            "NS39/firmware.bin"
+        } else {
+            "NS39/updater.exe"
+        }
+        .to_owned(),
         published_hashes: Vec::new(),
     }
 }
@@ -50,9 +57,9 @@ fn records_measure_verify_and_roundtrip_canonical_index_json() {
     assert_eq!(base.sha256().len(), 64);
     assert_eq!(base.metadata().firmware_member, "NS39/firmware.bin");
     assert_eq!(base.firmware_file().size, 18);
-    assert_eq!(base.payload().size, 26);
+    assert_eq!(base.payload().unwrap().size, 26);
     assert_ne!(base.sha256(), base.firmware_file().sha256);
-    assert_ne!(base.firmware_file().sha256, base.payload().sha256);
+    assert_ne!(base.firmware_file().sha256, base.payload().unwrap().sha256);
     base.verify(
         b"original zip bytes",
         b"NS39 firmware file",

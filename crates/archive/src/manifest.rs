@@ -1,4 +1,4 @@
-//! Typed, bounded manifest for original KK3 Max firmware archives.
+//! Typed, bounded manifest for original firmware archives.
 //!
 //! Manifest records describe locally measured bytes. They do not establish
 //! vendor authenticity, prove firmware compatibility, or authorize installation.
@@ -24,7 +24,8 @@ const MAX_HASH_CLAIMS: usize = 16;
 const MAX_HASH_ALGORITHM_BYTES: usize = 64;
 const MAX_HASH_VALUE_BYTES: usize = 256;
 const HASH_HEX_BYTES: usize = 64;
-const PRODUCT_PATH: &str = "kk3-max";
+const DEFAULT_PRODUCT_SLUG: &str = "kk3-max";
+const MAX_PRODUCT_SLUG_BYTES: usize = 64;
 
 /// Firmware component represented by this archive record.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -55,10 +56,69 @@ impl FromStr for Component {
     }
 }
 
+/// How the selected archive member maps to measurable firmware bytes.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareMemberKind {
+    /// Preserve the existing KK3 Max base BIN and Bluetooth updater PE handling.
+    #[default]
+    Kk3,
+    /// A raw firmware BIN; the member bytes are the payload.
+    RawBinary,
+    /// An opaque firmware updater EXE; record member bytes without claiming a payload digest.
+    OpaqueUpdaterExe,
+}
+
+impl FirmwareMemberKind {
+    pub(crate) const fn has_measurable_payload(self) -> bool {
+        match self {
+            Self::OpaqueUpdaterExe => false,
+            Self::Kk3 | Self::RawBinary => true,
+        }
+    }
+
+    pub(crate) fn accepts_member(self, component: Component, member: &str) -> bool {
+        let extension = member.rsplit('.').next().unwrap_or_default();
+        match (self, component) {
+            (Self::Kk3, Component::Base) | (Self::RawBinary, _) => {
+                extension.eq_ignore_ascii_case("bin")
+            }
+            (Self::Kk3, Component::Bluetooth) | (Self::OpaqueUpdaterExe, _) => {
+                extension.eq_ignore_ascii_case("exe")
+            }
+        }
+    }
+}
+
+fn default_product_slug() -> String {
+    DEFAULT_PRODUCT_SLUG.to_owned()
+}
+
+fn is_default_product_slug(value: &String) -> bool {
+    value == DEFAULT_PRODUCT_SLUG
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if predicates receive a reference"
+)]
+fn is_default_member_kind(value: &FirmwareMemberKind) -> bool {
+    *value == FirmwareMemberKind::Kk3
+}
+
 /// Reviewer-supplied release details stored with measured artifacts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseMetadata {
+    /// Stable product namespace used in the archive path.
+    #[serde(
+        default = "default_product_slug",
+        skip_serializing_if = "is_default_product_slug"
+    )]
+    pub product: String,
+    /// Selected member interpretation; omitted records retain historical KK3 behavior.
+    #[serde(default, skip_serializing_if = "is_default_member_kind")]
+    pub member_kind: FirmwareMemberKind,
     pub component: Component,
     pub version: String,
     pub filename: String,
@@ -82,6 +142,10 @@ pub struct ReleaseMetadata {
 
 impl ReleaseMetadata {
     fn validate(&self) -> Result<(), Error> {
+        validate_product_slug(&self.product)?;
+        if self.member_kind == FirmwareMemberKind::Kk3 && self.product != DEFAULT_PRODUCT_SLUG {
+            return Err(Error::InvalidMetadata("member_kind"));
+        }
         validate_version(&self.version)?;
         validate_filename(&self.filename)?;
         validate_https_url(&self.source_url, "source_url")?;
@@ -111,6 +175,12 @@ impl ReleaseMetadata {
             validate_https_url(url, "changelog_source_url")?;
         }
         validate_member(&self.firmware_member)?;
+        if !self
+            .member_kind
+            .accepts_member(self.component, &self.firmware_member)
+        {
+            return Err(Error::InvalidMetadata("firmware_member"));
+        }
         if self.published_hashes.len() > MAX_HASH_CLAIMS {
             return Err(Error::InvalidMetadata("published_hashes"));
         }
@@ -226,7 +296,7 @@ pub struct ReleaseRecord {
     path: String,
     zip: ContentDigest,
     firmware_file: ContentDigest,
-    payload: ContentDigest,
+    payload: Option<ContentDigest>,
 }
 
 impl ReleaseRecord {
@@ -244,14 +314,41 @@ impl ReleaseRecord {
         firmware_file_bytes: &[u8],
         payload_bytes: &[u8],
     ) -> Result<Self, Error> {
+        Self::measure_optional(
+            metadata,
+            archive_bytes,
+            firmware_file_bytes,
+            Some(payload_bytes),
+        )
+    }
+
+    /// Measure an archive whose selected member may not expose a parsed payload.
+    ///
+    /// An absent payload is valid only for `OpaqueUpdaterExe`; other member kinds
+    /// retain the same file-to-payload measurement contract as the legacy API.
+    ///
+    /// # Errors
+    /// Rejects empty/oversized bytes, invalid metadata, missing or unexpected payloads,
+    /// and mismatched published SHA-256 claims.
+    pub fn measure_optional(
+        metadata: ReleaseMetadata,
+        archive_bytes: &[u8],
+        firmware_file_bytes: &[u8],
+        payload_bytes: Option<&[u8]>,
+    ) -> Result<Self, Error> {
         metadata.validate()?;
         validate_archive_size(archive_bytes.len())?;
         validate_content_size(firmware_file_bytes.len())?;
-        validate_content_size(payload_bytes.len())?;
+        if metadata.member_kind.has_measurable_payload() != payload_bytes.is_some() {
+            return Err(Error::InvalidMetadata("member_kind"));
+        }
+        if let Some(payload) = payload_bytes {
+            validate_content_size(payload.len())?;
+        }
         let path = canonical_path(&metadata);
         let zip = content_digest(archive_bytes)?;
         let firmware_file = content_digest(firmware_file_bytes)?;
-        let payload = content_digest(payload_bytes)?;
+        let payload = payload_bytes.map(content_digest).transpose()?;
         let record = Self {
             metadata,
             path,
@@ -307,8 +404,8 @@ impl ReleaseRecord {
 
     /// Measured embedded payload content.
     #[must_use]
-    pub const fn payload(&self) -> &ContentDigest {
-        &self.payload
+    pub const fn payload(&self) -> Option<&ContentDigest> {
+        self.payload.as_ref()
     }
 
     /// Release details supplied by the maintainer.
@@ -327,6 +424,19 @@ impl ReleaseRecord {
         firmware_file_bytes: &[u8],
         payload_bytes: &[u8],
     ) -> Result<(), Error> {
+        self.verify_optional(archive_bytes, firmware_file_bytes, Some(payload_bytes))
+    }
+
+    /// Verify the archive and selected member, plus an optional parsed payload.
+    ///
+    /// # Errors
+    /// Returns the first size or digest mismatch.
+    pub fn verify_optional(
+        &self,
+        archive_bytes: &[u8],
+        firmware_file_bytes: &[u8],
+        payload_bytes: Option<&[u8]>,
+    ) -> Result<(), Error> {
         if u64::try_from(archive_bytes.len()).ok() != Some(self.zip.size) {
             return Err(Error::ArchiveSizeMismatch);
         }
@@ -339,19 +449,23 @@ impl ReleaseRecord {
             Error::FirmwareFileSizeMismatch,
             Error::FirmwareFileHashMismatch,
         )?;
-        verify_content(
-            &self.payload,
-            payload_bytes,
-            Error::PayloadSizeMismatch,
-            Error::PayloadHashMismatch,
-        )?;
+        match (&self.payload, payload_bytes) {
+            (Some(expected), Some(bytes)) => verify_content(
+                expected,
+                bytes,
+                Error::PayloadSizeMismatch,
+                Error::PayloadHashMismatch,
+            )?,
+            (None, None) => {}
+            _ => return Err(Error::PayloadSizeMismatch),
+        }
         Ok(())
     }
 
     fn validate_published_hashes(&self) -> Result<(), Error> {
         for claim in &self.metadata.published_hashes {
             if is_sha256_algorithm(&claim.algorithm)
-                && !claim_matches(claim, &self.zip, &self.firmware_file, &self.payload)
+                && !claim_matches(claim, &self.zip, &self.firmware_file, self.payload.as_ref())
             {
                 return Err(Error::PublishedHashMismatch);
             }
@@ -360,7 +474,7 @@ impl ReleaseRecord {
     }
 }
 
-/// Ordered set of measured KK3 Max original archives.
+/// Ordered set of measured original firmware archives.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FirmwareIndex {
     releases: Vec<ReleaseRecord>,
@@ -376,6 +490,13 @@ struct RawIndex {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawRelease {
+    #[serde(
+        default = "default_product_slug",
+        skip_serializing_if = "is_default_product_slug"
+    )]
+    product: String,
+    #[serde(default, skip_serializing_if = "is_default_member_kind")]
+    member_kind: FirmwareMemberKind,
     component: Component,
     version: String,
     filename: String,
@@ -397,12 +518,15 @@ struct RawRelease {
     size: u64,
     sha256: String,
     firmware_file: ContentDigest,
-    payload: ContentDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payload: Option<ContentDigest>,
 }
 
 impl RawRelease {
     fn from_record(record: &ReleaseRecord) -> Self {
         Self {
+            product: record.metadata.product.clone(),
+            member_kind: record.metadata.member_kind,
             component: record.metadata.component,
             version: record.metadata.version.clone(),
             filename: record.metadata.filename.clone(),
@@ -424,6 +548,8 @@ impl RawRelease {
 
     fn into_record(self) -> Result<ReleaseRecord, Error> {
         let metadata = ReleaseMetadata {
+            product: self.product,
+            member_kind: self.member_kind,
             component: self.component,
             version: self.version,
             filename: self.filename,
@@ -448,7 +574,12 @@ impl RawRelease {
         };
         validate_content_digest(&zip)?;
         validate_content_digest(&self.firmware_file)?;
-        validate_content_digest(&self.payload)?;
+        if metadata.member_kind.has_measurable_payload() != self.payload.is_some() {
+            return Err(Error::InvalidMetadata("member_kind"));
+        }
+        if let Some(payload) = &self.payload {
+            validate_content_digest(payload)?;
+        }
         let record = ReleaseRecord {
             metadata,
             path: expected_path,
@@ -626,14 +757,14 @@ fn claim_matches(
     claim: &PublishedHash,
     zip: &ContentDigest,
     firmware_file: &ContentDigest,
-    payload: &ContentDigest,
+    payload: Option<&ContentDigest>,
 ) -> bool {
     let digest = match claim.target {
-        HashTarget::Zip => zip,
-        HashTarget::FirmwareFile => firmware_file,
+        HashTarget::Zip => Some(zip),
+        HashTarget::FirmwareFile => Some(firmware_file),
         HashTarget::Payload => payload,
     };
-    claim.value.trim().eq_ignore_ascii_case(&digest.sha256)
+    digest.is_some_and(|digest| claim.value.trim().eq_ignore_ascii_case(&digest.sha256))
 }
 
 fn valid_calendar_date(value: &str) -> bool {
@@ -706,14 +837,31 @@ fn parse_decimal(bytes: &[u8]) -> Option<u32> {
 fn validate_version(value: &str) -> Result<(), Error> {
     let valid = !value.is_empty()
         && value.len() <= MAX_VERSION_BYTES
-        && value
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-        && value.contains('.');
+        && value.split('.').all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && part.bytes().any(|byte| byte.is_ascii_digit())
+        });
     if valid {
         Ok(())
     } else {
         Err(Error::InvalidMetadata("version"))
+    }
+}
+
+fn validate_product_slug(value: &str) -> Result<(), Error> {
+    let valid = !value.is_empty()
+        && value.len() <= MAX_PRODUCT_SLUG_BYTES
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidMetadata("product"))
     }
 }
 
@@ -826,7 +974,121 @@ fn validate_hash(value: &str) -> Result<(), Error> {
 
 fn canonical_path(metadata: &ReleaseMetadata) -> String {
     format!(
-        "/{PRODUCT_PATH}/{}/v{}/{}",
-        metadata.component, metadata.version, metadata.filename
+        "/{}/{}/v{}/{}",
+        metadata.product, metadata.component, metadata.version, metadata.filename
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata() -> ReleaseMetadata {
+        ReleaseMetadata {
+            product: DEFAULT_PRODUCT_SLUG.to_owned(),
+            member_kind: FirmwareMemberKind::Kk3,
+            component: Component::Base,
+            version: "5.9".to_owned(),
+            filename: "firmware.zip".to_owned(),
+            source_url: "https://example.com/release".to_owned(),
+            released_at: None,
+            retrieved_at: None,
+            retrieved_from: None,
+            changelog: None,
+            changelog_source_url: None,
+            firmware_member: "firmware.bin".to_owned(),
+            published_hashes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn omitted_legacy_fields_keep_kk3_path_and_round_trip() {
+        let record = ReleaseRecord::measure(
+            metadata(),
+            b"zip bytes",
+            b"firmware bytes",
+            b"firmware bytes",
+        )
+        .unwrap();
+        assert_eq!(record.path(), "/kk3-max/base/v5.9/firmware.zip");
+
+        let mut index = FirmwareIndex::empty();
+        index.add(record).unwrap();
+        let json = index.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let release = &value["releases"][0];
+        assert!(release.get("product").is_none());
+        assert!(release.get("member_kind").is_none());
+        let parsed = FirmwareIndex::parse(&json).unwrap();
+        assert_eq!(
+            parsed.releases()[0].path(),
+            "/kk3-max/base/v5.9/firmware.zip"
+        );
+        assert!(parsed.releases()[0].payload().is_some());
+    }
+
+    #[test]
+    fn raw_member_supports_alphanumeric_version_and_product_namespace() {
+        let metadata = ReleaseMetadata {
+            product: "controller-x".to_owned(),
+            member_kind: FirmwareMemberKind::RawBinary,
+            version: "00.00.7E.10".to_owned(),
+            firmware_member: "nested/board.BIN".to_owned(),
+            ..metadata()
+        };
+        let record =
+            ReleaseRecord::measure(metadata, b"zip bytes", b"raw firmware", b"raw firmware")
+                .unwrap();
+        assert_eq!(
+            record.path(),
+            "/controller-x/base/v00.00.7E.10/firmware.zip"
+        );
+    }
+
+    #[test]
+    fn opaque_updater_records_file_without_claiming_payload() {
+        let metadata = ReleaseMetadata {
+            product: "controller-x".to_owned(),
+            member_kind: FirmwareMemberKind::OpaqueUpdaterExe,
+            firmware_member: "update.exe".to_owned(),
+            ..metadata()
+        };
+        let record =
+            ReleaseRecord::measure_optional(metadata.clone(), b"zip bytes", b"updater bytes", None)
+                .unwrap();
+        assert!(record.payload().is_none());
+        record
+            .verify_optional(b"zip bytes", b"updater bytes", None)
+            .unwrap();
+        assert!(
+            ReleaseRecord::measure(
+                metadata,
+                b"zip bytes",
+                b"updater bytes",
+                b"invented payload",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn opaque_updater_rejects_published_payload_hash_claim() {
+        let mut metadata = ReleaseMetadata {
+            product: "controller-x".to_owned(),
+            member_kind: FirmwareMemberKind::OpaqueUpdaterExe,
+            firmware_member: "update.exe".to_owned(),
+            ..metadata()
+        };
+        metadata.published_hashes.push(PublishedHash {
+            target: HashTarget::Payload,
+            algorithm: "SHA-256".to_owned(),
+            value: hex::encode(Sha256::digest(b"updater bytes")),
+            source_url: "https://example.com/release".to_owned(),
+        });
+        assert_eq!(
+            ReleaseRecord::measure_optional(metadata, b"zip bytes", b"updater bytes", None)
+                .unwrap_err(),
+            Error::PublishedHashMismatch
+        );
+    }
 }

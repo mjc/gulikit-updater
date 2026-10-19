@@ -1,6 +1,6 @@
 //! Offline measurements; none of these bytes can authorize a controller write.
 
-use crate::{Component, ReleaseMetadata, git::GitArchiveError};
+use crate::{Component, FirmwareMemberKind, ReleaseMetadata, git::GitArchiveError};
 use gulikit_core::version::BT_SIGNATURE;
 use object::read::pe::PeFile32;
 use std::io::{Cursor, Read};
@@ -10,15 +10,13 @@ const MAX_MEMBER_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) fn firmware_bytes(
     metadata: &ReleaseMetadata,
     zip: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), GitArchiveError> {
-    if metadata.component == Component::Base
-        && !metadata
-            .firmware_member
-            .rsplit_once('.')
-            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("bin"))
+) -> Result<(Vec<u8>, Option<Vec<u8>>), GitArchiveError> {
+    if !metadata
+        .member_kind
+        .accepts_member(metadata.component, &metadata.firmware_member)
     {
         return Err(invalid(
-            "selected base firmware member must have a .bin extension",
+            "selected member extension does not match its firmware kind",
         ));
     }
 
@@ -36,9 +34,14 @@ pub(crate) fn firmware_bytes(
     if file.is_empty() || file.len() as u64 > MAX_MEMBER_BYTES {
         return Err(invalid("selected firmware file is empty or too large"));
     }
-    let payload = match metadata.component {
-        Component::Base => file.clone(),
-        Component::Bluetooth => bluetooth_payload(&file, &metadata.version)?.to_vec(),
+    let payload = match (metadata.member_kind, metadata.component) {
+        (FirmwareMemberKind::Kk3, Component::Base) | (FirmwareMemberKind::RawBinary, _) => {
+            Some(file.clone())
+        }
+        (FirmwareMemberKind::Kk3, Component::Bluetooth) => {
+            Some(bluetooth_payload(&file, &metadata.version)?.to_vec())
+        }
+        (FirmwareMemberKind::OpaqueUpdaterExe, _) => None,
     };
     Ok((file, payload))
 }
@@ -98,6 +101,8 @@ mod tests {
 
     fn metadata(firmware_member: &str) -> ReleaseMetadata {
         ReleaseMetadata {
+            product: "kk3-max".to_owned(),
+            member_kind: FirmwareMemberKind::Kk3,
             component: Component::Base,
             version: "5.9".to_owned(),
             filename: "firmware.zip".to_owned(),
@@ -165,6 +170,38 @@ mod tests {
         let firmware_zip = zip_with_member("firmware.BIN", b"firmware bytes");
         let (file, payload) = firmware_bytes(&metadata("firmware.BIN"), &firmware_zip).unwrap();
         assert_eq!(file, b"firmware bytes");
-        assert_eq!(payload, b"firmware bytes");
+        assert_eq!(payload.as_deref(), Some(&b"firmware bytes"[..]));
+    }
+
+    #[test]
+    fn explicit_member_kinds_measure_raw_and_opaque_files() {
+        let raw_zip = zip_with_member("board.bin", b"raw image");
+        let raw_metadata = ReleaseMetadata {
+            product: "other-controller".to_owned(),
+            member_kind: FirmwareMemberKind::RawBinary,
+            firmware_member: "board.bin".to_owned(),
+            ..metadata("board.bin")
+        };
+        let (raw_file, raw_payload) = firmware_bytes(&raw_metadata, &raw_zip).unwrap();
+        assert_eq!(raw_file, b"raw image");
+        assert_eq!(raw_payload.as_deref(), Some(&b"raw image"[..]));
+
+        let updater_zip = zip_with_member("update.exe", b"opaque updater bytes");
+        let updater_metadata = ReleaseMetadata {
+            product: "other-controller".to_owned(),
+            member_kind: FirmwareMemberKind::OpaqueUpdaterExe,
+            firmware_member: "update.exe".to_owned(),
+            ..metadata("update.exe")
+        };
+        let (updater_file, updater_payload) =
+            firmware_bytes(&updater_metadata, &updater_zip).unwrap();
+        assert_eq!(updater_file, b"opaque updater bytes");
+        assert_eq!(updater_payload, None);
+
+        let invalid_member = ReleaseMetadata {
+            firmware_member: "readme.txt".to_owned(),
+            ..updater_metadata
+        };
+        assert!(firmware_bytes(&invalid_member, &updater_zip).is_err());
     }
 }
