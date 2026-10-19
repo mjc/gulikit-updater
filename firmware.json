@@ -216,6 +216,30 @@
         "size": 47648,
         "sha256": "9706427e5161d6c293f6994f95a89375322cb49981b1dc9c42bfc1f962014e12"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.5",
+      "filename": "GuliKit_NS39_V3.5.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40448/download",
+      "changelog": "1. Fixed the issue of no vibration in wired connection to PC with the controller on Switch mode.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40448/download",
+      "firmware_member": "GuliKit_NS39_V3.5.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.5/GuliKit_NS39_V3.5.zip",
+      "size": 49703,
+      "sha256": "c8a112905f9ddb53bf38d5190ea6d694e20ac194139b0f90db6d1cd4802bbfdd",
+      "firmware_file": {
+        "size": 47692,
+        "sha256": "b6ea062b300bc78d62e415c0ef51de5732b30154c77029c10cca37571ae4dfbd"
+      },
+      "payload": {
+        "size": 47692,
+        "sha256": "b6ea062b300bc78d62e415c0ef51de5732b30154c77029c10cca37571ae4dfbd"
+      }
     }
   ]
 }
