@@ -408,6 +408,30 @@
         "size": 48052,
         "sha256": "d28a41eec7e611596d196100aa85b59afe1952241ca714040d24c754931de1ed"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.2",
+      "filename": "KK3_NS38_NS39_V4.2.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40749/download",
+      "changelog": "1. Added the function where the logo light will still flash to indicate low controller battery in light-off mode.\r\n2. Fixed the occasional issue of resetting the vibration mode when switching vibration strength.\r\n3. Optimized the wireless transmission speed.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40749/download",
+      "firmware_member": "NS39_KK3_MAX_V4.2.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.2/KK3_NS38_NS39_V4.2.zip",
+      "size": 98494,
+      "sha256": "810b98e9442f7aa0acf0f3ff6658292abd6d92d79c05460fd968ae079dc9ae9e",
+      "firmware_file": {
+        "size": 47772,
+        "sha256": "afc36c8f49244fd98958e68495ff6a794c85dae3b4f088a52d7c30a670b42a3b"
+      },
+      "payload": {
+        "size": 47772,
+        "sha256": "afc36c8f49244fd98958e68495ff6a794c85dae3b4f088a52d7c30a670b42a3b"
+      }
     }
   ]
 }
