@@ -1472,6 +1472,32 @@
         "size": 47804,
         "sha256": "f3ad90d00147999692aae04f9b5426ed645ddeeb8f32ff0cc89f3520122cbe77"
       }
+    },
+    {
+      "product": "kk2t",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "5.8",
+      "filename": "NS09T_KK2T_V5.8.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/1050207.html",
+      "released_at": "2025-11-28",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2976054",
+      "changelog": "Fixed an issue where a held key could occasionally stop registering.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/1050207.html",
+      "firmware_member": "NS09T_KK2T_V5.8.bin",
+      "published_hashes": [],
+      "path": "/kk2t/base/v5.8/NS09T_KK2T_V5.8.zip",
+      "size": 47369,
+      "sha256": "1a00b74a55ab2d62e1089bfa2a4e6be65e73f01bb099323fb3cdd2f6a255dcd8",
+      "firmware_file": {
+        "size": 45232,
+        "sha256": "ed76d1148d640b0770412d9365c407d0b32e7c40983ced849d7a2d5b40b8d842"
+      },
+      "payload": {
+        "size": 45232,
+        "sha256": "ed76d1148d640b0770412d9365c407d0b32e7c40983ced849d7a2d5b40b8d842"
+      }
     }
   ]
 }
