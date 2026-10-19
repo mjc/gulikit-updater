@@ -22,6 +22,7 @@
     with pkgs;
     [
       cargo-nextest
+      gnupg
     ]
     ++ lib.optionals stdenv.hostPlatform.isLinux [
       pkg-config

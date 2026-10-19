@@ -22,6 +22,55 @@ fn ready() -> LiveApp {
 }
 
 #[test]
+fn downloaded_package_can_be_selected_without_a_controller_or_file_dialog() {
+    let mut app = LiveApp::default();
+    assert!(app.use_downloaded_package("cache/firmware.zip".into(), package()));
+    assert_eq!(app.view().filename, "firmware.zip");
+    assert_eq!(app.view().page, Page::Ready);
+    assert!(!app.view().connected);
+    assert!(!app.can_update());
+    assert!(app.clear_selected_package());
+    assert_eq!(app.view().filename, "No firmware selected");
+    assert_eq!(app.view().target, "No firmware selected");
+    assert_eq!(app.view().page, Page::Connect);
+}
+
+#[test]
+fn downloaded_package_cannot_replace_a_different_component_or_inflight_operation() {
+    let mut app = ready();
+    let filename = app.view().filename.into_owned();
+    let mut wrong_component = package();
+    wrong_component.component = Component::Bluetooth;
+    assert!(!app.use_downloaded_package("wrong.zip".into(), wrong_component));
+    assert_eq!(app.view().filename, filename);
+    app.start().unwrap();
+    assert!(!app.use_downloaded_package("late.zip".into(), package()));
+    assert!(!app.clear_selected_package());
+    assert_eq!(app.view().filename, filename);
+    assert_eq!(app.view().page, Page::Writing);
+}
+
+#[test]
+fn downloaded_package_cannot_discard_a_pending_receipt_or_uncertain_outcome() {
+    for outcome in [
+        Outcome::TransferCompletedAwaitingVerification,
+        Outcome::OutcomeUnknown,
+    ] {
+        let mut app = ready();
+        app.start().unwrap();
+        app.accept(Event::Transferred {
+            record: "protected.jsonl".into(),
+            result: attempt(outcome),
+        });
+        let filename = app.view().filename.into_owned();
+        assert!(!app.use_downloaded_package("late.zip".into(), package()));
+        assert!(!app.clear_selected_package());
+        assert_eq!(app.view().filename, filename);
+        assert!(!app.can_update());
+    }
+}
+
+#[test]
 fn borrowed_view_preserves_unicode_filename_and_recent_log_entries() {
     let mut app = LiveApp::default();
     app.confirm_model(true);

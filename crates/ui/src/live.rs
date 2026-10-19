@@ -232,6 +232,33 @@ impl LiveApp {
         self.pending = Some(Job::Package);
         Some(Work::ChoosePackage(self.component))
     }
+
+    /// Select an inspected archive download without opening another file dialog.
+    /// Protected transfers and pending restart verification retain their package.
+    pub fn use_downloaded_package(&mut self, path: PathBuf, info: PackageInfo) -> bool {
+        if !self.can_choose_package()
+            || info.model != Model::Kk3Max
+            || info.component != self.component
+        {
+            return false;
+        }
+        self.selected(path, info);
+        true
+    }
+
+    /// Remove the previous write candidate when the archive selection changes.
+    /// Returns false while a transfer or unresolved receipt protects that candidate.
+    pub fn clear_selected_package(&mut self) -> bool {
+        if !self.can_choose_package() {
+            return false;
+        }
+        self.package = None;
+        if !self.connected {
+            self.page = Page::Connect;
+        }
+        true
+    }
+
     fn can_choose_package(&self) -> bool {
         self.pending.is_none()
             && self.retry_block.is_none()
@@ -701,13 +728,7 @@ impl LiveApp {
                     .as_ref()
                     .map(|receipt| receipt.identity.expected_version.as_str())
             })
-            .unwrap_or_else(|| {
-                catalog()
-                    .iter()
-                    .find(|r| r.model == Model::Kk3Max && r.component == self.component)
-                    .expect("supported component has a catalog entry")
-                    .version
-            })
+            .unwrap_or("No firmware selected")
     }
     fn display_notice(&self) -> &str {
         if let Some(block) = self.retry_block {

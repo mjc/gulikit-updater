@@ -1,7 +1,9 @@
-use super::{AppWindow, Page};
+use super::{AppWindow, Page, Palette};
 use gulikit_core::{package::Component, update::Progress};
 use gulikit_ui::{
     Page as ModelPage,
+    archive::{ArchiveBrowser, ArchiveEvent, ArchiveView, cache_directory},
+    archive_package::DownloadInspection,
     backend::{NATIVE_UPDATE_SUPPORTED, NATIVE_UPDATE_UNAVAILABLE},
     live::{Event, LiveApp, Work},
 };
@@ -19,6 +21,7 @@ use std::{
 
 struct Driver {
     app: LiveApp,
+    archive: ArchiveBrowser,
     requests: Sender<Work>,
     cancelled: Arc<AtomicBool>,
 }
@@ -45,13 +48,60 @@ impl Driver {
             }
         }
     }
+
+    fn receive_archive_events(&mut self, events: &Receiver<ArchiveEvent>) -> bool {
+        let (changed, downloaded) = self.archive.receive(events);
+        for event in downloaded {
+            let ArchiveEvent::Downloaded {
+                path,
+                record,
+                inspection,
+            } = event
+            else {
+                continue;
+            };
+            if self.archive.selected_path() != Some(record.path()) {
+                self.archive.set_status("Download completed for a release that is no longer selected; no updater package was changed.");
+                continue;
+            }
+            match inspection {
+                Ok(DownloadInspection::Supported(info)) => {
+                    if self.app.view().component == info.component
+                        && self.app.use_downloaded_package(path.clone(), info)
+                    {
+                        self.archive.set_status(format!(
+                            "Downloaded and inspected {}. Cached at {}",
+                            record.filename(),
+                            path.display()
+                        ));
+                    } else {
+                        self.archive.set_status(format!(
+                            "Verified {} at {}. Choose it again when the updater is ready.",
+                            record.filename(),
+                            path.display()
+                        ));
+                    }
+                }
+                Ok(DownloadInspection::ArchivedOnly) => {
+                    self.app.clear_selected_package();
+                    self.archive.set_status(format!("Verified archive cached at {}. This historical version is not yet supported by the updater.", path.display()));
+                }
+                Err(error) => self
+                    .archive
+                    .set_status(format!("Archive download could not be inspected: {error}")),
+            }
+        }
+        changed
+    }
 }
 
-fn present(ui: &AppWindow, app: &LiveApp) {
+fn present(ui: &AppWindow, app: &LiveApp, archive: &ArchiveBrowser) {
     let v = app.view();
     ui.set_same_controller(v.same_controller);
     let can_update = v.can_update && (ui.get_demo_mode() || NATIVE_UPDATE_SUPPORTED);
-    ui.set_primary_enabled(v.can_primary && (v.page != ModelPage::Ready || can_update));
+    ui.set_primary_enabled(
+        v.can_primary && !archive.is_busy() && (v.page != ModelPage::Ready || can_update),
+    );
     let mut primary_label = ui.get_primary_label();
     update_text(&mut primary_label, &v.primary_label);
     ui.set_primary_label(primary_label);
@@ -99,10 +149,10 @@ fn present(ui: &AppWindow, app: &LiveApp) {
         v.progress.total
     );
     state.can_update = can_update;
-    state.can_choose_package = v.can_choose_package;
+    state.can_choose_package = v.can_choose_package && !archive.is_busy();
     state.can_open_attempt =
         v.can_open_attempt && (ui.get_demo_mode() || cfg!(target_os = "macos"));
-    state.can_switch_component = v.can_switch_component;
+    state.can_switch_component = v.can_switch_component && !archive.is_busy();
     state.can_troubleshoot = v.can_troubleshoot;
     state.busy = v.busy;
     state.connected = v.connected;
@@ -117,7 +167,28 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     state.error = state.notice.clone();
     update_text(&mut state.status, status);
     update_log(&mut state.log, v.log);
+    present_archive(&mut state, &archive.view());
     ui.set_state(state);
+}
+
+fn present_archive(state: &mut super::ViewState, view: &ArchiveView) {
+    update_text(&mut state.archive_status, &view.status);
+    update_text(&mut state.archive_revision, &view.revision);
+    state.archive_releases = slint::ModelRc::new(slint::VecModel::from(
+        view.releases
+            .iter()
+            .map(|value| value.as_str().into())
+            .collect::<Vec<slint::SharedString>>(),
+    ));
+    state.archive_selected = view.selected;
+    update_text(&mut state.archive_version, &view.version);
+    update_text(&mut state.archive_filename, &view.filename);
+    update_text(&mut state.archive_details, &view.details);
+    update_text(&mut state.archive_changelog, &view.changelog);
+    state.archive_busy = view.busy;
+    state.archive_refreshing = view.refreshing;
+    state.archive_can_refresh = view.can_refresh;
+    state.archive_can_download = view.can_download;
 }
 
 #[expect(
@@ -179,11 +250,13 @@ fn act(
                 ));
             }
         }
-        present(&ui, &driver.app);
+        present(&ui, &driver.app, &driver.archive);
     }
 }
 
 fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
+    bind_archive_actions(ui, driver);
+    bind_demo_actions(ui, driver, demo);
     {
         let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_confirm_same(move |confirmed| {
@@ -212,12 +285,27 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
         let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_select_component(move |bluetooth| {
             act(&weak, &driver, |app| {
-                app.select_component(if bluetooth {
+                let component = if bluetooth {
                     Component::Bluetooth
                 } else {
                     Component::Main
-                })
+                };
+                app.select_component(component)
             });
+            let mut driver = driver.borrow_mut();
+            let selected_component = if bluetooth {
+                Component::Bluetooth
+            } else {
+                Component::Main
+            };
+            if driver.app.view().component == selected_component {
+                if driver.archive.set_component(selected_component) {
+                    driver.app.clear_selected_package();
+                }
+                if let Some(ui) = weak.upgrade() {
+                    present(&ui, &driver.app, &driver.archive);
+                }
+            }
         });
     }
     {
@@ -232,6 +320,44 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
         let driver = driver.clone();
         ui.on_cancel_operation(move || driver.borrow().cancelled.store(true, Ordering::Release));
     }
+}
+
+fn bind_archive_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>) {
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_archive_refresh(move || {
+            let mut driver = driver.borrow_mut();
+            driver.archive.refresh();
+            if let Some(ui) = weak.upgrade() {
+                present(&ui, &driver.app, &driver.archive);
+            }
+        });
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_archive_select(move |label| {
+            let mut driver = driver.borrow_mut();
+            if driver.app.view().can_choose_package && driver.archive.select_label(label.as_str()) {
+                driver.app.clear_selected_package();
+            }
+            if let Some(ui) = weak.upgrade() {
+                present(&ui, &driver.app, &driver.archive);
+            }
+        });
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_archive_download(move || {
+            let mut driver = driver.borrow_mut();
+            driver.archive.download();
+            if let Some(ui) = weak.upgrade() {
+                present(&ui, &driver.app, &driver.archive);
+            }
+        });
+    }
+}
+
+fn bind_demo_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
     if demo {
         use gulikit_ui::demo::{Profile, SamplePackage};
         let (weak, model) = (ui.as_weak(), driver.clone());
@@ -278,14 +404,30 @@ pub fn create_mode(
     cancelled: Arc<AtomicBool>,
     demo: bool,
 ) -> Result<(AppWindow, slint::Timer), slint::PlatformError> {
+    let (archive, archive_events) = ArchiveBrowser::spawn(cache_directory(), !demo && !cfg!(test));
+    create_mode_with_archive(requests, events, cancelled, demo, archive, archive_events)
+}
+
+pub(super) fn create_mode_with_archive(
+    requests: Sender<Work>,
+    events: Receiver<Event>,
+    cancelled: Arc<AtomicBool>,
+    demo: bool,
+    archive: ArchiveBrowser,
+    archive_events: Receiver<ArchiveEvent>,
+) -> Result<(AppWindow, slint::Timer), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    // Native widgets must use the same light palette as the fixed app surfaces.
+    ui.global::<Palette>()
+        .set_color_scheme(slint::language::ColorScheme::Light);
     ui.set_demo_mode(demo);
     let driver = Rc::new(RefCell::new(Driver {
         app: LiveApp::default(),
+        archive,
         requests,
         cancelled,
     }));
-    present(&ui, &driver.borrow().app);
+    present(&ui, &driver.borrow().app, &driver.borrow().archive);
     bind_actions(&ui, &driver, demo);
     let closing = Rc::new(Cell::new(false));
     {
@@ -310,8 +452,10 @@ pub fn create_mode(
                 return;
             };
             let mut driver = driver.borrow_mut();
-            if driver.receive_events(&events) {
-                present(&ui, &driver.app);
+            let op_changed = driver.receive_events(&events);
+            let archive_changed = driver.receive_archive_events(&archive_events);
+            if op_changed || archive_changed {
+                present(&ui, &driver.app, &driver.archive);
             }
             if closing.get() && !driver.app.is_busy() {
                 let _ = ui.hide();
