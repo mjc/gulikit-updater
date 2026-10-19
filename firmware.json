@@ -432,6 +432,30 @@
         "size": 47772,
         "sha256": "afc36c8f49244fd98958e68495ff6a794c85dae3b4f088a52d7c30a670b42a3b"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.3",
+      "filename": "KK3_NS38_NS39_V4.3.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40775/download",
+      "changelog": "1. Optimized the vibration effects of HD mode and Super Haptic mode for the controller on Switch mode.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40775/download",
+      "firmware_member": "NS39_KK3_MAX_V4.3.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.3/KK3_NS38_NS39_V4.3.zip",
+      "size": 98805,
+      "sha256": "a69f0dcdfd7f22e01146431c99d75a5be3f68616e349608672caef1515d47eb6",
+      "firmware_file": {
+        "size": 48120,
+        "sha256": "3b5dbdc61fdd6904a61c207270910c3cbcb2a179de7dbb754004beea34653cfb"
+      },
+      "payload": {
+        "size": 48120,
+        "sha256": "3b5dbdc61fdd6904a61c207270910c3cbcb2a179de7dbb754004beea34653cfb"
+      }
     }
   ]
 }
