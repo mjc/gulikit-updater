@@ -43,6 +43,8 @@ pub enum Message {
 pub struct Channel {
     stream: UnixStream,
     pending: Vec<u8>,
+    outgoing: Vec<u8>,
+    written: usize,
 }
 impl Channel {
     ///
@@ -56,6 +58,8 @@ impl Channel {
         Ok(Self {
             stream,
             pending: Vec::new(),
+            outgoing: Vec::new(),
+            written: 0,
         })
     }
     ///
@@ -74,32 +78,69 @@ impl Channel {
     ///
     /// Returns an error for an oversized or unencodable message, socket write failure, closed peer, or exceeded write deadline.
     pub fn send(&mut self, message: &Message) -> Result<(), String> {
-        let mut frame = Vec::with_capacity(128);
-        frame.extend_from_slice(&[0; 4]);
-        serde_json::to_writer(&mut frame, message).map_err(|error| error.to_string())?;
-        let length = frame.len() - 4;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        self.flush_until(deadline)?;
+        self.encode(message)?;
+        self.flush_until(deadline)
+    }
+
+    /// Report progress without waiting for the reader. Retain a partial frame so
+    /// later control messages cannot corrupt it; discard newer progress while busy.
+    ///
+    /// # Errors
+    /// Returns socket or encoding errors. Progress failures do not cancel I/O.
+    pub fn try_send_progress(
+        &mut self,
+        value: gulikit_core::update::Progress,
+    ) -> Result<bool, String> {
+        if !self.flush_pending()? {
+            return Ok(false);
+        }
+        self.encode(&Message::Progress(value))?;
+        self.flush_pending()
+    }
+
+    fn encode(&mut self, message: &Message) -> Result<(), String> {
+        self.outgoing.extend_from_slice(&[0; 4]);
+        if let Err(error) = serde_json::to_writer(&mut self.outgoing, message) {
+            self.outgoing.clear();
+            return Err(error.to_string());
+        }
+        let length = self.outgoing.len() - 4;
         if length > LIMIT {
+            self.outgoing.clear();
             return Err("Main worker message exceeds bound".into());
         }
         let length = u32::try_from(length).map_err(|_| "Main worker message exceeds bound")?;
-        frame[..4].copy_from_slice(&length.to_le_bytes());
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut remaining = frame.as_slice();
-        while !remaining.is_empty() {
+        self.outgoing[..4].copy_from_slice(&length.to_le_bytes());
+        Ok(())
+    }
+
+    fn flush_until(&mut self, deadline: Instant) -> Result<(), String> {
+        while !self.flush_pending()? {
             if Instant::now() >= deadline {
                 return Err("Main worker channel write deadline".into());
             }
-            match self.stream.write(remaining) {
+            std::thread::sleep(TICK);
+        }
+        Ok(())
+    }
+
+    fn flush_pending(&mut self) -> Result<bool, String> {
+        while self.written < self.outgoing.len() {
+            match self.stream.write(&self.outgoing[self.written..]) {
                 Ok(0) => return Err("Main worker channel closed".into()),
-                Ok(count) => remaining = &remaining[count..],
+                Ok(count) => self.written += count,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(TICK);
+                    return Ok(false);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.to_string()),
             }
         }
-        Ok(())
+        self.outgoing.clear();
+        self.written = 0;
+        Ok(true)
     }
     ///
     /// # Errors
@@ -264,7 +305,7 @@ fn guardian_with_clock(
             Some(_) => return Err("Unexpected Main guardian parent message".into()),
         }
         if result.is_none() {
-            match worker.poll() {
+            match poll_worker(&mut worker, &mut parent, started) {
                 Ok(Some(Message::PackageReady)) if !lease_sent && !ready && !started => {
                     owned.grant_lease(&lease_sender)?;
                     lease_sent = true;
@@ -272,9 +313,6 @@ fn guardian_with_clock(
                 Ok(Some(Message::Ready)) if lease_sent && !ready && !started => {
                     ready = true;
                     parent.send(&Message::Ready)?;
-                }
-                Ok(Some(Message::Progress(value))) if started => {
-                    parent.send(&Message::Progress(value))?;
                 }
                 Ok(Some(message @ Message::Result(_))) if started => result = Some(message),
                 Ok(Some(message @ Message::Failed { .. })) => result = Some(message),
@@ -320,17 +358,25 @@ fn drain_final_response(
     parent: &mut Channel,
     started: bool,
 ) -> Result<Option<Message>, String> {
+    match poll_worker(worker, parent, started) {
+        Ok(Some(message @ Message::Result(_))) if started => Ok(Some(message)),
+        Ok(Some(message @ Message::Failed { .. })) => Ok(Some(message)),
+        Ok(None) | Err(_) => Ok(None),
+        Ok(Some(_)) => Err("Main worker exited in an unexpected protocol phase".into()),
+    }
+}
+
+fn poll_worker(
+    worker: &mut Channel,
+    parent: &mut Channel,
+    started: bool,
+) -> Result<Option<Message>, String> {
     loop {
-        match worker.poll() {
-            Ok(Some(Message::Progress(value))) if started => {
-                parent.send(&Message::Progress(value))?;
+        match worker.poll()? {
+            Some(Message::Progress(value)) if started => {
+                let _ = parent.try_send_progress(value);
             }
-            Ok(Some(message @ Message::Result(_))) if started => return Ok(Some(message)),
-            Ok(Some(message @ Message::Failed { .. })) => return Ok(Some(message)),
-            Ok(None) | Err(_) => return Ok(None),
-            Ok(Some(_)) => {
-                return Err("Main worker exited in an unexpected protocol phase".into());
-            }
+            message => return Ok(message),
         }
     }
 }
@@ -470,6 +516,47 @@ fn reporting_failure(started: bool, reason: String) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_progress_does_not_wait_or_corrupt_the_final_result() {
+        let (mut local, mut remote) = UnixStream::pair().unwrap();
+        local.set_nonblocking(true).unwrap();
+        let padding = [0_u8; 8192];
+        let mut buffered_bytes = 0;
+        loop {
+            match local.write(&padding) {
+                Ok(count) => buffered_bytes += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                result => panic!("{result:?}"),
+            }
+        }
+        let mut writer = Channel::new(local).unwrap();
+        let started = Instant::now();
+        for confirmed in 0..1000 {
+            assert!(
+                !writer
+                    .try_send_progress(gulikit_core::update::Progress {
+                        submitted: confirmed,
+                        confirmed,
+                        total: 1000
+                    })
+                    .unwrap()
+            );
+        }
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let mut drained = vec![0; buffered_bytes];
+        remote.read_exact(&mut drained).unwrap();
+        writer
+            .send(&Message::Result(serde_json::json!({"complete":true})))
+            .unwrap();
+        let mut reader = Channel::new(remote).unwrap();
+        assert!(
+            matches!(reader.poll().unwrap(), Some(Message::Progress(value)) if value.confirmed == 0)
+        );
+        assert!(
+            matches!(reader.poll().unwrap(), Some(Message::Result(value)) if value["complete"] == true)
+        );
+    }
     #[test]
     #[ignore = "subprocess fixture; invoked by the guardian tests"]
     fn worker_fixture() {

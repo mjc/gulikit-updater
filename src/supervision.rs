@@ -154,9 +154,7 @@ fn worker(channel: &mut Channel) -> Result<(), ApplicationError> {
         lease,
         &mut || cancelled.load(Ordering::Acquire),
         &mut |value| {
-            if channel.send(&Message::Progress(value)).is_err() {
-                cancelled.store(true, Ordering::Release);
-            }
+            let _ = channel.try_send_progress(value);
         },
     )?;
     channel.send(&Message::Result(value))?;
