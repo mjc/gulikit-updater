@@ -816,6 +816,30 @@
         "size": 51432,
         "sha256": "9869fa67d7c76fee659ca0d0f39c5e78924b3813374713f73f4224d28a56c2d1"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.8",
+      "filename": "KK3_NS38_NS39_V5.8.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/42003/download",
+      "changelog": "1. Fixed an issue where a slow double-press of the APG key would trigger an extra keystroke prior to the first playback.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/42003/download",
+      "firmware_member": "NS39_KK3_MAX_V5.8.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.8/KK3_NS38_NS39_V5.8.zip",
+      "size": 107026,
+      "sha256": "292693cee378d19a4f10693da54ccdf08d56431cfc9360667ec409c3eef2cf15",
+      "firmware_file": {
+        "size": 51320,
+        "sha256": "a404bd13ceae0dc721002e365ef0df008a460196df608b106ba7731f5152ef61"
+      },
+      "payload": {
+        "size": 51320,
+        "sha256": "a404bd13ceae0dc721002e365ef0df008a460196df608b106ba7731f5152ef61"
+      }
     }
   ]
 }
