@@ -528,6 +528,30 @@
         "size": 48076,
         "sha256": "f5e82a10dca665d4c18f4f306581c4bc5f7edee300b5325c8e8b7b032d58600b"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.7",
+      "filename": "KK3_NS38_NS39_V4.7.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40865/download",
+      "changelog": "1. Fixed the occasional issue of incorrect lighting brightness when switching modes on controllers.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40865/download",
+      "firmware_member": "NS39_KK3_MAX_V4.7.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.7/KK3_NS38_NS39_V4.7.zip",
+      "size": 98967,
+      "sha256": "0931980515431e2dcb240778a432d360b3eb781b06b4e4d0521b76143454cedc",
+      "firmware_file": {
+        "size": 48140,
+        "sha256": "7b3e15a510b551024c7c873569d049b182f55ddf2df0e485c96b33e81daa0822"
+      },
+      "payload": {
+        "size": 48140,
+        "sha256": "7b3e15a510b551024c7c873569d049b182f55ddf2df0e485c96b33e81daa0822"
+      }
     }
   ]
 }
