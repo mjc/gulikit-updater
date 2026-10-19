@@ -1420,6 +1420,32 @@
         "size": 25396,
         "sha256": "db2650ce488d29749e54295c1445ddfb9a656fd668294624e18fe1b7c1e42938"
       }
+    },
+    {
+      "product": "elves-2",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "3.7",
+      "filename": "NS58_Elves2_V3.7.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/1071651.html",
+      "released_at": "2026-01-06",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2978330",
+      "changelog": "Optimized Anti-Rebound mode to address occasional failure to dash in Super Smash Bros. and desynchronization when pressing R/ZR and L/ZL together.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/1071651.html",
+      "firmware_member": "NS58_Elves2_V3.7.bin",
+      "published_hashes": [],
+      "path": "/elves-2/base/v3.7/NS58_Elves2_V3.7.zip",
+      "size": 56139,
+      "sha256": "b2a447203f7329e8981050717cfc1aa143a00dd18d50015e9cfdad389e645784",
+      "firmware_file": {
+        "size": 51188,
+        "sha256": "486c308e857b24adde6e7b623af67c8d0a74b6038f57ffc41ea7e2b94683e1eb"
+      },
+      "payload": {
+        "size": 51188,
+        "sha256": "486c308e857b24adde6e7b623af67c8d0a74b6038f57ffc41ea7e2b94683e1eb"
+      }
     }
   ]
 }
