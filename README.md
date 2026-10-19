@@ -25,6 +25,18 @@ cargo run -p gulikit-ui --bin gulikit-ui
 ```
 
 The desktop app can inspect the controller and firmware packages on macOS.
+Its firmware browser loads the repository's `firmware` branch, lists archived
+KK3 Max main and Bluetooth versions, and downloads complete original ZIPs into
+the application's cache. Select a version and original filename, then use
+**Download and inspect**. Release notes, source links and measured hashes are
+available beside the selection. A cached index and previously verified ZIPs
+remain usable offline; **Refresh** checks for newly archived releases.
+
+Archive availability and updater support are separate. Historical packages
+without a matching reviewed release can be downloaded, but do not become update
+candidates. Existing model, component, version and restart-verification checks
+still apply to supported packages.
+
 **Native desktop updates are disabled.** Add `-- --demo` to use an in-memory
 device through the same UI callbacks and worker, without USB, files or dialogs:
 

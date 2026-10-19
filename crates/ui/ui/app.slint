@@ -1,4 +1,4 @@
-import { ScrollView } from "std-widgets.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
 export { Palette } from "std-widgets.slint";
 
 export enum Page { connect, ready, writing, restart, verified, failed }
@@ -28,6 +28,18 @@ export struct ViewState {
     status: string,
     error: string,
     log: string,
+    archive-status: string,
+    archive-revision: string,
+    archive-releases: [string],
+    archive-selected: int,
+    archive-version: string,
+    archive-filename: string,
+    archive-details: string,
+    archive-changelog: string,
+    archive-busy: bool,
+    archive-refreshing: bool,
+    archive-can-refresh: bool,
+    archive-can-download: bool,
 }
 
 component Label inherits Text { font-size: 13px; color: #64715f; wrap: word-wrap; }
@@ -131,11 +143,19 @@ export component AppWindow inherits Window {
     callback inspect-controller();
     callback open-attempt();
     callback cancel-operation();
+    callback archive-refresh();
+    callback archive-select(string);
+    callback archive-download();
     in-out property <bool> details-open: false;
+    in-out property <bool> archive-open: false;
+    in-out property <bool> archive-metadata-open: false;
     in-out property <bool> log-open: false;
+    in-out property <int> archive-selected-index: root.state.archive-selected;
     property <length> sidebar-width: 280px;
     property <string> screen-title: root.state.page == Page.connect ? "Connect controller" : root.state.page == Page.ready ? root.state.component-name : root.state.page == Page.writing ? "Updating…" : root.state.page == Page.restart ? "Restart controller" : root.state.page == Page.verified ? "Update verified" : "Update stopped";
     forward-focus: primary;
+
+    changed state => { root.archive-selected-index = root.state.archive-selected; }
 
     VerticalLayout {
         spacing: 0px;
@@ -193,6 +213,61 @@ export component AppWindow inherits Window {
                         horizontal-scrollbar-policy: always-off;
                         VerticalLayout {
                             spacing: 20px; alignment: start;
+                    if !root.demo-mode && (root.state.page == Page.connect || root.state.page == Page.ready): Rectangle {
+                        background: #fffefa; border-width: 1px; border-color: #d9e1d3; border-radius: 8px;
+                        VerticalLayout {
+                            padding: 10px; spacing: 8px;
+                            HorizontalLayout {
+                                VerticalLayout {
+                                    Text { text: "Firmware archive"; color: #293e2d; font-size: 15px; font-weight: 600; }
+                                    Label {
+                                        text: root.archive-open ? root.state.archive-status : "Browse archived KK3 Max firmware releases";
+                                        font-size: 11px; wrap: char-wrap; min-width: 0px; horizontal-stretch: 1;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                                ActionButton { text: root.archive-open ? "Close archive" : "Browse archive"; quiet: true; accessible-label: root.archive-open ? "Close firmware archive" : "Browse firmware archive"; clicked => { root.archive-open = !root.archive-open; } }
+                            }
+                            if root.archive-open: VerticalLayout {
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    Label { text: root.state.archive-revision == "" ? "Archive revision not loaded" : "Archive revision · " + root.state.archive-revision; font-size: 10px; min-width: 0px; }
+                                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                                    ActionButton { text: root.state.archive-refreshing ? "Refreshing…" : "Refresh"; quiet: true; enabled: root.state.archive-can-refresh; clicked => { root.archive-refresh(); } }
+                                }
+                            if root.state.archive-releases.length > 0: VerticalLayout {
+                                spacing: 5px;
+                                Label { text: "VERSION AND ORIGINAL ZIP"; font-size: 10px; }
+                                ComboBox {
+                                    model: root.state.archive-releases;
+                                    current-index <=> root.archive-selected-index;
+                                    enabled: !root.state.archive-busy && root.state.can-choose-package;
+                                    min-width: 0px;
+                                    horizontal-stretch: 1;
+                                    accessible-label: "Firmware version and original ZIP";
+                                    selected(value) => { root.archive-select(value); }
+                                }
+                            }
+                            if root.state.archive-releases.length == 0: Label { text: "No releases are available offline. Refresh to check the firmware branch."; }
+                            if root.state.archive-releases.length > 0: VerticalLayout {
+                                spacing: 8px;
+                                VerticalLayout {
+                                    spacing: 5px;
+                                    Text { text: "SELECTED ARCHIVE"; color: #526c42; font-size: 10px; }
+                                    Text {
+                                        text: root.state.archive-version + " · " + root.state.archive-filename;
+                                        color: #416c37; font-size: 13px; font-weight: 600;
+                                        wrap: word-wrap; min-width: 0px; horizontal-stretch: 1;
+                                    }
+                                    ActionButton { text: root.state.archive-busy ? "Downloading…" : "Download and inspect"; primary: true; enabled: root.state.archive-can-download; clicked => { root.archive-download(); } }
+                                }
+                                Label { text: root.state.archive-changelog; font-size: 12px; wrap: word-wrap; }
+                                ActionButton { text: (root.archive-metadata-open ? "▾ " : "▸ ") + "Release metadata and hashes"; quiet: true; clicked => { root.archive-metadata-open = !root.archive-metadata-open; } }
+                                if root.archive-metadata-open: Label { text: root.state.archive-details; font-size: 10px; wrap: char-wrap; }
+                            }
+                            }
+                        }
+                    }
                     if root.state.page == Page.connect || root.state.page == Page.ready || root.state.page == Page.restart || root.state.page == Page.failed: VerticalLayout {
                         spacing: 8px;
                         ActionButton {

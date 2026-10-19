@@ -1,7 +1,10 @@
 use super::*;
 use gulikit_core::package::Component;
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use slint::platform::{PointerEventButton, WindowEvent};
+use slint::{
+    Model,
+    platform::{PointerEventButton, WindowEvent},
+};
 use std::time::Duration;
 
 fn init_backend() {
@@ -313,6 +316,8 @@ struct LiveHarness {
     work: std::sync::mpsc::Receiver<gulikit_ui::live::Work>,
     events: std::sync::mpsc::Sender<gulikit_ui::live::Event>,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    archive_events: Option<std::sync::mpsc::Sender<gulikit_ui::archive::ArchiveEvent>>,
+    archive_requests: Option<std::sync::mpsc::Receiver<gulikit_ui::archive::Request>>,
 }
 impl LiveHarness {
     fn new() -> Self {
@@ -333,6 +338,40 @@ impl LiveHarness {
             work,
             events,
             cancelled,
+            archive_events: None,
+            archive_requests: None,
+        }
+    }
+    fn new_with_archive_fixture(release_count: usize) -> Self {
+        init_backend();
+        let (requests, work) = std::sync::mpsc::channel();
+        let (events, replies) = std::sync::mpsc::channel();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let snapshot = archive_snapshot_fixture(release_count);
+        let (archive_requests, archive_request_rx) = std::sync::mpsc::channel();
+        let (archive_events, archive_replies) = std::sync::mpsc::channel();
+        let archive =
+            gulikit_ui::archive::ArchiveBrowser::from_snapshot(snapshot, archive_requests);
+        let (ui, timer) = live_ui::create_mode_with_archive(
+            requests,
+            replies,
+            cancelled.clone(),
+            false,
+            archive,
+            archive_replies,
+        )
+        .unwrap();
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(760., 600.));
+        layout(&ui);
+        Self {
+            ui,
+            _timer: timer,
+            work,
+            events,
+            cancelled,
+            archive_events: Some(archive_events),
+            archive_requests: Some(archive_request_rx),
         }
     }
     fn send(&self, event: gulikit_ui::live::Event) {
@@ -393,6 +432,66 @@ impl LiveHarness {
             prior,
         });
     }
+}
+
+fn archive_snapshot_fixture(release_count: usize) -> gulikit_archive::ArchiveSnapshot {
+    use gulikit_archive::{
+        ArchiveSnapshot, Component as ArchiveComponent, FirmwareIndex, FirmwareMemberKind,
+        ReleaseMetadata, ReleaseRecord,
+    };
+
+    let mut index = FirmwareIndex::empty();
+    for item in 0..release_count {
+        let version = if item < 2 {
+            "5.9".to_owned()
+        } else {
+            format!("{}.{}", 6 + item / 20, item % 20)
+        };
+        let filename = format!("NS39_KK3_MAX_V{version}_revision-{item}.zip");
+        let metadata = ReleaseMetadata {
+            product: "kk3-max".into(),
+            member_kind: FirmwareMemberKind::Kk3,
+            component: ArchiveComponent::Base,
+            version,
+            filename,
+            source_url: "https://example.org/release".into(),
+            released_at: None,
+            retrieved_at: None,
+            retrieved_from: Some("https://example.org/archive".into()),
+            changelog: Some("Example release notes for this archive entry.".into()),
+            changelog_source_url: Some("https://example.org/release".into()),
+            firmware_member: "firmware.bin".into(),
+            published_hashes: Vec::new(),
+        };
+        let archive_bytes = format!("zip-bytes-{item}").into_bytes();
+        let firmware = format!("firmware-bytes-{item}").into_bytes();
+        index
+            .add(ReleaseRecord::measure(metadata, &archive_bytes, &firmware, &firmware).unwrap())
+            .unwrap();
+    }
+    let bluetooth = ReleaseRecord::measure(
+        ReleaseMetadata {
+            product: "kk3-max".into(),
+            member_kind: FirmwareMemberKind::Kk3,
+            component: ArchiveComponent::Bluetooth,
+            version: "3.24".into(),
+            filename: "NS38_NS39_BT_V3.24.zip".into(),
+            source_url: "https://example.org/bluetooth-release".into(),
+            released_at: None,
+            retrieved_at: None,
+            retrieved_from: None,
+            changelog: Some("Bluetooth release notes.".into()),
+            changelog_source_url: None,
+            firmware_member: "updater.exe".into(),
+            published_hashes: Vec::new(),
+        },
+        b"bluetooth-zip",
+        b"updater-member",
+        b"embedded-payload",
+    )
+    .unwrap();
+    index.add(bluetooth).unwrap();
+    ArchiveSnapshot::from_parts(&"a".repeat(40), &index.to_json().unwrap()).unwrap()
 }
 
 #[test]
@@ -772,6 +871,14 @@ fn both_component_flows_show_their_own_restart_procedure() {
 #[test]
 fn mode_instructions_show_accessible_button_icons_for_the_selected_component() {
     let app = LiveHarness::new();
+    app.ui
+        .window()
+        .dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(520., 350.),
+            delta_x: 0.,
+            delta_y: -100.,
+        });
+    layout(&app.ui);
     inside_window(&app.ui, &element(&app.ui, "Use the rightmost"));
     inside_window(&app.ui, &element(&app.ui, "A"));
     let aps = element(&app.ui, "APS button (overlapping squares)");
@@ -868,6 +975,125 @@ fn offline_package_controls_show_metadata_without_claiming_a_controller() {
     ));
     assert_eq!(app.ui.get_state().page, Page::Failed);
     assert!(app.ui.get_state().can_choose_package);
+}
+
+#[test]
+fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_live_app() {
+    use gulikit_ui::{archive::ArchiveEvent, archive_package::DownloadInspection};
+
+    let app = LiveHarness::new_with_archive_fixture(40);
+    click(&app.ui, "Browse firmware archive");
+    layout(&app.ui);
+    save_preview(&app.ui, "archive-browser-40-releases-minimum-window");
+    let version_picker = element(&app.ui, "Firmware version and original ZIP");
+    let download = element(&app.ui, "Download and inspect");
+    inside_window(&app.ui, &version_picker);
+    inside_window(&app.ui, &download);
+    assert_eq!(app.ui.get_state().archive_releases.row_count(), 40);
+
+    let selected_label = "5.9 · NS39_KK3_MAX_V5.9_revision-1.zip";
+    let releases = app.ui.get_state().archive_releases;
+    let target_index = (0..releases.row_count())
+        .find(|index| releases.row_data(*index).unwrap() == selected_label)
+        .unwrap();
+    assert_eq!(app.ui.get_state().archive_selected, 0);
+    click(&app.ui, "Firmware version and original ZIP");
+    for _ in 0..target_index {
+        key(&app.ui, slint::platform::Key::DownArrow);
+    }
+    key(&app.ui, slint::platform::Key::Return);
+    layout(&app.ui);
+    let selected_index = usize::try_from(app.ui.get_state().archive_selected).unwrap();
+    assert_eq!(
+        app.ui
+            .get_state()
+            .archive_releases
+            .row_data(selected_index)
+            .unwrap(),
+        selected_label
+    );
+    assert_eq!(
+        element(&app.ui, "Firmware version and original ZIP")
+            .accessible_value()
+            .unwrap(),
+        selected_label
+    );
+
+    click(&app.ui, "Download and inspect");
+    let request = app.archive_requests.as_ref().unwrap().try_recv().unwrap();
+    let (snapshot, path) = match request {
+        gulikit_ui::archive::Request::Download { snapshot, path } => (snapshot, path),
+        gulikit_ui::archive::Request::Refresh | gulikit_ui::archive::Request::Shutdown => {
+            panic!("expected archive download request")
+        }
+    };
+    assert_eq!(snapshot.revision(), "a".repeat(40));
+    assert!(path.ends_with("revision-1.zip"));
+
+    let record = snapshot.index().find(&path).unwrap().clone();
+    let cache_path = format!(
+        "/Users/archive-test/Library/Caches/gulikit-updater/archives/{}/NS39_KK3_MAX_V5.9_revision-1.zip",
+        "0123456789abcdef".repeat(4)
+    );
+    app.archive_events
+        .as_ref()
+        .unwrap()
+        .send(ArchiveEvent::Downloaded {
+            path: cache_path.clone().into(),
+            record: Box::new(record),
+            inspection: Ok(DownloadInspection::Supported(live_fixtures::package())),
+        })
+        .unwrap();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+    layout(&app.ui);
+    assert_eq!(app.ui.get_state().page, Page::Ready);
+    assert_eq!(
+        app.ui.get_state().filename,
+        "NS39_KK3_MAX_V5.9_revision-1.zip"
+    );
+    assert!(app.ui.get_state().archive_status.contains(&cache_path));
+    save_preview(&app.ui, "archive-browser-downloaded-long-cache-path");
+    inside_window(&app.ui, &element(&app.ui, "Close firmware archive"));
+    inside_window(&app.ui, &element(&app.ui, "Download and inspect"));
+    click(&app.ui, "Close firmware archive");
+    inside_window(&app.ui, &element(&app.ui, "Browse firmware archive"));
+    assert!(!app.ui.get_state().connected);
+}
+
+#[test]
+fn archive_combo_visible_value_tracks_rust_index_projection() {
+    use gulikit_archive::ArchiveSnapshot;
+    use gulikit_ui::archive::ArchiveEvent;
+
+    let app = LiveHarness::new_with_archive_fixture(4);
+    click(&app.ui, "Browse firmware archive");
+    let combo = element(&app.ui, "Firmware version and original ZIP");
+    let releases = app.ui.get_state().archive_releases;
+    let selected = releases.row_data(1).unwrap();
+    assert!(selected.starts_with("6.2 · "));
+
+    click(&app.ui, "Firmware version and original ZIP");
+    key(&app.ui, slint::platform::Key::DownArrow);
+    key(&app.ui, slint::platform::Key::Return);
+    assert_eq!(app.ui.get_state().archive_selected, 1);
+    assert_eq!(combo.accessible_value().unwrap(), selected);
+
+    let refreshed = archive_snapshot_fixture(5);
+    let refreshed_index = refreshed.index().to_json().unwrap();
+    let refreshed = ArchiveSnapshot::from_parts(&"b".repeat(40), &refreshed_index).unwrap();
+    app.archive_events
+        .as_ref()
+        .unwrap()
+        .send(ArchiveEvent::Refreshed(Ok(refreshed)))
+        .unwrap();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+    layout(&app.ui);
+    assert_eq!(app.ui.get_state().archive_selected, 2);
+    assert_eq!(
+        app.ui.get_state().archive_releases.row_data(2).unwrap(),
+        selected
+    );
+    assert_eq!(combo.accessible_value().unwrap(), selected);
 }
 
 #[test]

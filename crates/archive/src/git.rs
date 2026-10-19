@@ -787,7 +787,7 @@ fn open_package_file(path: &Path) -> io::Result<fs::File> {
     fs::File::open(path)
 }
 
-fn validate_zip(bytes: &[u8]) -> Result<(), GitArchiveError> {
+pub(crate) fn validate_zip(bytes: &[u8]) -> Result<(), GitArchiveError> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| GitArchiveError::Zip(error.to_string()))?;
     archive
