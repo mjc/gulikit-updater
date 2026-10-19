@@ -840,6 +840,30 @@
         "size": 51320,
         "sha256": "a404bd13ceae0dc721002e365ef0df008a460196df608b106ba7731f5152ef61"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.9",
+      "filename": "KK3_NS38_NS39_V5.9.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/887152.html",
+      "released_at": "2026-03-02",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2990583",
+      "changelog": "Fixed an issue where switching the trigger from Click mode back to Analog mode would sometimes prevent it from registering a full pull (value 255). (The KK3 Pro does not have the trigger switching function and does not require this update.)",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/887152.html",
+      "firmware_member": "NS39_KK3_MAX_V5.9.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.9/KK3_NS38_NS39_V5.9.zip",
+      "size": 107606,
+      "sha256": "b4d3c74bc2b0f6570523f121d7d8feb8842f239bdfc5e87bffd7af6aee520b67",
+      "firmware_file": {
+        "size": 51500,
+        "sha256": "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4"
+      },
+      "payload": {
+        "size": 51500,
+        "sha256": "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4"
+      }
     }
   ]
 }
