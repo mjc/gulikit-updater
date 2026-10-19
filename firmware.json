@@ -888,6 +888,30 @@
         "size": 361472,
         "sha256": "783d206c08253c1e2291a8b0bc99b04f95fc4054c2215447a30933f623cf9dfe"
       }
+    },
+    {
+      "component": "bluetooth",
+      "version": "3.24",
+      "filename": "NS38_NS39_BT_V3.24.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "released_at": "2024-09-06",
+      "retrieved_at": null,
+      "retrieved_from": "https://gulikit.com/filedownload/133023",
+      "changelog": "Fixed the issue where the vibration does not stop when the controller is connected to a PC via a wired connection in Switch mode.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "GuliKit_NS38_NS39_BT_V3.24.exe",
+      "published_hashes": [],
+      "path": "/kk3-max/bluetooth/v3.24/NS38_NS39_BT_V3.24.zip",
+      "size": 1163538,
+      "sha256": "1bcccf02448b9c92b5b69d82b168b951c883ea6d71ec6463127523d0b275ab30",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "38e24c9e49952fbba14764f688a020fb22a49786321382bc5a2ea76822addc2c"
+      },
+      "payload": {
+        "size": 361472,
+        "sha256": "e540b990cd07df2deb91ac90d20428ddf7788a15f55d84aaaf88cdd99ea71606"
+      }
     }
   ]
 }
