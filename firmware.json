@@ -1520,6 +1520,32 @@
         "size": 2245632,
         "sha256": "ffb1c8d9e1974c6d5885ad03ed3fc817d96ce31bb6f757904cef68582bd85d40"
       }
+    },
+    {
+      "product": "tt-pro",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "7.9",
+      "filename": "TT-MAX_TT-PRO_V7.9.05.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/3137265.html",
+      "released_at": "2026-10-12",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/3047230",
+      "changelog": "Added controller usage-time tracking and button-press-count tracking, viewable in the app.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/3137265.html",
+      "firmware_member": "NS68_TT-PRO_V7.9.bin",
+      "published_hashes": [],
+      "path": "/tt-pro/base/v7.9/TT-MAX_TT-PRO_V7.9.05.zip",
+      "size": 752887,
+      "sha256": "3f77a61d2dc3462b6af26988b8cfccc8067654defeff909083f2d93c8a5bda13",
+      "firmware_file": {
+        "size": 53232,
+        "sha256": "3958c832e2be5b13831c0d1369fcf17494861b3823734bd572b743c3ffed08e0"
+      },
+      "payload": {
+        "size": 53232,
+        "sha256": "3958c832e2be5b13831c0d1369fcf17494861b3823734bd572b743c3ffed08e0"
+      }
     }
   ]
 }
