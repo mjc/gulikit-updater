@@ -1572,6 +1572,32 @@
         "size": 58972,
         "sha256": "096a0af3b4bdef0f24a249e39c5ed53bb896126cc48c83bd4d1c49897346304e"
       }
+    },
+    {
+      "product": "tt-max",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "7.9",
+      "filename": "TT-MAX_TT-PRO_V7.9.05.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/3137265.html",
+      "released_at": "2026-10-12",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/3047230",
+      "changelog": "Added controller usage-time tracking and button-press-count tracking, viewable in the app.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/3137265.html",
+      "firmware_member": "NS69_TT-MAX_V7.9.bin",
+      "published_hashes": [],
+      "path": "/tt-max/base/v7.9/TT-MAX_TT-PRO_V7.9.05.zip",
+      "size": 752887,
+      "sha256": "3f77a61d2dc3462b6af26988b8cfccc8067654defeff909083f2d93c8a5bda13",
+      "firmware_file": {
+        "size": 51388,
+        "sha256": "b9aa897a7906eb2f16ebc17539133fe4babff0936631790edb6936fcde64e632"
+      },
+      "payload": {
+        "size": 51388,
+        "sha256": "b9aa897a7906eb2f16ebc17539133fe4babff0936631790edb6936fcde64e632"
+      }
     }
   ]
 }
