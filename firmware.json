@@ -96,6 +96,30 @@
         "size": 44368,
         "sha256": "7b5ca099ec313428cc6a8adfb1ed27ca59f2d6a460cafb79ae2165b7b30dd845"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.0",
+      "filename": "GuliKit_NS39_V3.0.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40377/download",
+      "changelog": "1. Optimized the vibration effects of Super Haptic vibration mode and HD rumble mode in Switch mode.\r\n2. Resolved the issue of the controller skipping two spaces in certain game menus during usage.\r\n\r\n-----------------------------------------------------------------------------------------------------",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40377/download",
+      "firmware_member": "GuliKit_NS39_V3.0.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.0/GuliKit_NS39_V3.0.zip",
+      "size": 46472,
+      "sha256": "d6fe2ee1279b1e7b5e12462d5aebbbc8b3fedfaf6a8d4754f160526cfa489ea1",
+      "firmware_file": {
+        "size": 44604,
+        "sha256": "c1a2376cadf9e0cf02dc11c63b3ded11653d8cd92720c552fca5416bf7fbac17"
+      },
+      "payload": {
+        "size": 44604,
+        "sha256": "c1a2376cadf9e0cf02dc11c63b3ded11653d8cd92720c552fca5416bf7fbac17"
+      }
     }
   ]
 }
