@@ -408,6 +408,8 @@ impl GitArchive {
             .split(|byte| *byte == b'\n')
             .take_while(|line| !line.is_empty());
         let mut tree = None;
+        let mut sha1_signature = None;
+        let mut sha256_signature = None;
         let mut parents = Vec::new();
         for line in header {
             if let Some(value) = line.strip_prefix(b"tree ") {
@@ -417,9 +419,44 @@ impl GitArchive {
                     ));
                 }
                 tree = Some(String::from_utf8_lossy(value).into_owned());
+            } else if let Some(value) = line.strip_prefix(b"gpgsig ") {
+                if sha1_signature.replace(value).is_some() {
+                    return Err(GitArchiveError::InvalidHistory(
+                        "commit has duplicate SHA-1 signature headers",
+                    ));
+                }
+            } else if let Some(value) = line.strip_prefix(b"gpgsig-sha256 ") {
+                if sha256_signature.replace(value).is_some() {
+                    return Err(GitArchiveError::InvalidHistory(
+                        "commit has duplicate SHA-256 signature headers",
+                    ));
+                }
             } else if let Some(value) = line.strip_prefix(b"parent ") {
                 parents.push(String::from_utf8_lossy(value).into_owned());
+            } else if line == b"gpgsig" || line == b"gpgsig-sha256" {
+                return Err(GitArchiveError::InvalidHistory(
+                    "commit has malformed signature header",
+                ));
             }
+        }
+        if sha1_signature
+            .into_iter()
+            .chain(sha256_signature)
+            .any(|value| !value.starts_with(b"-----BEGIN PGP SIGNATURE-----"))
+        {
+            return Err(GitArchiveError::InvalidHistory(
+                "commit contains a non-OpenPGP signature",
+            ));
+        }
+        let selected_signature = match self.object_id_len {
+            40 => sha1_signature,
+            64 => sha256_signature,
+            _ => None,
+        };
+        if selected_signature.is_none() {
+            return Err(GitArchiveError::InvalidHistory(
+                "commit has no signature for its object format",
+            ));
         }
         let tree = tree.ok_or(GitArchiveError::InvalidHistory("commit has no tree"))?;
         if tree.len() != self.object_id_len
@@ -433,6 +470,9 @@ impl GitArchive {
     }
 
     fn read_tree(&self, oid: &str) -> Result<BTreeMap<String, String>, GitArchiveError> {
+        if self.git(&["cat-file", "-t", oid], None)? != b"tree\n" {
+            return Err(GitArchiveError::InvalidTree);
+        }
         if self.object_size(oid)? > MAX_TREE_BYTES {
             return Err(GitArchiveError::InvalidTree);
         }
@@ -515,6 +555,7 @@ impl GitArchive {
     }
 
     fn verify_commit(&self, oid: &str) -> Result<(), GitArchiveError> {
+        self.commit_header(oid)?;
         self.git_with_gpg(&["verify-commit", oid], None)?;
         Ok(())
     }
@@ -626,6 +667,10 @@ impl GitArchive {
             .arg(format!("gpg.program={program}"))
             .arg("-c")
             .arg(format!("gpg.openpgp.program={program}"))
+            .arg("-c")
+            .arg(format!("gpg.x509.program={program}"))
+            .arg("-c")
+            .arg(format!("gpg.ssh.program={program}"))
             .arg("-c")
             .arg("gpg.format=openpgp")
             .arg("--git-dir=.")
@@ -783,6 +828,7 @@ fn clean_git() -> Command {
             command.env(key, value);
         }
     }
+    command.env("GIT_NO_LAZY_FETCH", "1");
     command
 }
 

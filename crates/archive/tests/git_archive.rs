@@ -462,7 +462,12 @@ fn repository_local_gpg_helpers_cannot_sign_or_forge_verification() {
     )
     .unwrap();
     fs::set_permissions(&malicious_helper, fs::Permissions::from_mode(0o700)).unwrap();
-    for key in ["gpg.program", "gpg.openpgp.program"] {
+    for key in [
+        "gpg.program",
+        "gpg.openpgp.program",
+        "gpg.x509.program",
+        "gpg.ssh.program",
+    ] {
         git(&[
             "--git-dir",
             &repo.display().to_string(),
@@ -488,7 +493,101 @@ fn repository_local_gpg_helpers_cannot_sign_or_forge_verification() {
     git_repo(&repo, &["update-ref", BRANCH, &unsigned, &signed]);
     assert!(matches!(
         GitArchive::open_with_gpg_home(&repo, &fixture.home),
-        Err(GitArchiveError::Git(_))
+        Err(GitArchiveError::InvalidHistory(
+            "commit has no signature for its object format"
+        ))
+    ));
+    assert!(!marker.exists());
+
+    check_rejected_signature_headers(
+        temp.path(),
+        &repo,
+        &archive,
+        &tree,
+        &signed,
+        &unsigned,
+        &marker,
+    );
+}
+
+fn check_rejected_signature_headers(
+    temp: &Path,
+    repo: &Path,
+    archive: &GitArchive,
+    tree: &str,
+    signed: &str,
+    unsigned: &str,
+    marker: &Path,
+) {
+    let malformed_commit = format!(
+        "tree {tree}\nparent {signed}\nauthor Archive Test <archive-test@example.invalid> 1792329600 +0000\ncommitter Archive Test <archive-test@example.invalid> 1792329600 +0000\ngpgsig -----BEGIN SSH SIGNATURE-----\n -----END SSH SIGNATURE-----\n\nwrong signature backend\n"
+    );
+    let malformed_file = temp.join("wrong-signature-backend.commit");
+    fs::write(&malformed_file, malformed_commit).unwrap();
+    let malformed = git_text(
+        repo,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            &malformed_file.display().to_string(),
+        ],
+    );
+    git_repo(repo, &["update-ref", BRANCH, &malformed, unsigned]);
+    assert!(matches!(
+        archive.index(),
+        Err(GitArchiveError::InvalidHistory(
+            "commit contains a non-OpenPGP signature"
+        ))
+    ));
+    assert!(!marker.exists());
+
+    let wrong_hash_header = format!(
+        "tree {tree}\nparent {signed}\nauthor Archive Test <archive-test@example.invalid> 1792329600 +0000\ncommitter Archive Test <archive-test@example.invalid> 1792329600 +0000\ngpgsig-sha256 -----BEGIN PGP SIGNATURE-----\n -----END PGP SIGNATURE-----\n\nwrong hash signature header\n"
+    );
+    let wrong_hash_file = temp.join("wrong-hash-signature.commit");
+    fs::write(&wrong_hash_file, wrong_hash_header).unwrap();
+    let wrong_hash = git_text(
+        repo,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            &wrong_hash_file.display().to_string(),
+        ],
+    );
+    git_repo(repo, &["update-ref", BRANCH, &wrong_hash, &malformed]);
+    assert!(matches!(
+        archive.index(),
+        Err(GitArchiveError::InvalidHistory(
+            "commit has no signature for its object format"
+        ))
+    ));
+    assert!(!marker.exists());
+
+    let duplicate_signature = format!(
+        "tree {tree}\nparent {signed}\nauthor Archive Test <archive-test@example.invalid> 1792329600 +0000\ncommitter Archive Test <archive-test@example.invalid> 1792329600 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n -----END PGP SIGNATURE-----\ngpgsig -----BEGIN PGP SIGNATURE-----\n -----END PGP SIGNATURE-----\n\nduplicate signature headers\n"
+    );
+    let duplicate_file = temp.join("duplicate-signature.commit");
+    fs::write(&duplicate_file, duplicate_signature).unwrap();
+    let duplicate = git_text(
+        repo,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            &duplicate_file.display().to_string(),
+        ],
+    );
+    git_repo(repo, &["update-ref", BRANCH, &duplicate, &wrong_hash]);
+    assert!(matches!(
+        archive.index(),
+        Err(GitArchiveError::InvalidHistory(
+            "commit has duplicate SHA-1 signature headers"
+        ))
     ));
     assert!(!marker.exists());
 }
@@ -573,6 +672,184 @@ fn duplicate_tree_headers_are_rejected_before_signature_validation() {
 }
 
 #[test]
+fn signed_commits_with_commit_oids_in_tree_headers_are_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SignedFixture::new(temp.path());
+    let repo = temp.path().join("archive.git");
+    let archive = GitArchive::init_with_gpg_home(&repo, &fixture.home).unwrap();
+    configure_archive(&repo, &fixture, true);
+
+    let package = temp.path().join("firmware.zip");
+    fs::write(&package, synthetic_zip("firmware.bin", b"root firmware")).unwrap();
+    let root = archive
+        .import(&package, metadata(Component::Base, "5.9", "root.zip"))
+        .unwrap();
+
+    // A signed malformed root whose tree header points to a commit object still
+    // exposes that commit's tree through `git ls-tree <commit>`. The archive
+    // validator must reject the object type before interpreting that tree.
+    let malformed_root = signed_commit_with_tree_oid(
+        temp.path(),
+        &repo,
+        &fixture,
+        &root,
+        None,
+        "malformed signed root",
+    );
+    git(&[
+        "--git-dir",
+        &repo.display().to_string(),
+        "verify-commit",
+        &malformed_root,
+    ]);
+    set_archive_ref(&repo, &malformed_root);
+    assert_archive_rejects_invalid_tree(
+        &archive,
+        &repo,
+        &fixture,
+        &package,
+        "5.8",
+        "rejected-root.zip",
+    );
+    set_archive_ref(&repo, &root);
+    assert_eq!(archive.index().unwrap().releases().len(), 1);
+    assert_eq!(
+        archive.read("/kk3-max/base/v5.9/root.zip").unwrap(),
+        fs::read(&package).unwrap()
+    );
+
+    fs::write(&package, synthetic_zip("firmware.bin", b"second firmware")).unwrap();
+    let second = archive
+        .import(&package, metadata(Component::Base, "5.8", "second.zip"))
+        .unwrap();
+    fs::write(&package, synthetic_zip("firmware.bin", b"third firmware")).unwrap();
+    let donor = archive
+        .import(&package, metadata(Component::Base, "5.7", "third.zip"))
+        .unwrap();
+
+    // The donor commit's tree has one appended release. Referencing its commit
+    // OID from a signed child must not make that commit-ish tree acceptable.
+    let malformed_append = signed_commit_with_tree_oid(
+        temp.path(),
+        &repo,
+        &fixture,
+        &donor,
+        Some(&second),
+        "malformed signed append",
+    );
+    git(&[
+        "--git-dir",
+        &repo.display().to_string(),
+        "verify-commit",
+        &malformed_append,
+    ]);
+    set_archive_ref(&repo, &malformed_append);
+    assert_archive_rejects_invalid_tree(
+        &archive,
+        &repo,
+        &fixture,
+        &package,
+        "5.6",
+        "rejected-append.zip",
+    );
+    set_archive_ref(&repo, &second);
+    assert_eq!(archive.index().unwrap().releases().len(), 2);
+    assert_eq!(
+        archive.read("/kk3-max/base/v5.8/second.zip").unwrap(),
+        synthetic_zip("firmware.bin", b"second firmware")
+    );
+}
+
+fn assert_archive_rejects_invalid_tree(
+    archive: &GitArchive,
+    repo: &Path,
+    fixture: &SignedFixture,
+    package: &Path,
+    version: &str,
+    filename: &str,
+) {
+    assert!(matches!(
+        GitArchive::open_with_gpg_home(repo, &fixture.home),
+        Err(GitArchiveError::InvalidTree)
+    ));
+    assert!(matches!(archive.index(), Err(GitArchiveError::InvalidTree)));
+    assert!(matches!(
+        archive.import(package, metadata(Component::Base, version, filename)),
+        Err(GitArchiveError::InvalidTree)
+    ));
+}
+
+fn signed_commit_with_tree_oid(
+    temp: &Path,
+    repo: &Path,
+    fixture: &SignedFixture,
+    tree_oid: &str,
+    parent: Option<&str>,
+    message: &str,
+) -> String {
+    let parent_header = parent.map_or_else(String::new, |parent| format!("parent {parent}\n"));
+    let unsigned = format!(
+        "tree {tree_oid}\n{parent_header}author Archive Test <archive-test@example.invalid> 1792329600 +0000\ncommitter Archive Test <archive-test@example.invalid> 1792329600 +0000\n\n{message}\n"
+    );
+    let mut signer = Command::new("gpg");
+    signer
+        .arg("--homedir")
+        .arg(&fixture.home)
+        .args([
+            "--batch",
+            "--armor",
+            "--detach-sign",
+            "--local-user",
+            &fixture.fingerprint,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = signer.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(unsigned.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap().tap_success();
+    let signature = String::from_utf8(output.stdout).unwrap();
+    let signature_header = signature
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 0 {
+                format!("gpgsig {line}\n")
+            } else {
+                format!(" {line}\n")
+            }
+        })
+        .collect::<String>();
+    let commit_bytes = unsigned.replacen(
+        &format!("\n\n{message}\n"),
+        &format!("\n{signature_header}\n{message}\n"),
+        1,
+    );
+    let commit_file = temp.join(format!("{message}.commit"));
+    fs::write(&commit_file, commit_bytes).unwrap();
+    let output = git(&[
+        "--git-dir",
+        &repo.display().to_string(),
+        "hash-object",
+        "--literally",
+        "-t",
+        "commit",
+        "-w",
+        &commit_file.display().to_string(),
+    ]);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn set_archive_ref(repo: &Path, oid: &str) {
+    fs::write(repo.join("refs/heads/firmware"), format!("{oid}\n")).unwrap();
+}
+
+#[test]
 fn open_refuses_a_working_source_repository_and_init_refuses_existing_paths() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -586,6 +863,35 @@ fn open_refuses_a_working_source_repository_and_init_refuses_existing_paths() {
         GitArchive::init(&source),
         Err(GitArchiveError::AlreadyExists)
     ));
+}
+
+#[test]
+fn sha256_archive_imports_and_reads_a_signed_release() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SignedFixture::new(temp.path());
+    let repo = temp.path().join("archive.git");
+    git(&[
+        "init",
+        "--quiet",
+        "--bare",
+        "--object-format=sha256",
+        "--initial-branch=firmware",
+        &repo.display().to_string(),
+    ]);
+    configure_archive(&repo, &fixture, true);
+    let archive = GitArchive::open_with_gpg_home(&repo, &fixture.home).unwrap();
+    let bytes = synthetic_zip("firmware.bin", b"sha256 archive firmware");
+    let package = temp.path().join("firmware.zip");
+    fs::write(&package, &bytes).unwrap();
+    let commit = archive
+        .import(&package, metadata(Component::Base, "5.9", "firmware.zip"))
+        .unwrap();
+    assert_eq!(commit.len(), 64);
+    assert_eq!(archive.index().unwrap().releases().len(), 1);
+    assert_eq!(
+        archive.read("/kk3-max/base/v5.9/firmware.zip").unwrap(),
+        bytes
+    );
 }
 
 const BRANCH: &str = "refs/heads/firmware";
