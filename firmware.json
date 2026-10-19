@@ -696,6 +696,30 @@
         "size": 48536,
         "sha256": "cae3745aea36b04e1a3e8d27d9b54b79625387dad8f8be2aad4159362911cb7f"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.3",
+      "filename": "KK3_NS38_NS39_V5.3.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41199/download",
+      "changelog": "1. Fixed a vibration bug in Switch mode.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41199/download",
+      "firmware_member": "NS39_KK3_MAX_V5.3.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.3/KK3_NS38_NS39_V5.3.zip",
+      "size": 99791,
+      "sha256": "a863afbff180ef7036d40cd61e657b0039fbb9d4020312f6430c7163b1907150",
+      "firmware_file": {
+        "size": 48576,
+        "sha256": "2cd553cb01cc2fcb69ceb3c594d4a47f5fb137b249c9cc65a5ba3a124b00eb7d"
+      },
+      "payload": {
+        "size": 48576,
+        "sha256": "2cd553cb01cc2fcb69ceb3c594d4a47f5fb137b249c9cc65a5ba3a124b00eb7d"
+      }
     }
   ]
 }
