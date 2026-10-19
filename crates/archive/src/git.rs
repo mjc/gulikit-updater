@@ -44,6 +44,8 @@ pub enum GitArchiveError {
     InvalidBlob,
     #[error("Git command failed: {0}")]
     Git(String),
+    #[error("could not resolve an absolute host Git executable from PATH")]
+    GitProgramUnavailable,
     #[error("could not resolve an absolute host GPG executable from PATH")]
     GpgProgramUnavailable,
     #[error("GPG home is not an existing directory")]
@@ -69,6 +71,7 @@ pub enum GitArchiveError {
 pub struct GitArchive {
     path: PathBuf,
     object_id_len: usize,
+    git_program: PathBuf,
     gpg: GpgContext,
     hooks: HookDirectory,
 }
@@ -133,6 +136,8 @@ impl GitArchive {
     }
 
     fn init_with_context(path: &Path, gpg: GpgContext) -> Result<Self, GitArchiveError> {
+        let git_program =
+            resolve_host_git_program().ok_or(GitArchiveError::GitProgramUnavailable)?;
         match fs::symlink_metadata(path) {
             Ok(_) => return Err(GitArchiveError::AlreadyExists),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -140,7 +145,7 @@ impl GitArchive {
         }
         fs::create_dir(path)?;
         let hooks = HookDirectory::new()?;
-        let mut command = clean_git();
+        let mut command = clean_git(&git_program);
         command.current_dir(path);
         add_hooks_path(&mut command, &hooks.path);
         let output = command
@@ -151,7 +156,7 @@ impl GitArchive {
             .arg(".")
             .output()?;
         check_output(output)?;
-        Self::open_with_context(path, gpg)
+        Self::open_with_context(path, gpg, git_program)
     }
 
     /// Open and validate an existing bare archive repository.
@@ -159,7 +164,9 @@ impl GitArchive {
     /// # Errors
     /// Rejects non-bare repositories, unexpected refs, invalid history, or invalid trees.
     pub fn open(path: &Path) -> Result<Self, GitArchiveError> {
-        Self::open_with_context(path, GpgContext::from_host(None)?)
+        let git_program =
+            resolve_host_git_program().ok_or(GitArchiveError::GitProgramUnavailable)?;
+        Self::open_with_context(path, GpgContext::from_host(None)?, git_program)
     }
 
     /// Open an archive using the caller-selected GPG home directory.
@@ -170,10 +177,16 @@ impl GitArchive {
     /// # Errors
     /// Rejects an invalid GPG home, non-bare repositories, unexpected refs, or invalid history.
     pub fn open_with_gpg_home(path: &Path, home: &Path) -> Result<Self, GitArchiveError> {
-        Self::open_with_context(path, GpgContext::from_host(Some(home))?)
+        let git_program =
+            resolve_host_git_program().ok_or(GitArchiveError::GitProgramUnavailable)?;
+        Self::open_with_context(path, GpgContext::from_host(Some(home))?, git_program)
     }
 
-    fn open_with_context(path: &Path, gpg: GpgContext) -> Result<Self, GitArchiveError> {
+    fn open_with_context(
+        path: &Path,
+        gpg: GpgContext,
+        git_program: PathBuf,
+    ) -> Result<Self, GitArchiveError> {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(GitArchiveError::InvalidRepositoryPath);
@@ -189,6 +202,7 @@ impl GitArchive {
         let archive = Self {
             path,
             object_id_len: 0,
+            git_program,
             gpg,
             hooks,
         };
@@ -514,7 +528,7 @@ impl GitArchive {
     }
 
     fn tree_output(&self, oid: &str) -> Result<Vec<u8>, GitArchiveError> {
-        let mut command = clean_git();
+        let mut command = clean_git(&self.git_program);
         command.current_dir(&self.path);
         add_hooks_path(&mut command, &self.hooks.path);
         let mut child = command
@@ -659,7 +673,7 @@ impl GitArchive {
     ) -> Result<Vec<u8>, GitArchiveError> {
         let program = self.gpg.program()?;
         let program = program.to_string_lossy();
-        let mut command = clean_git();
+        let mut command = clean_git(&self.git_program);
         command.current_dir(&self.path);
         add_hooks_path(&mut command, &self.hooks.path);
         command
@@ -687,7 +701,7 @@ impl GitArchive {
         index: Option<&Path>,
         input: Option<&[u8]>,
     ) -> Result<Vec<u8>, GitArchiveError> {
-        let mut command = clean_git();
+        let mut command = clean_git(&self.git_program);
         command.current_dir(&self.path);
         add_hooks_path(&mut command, &self.hooks.path);
         command.arg("--git-dir=.").args(args);
@@ -820,8 +834,8 @@ fn validate_zip(bytes: &[u8]) -> Result<(), GitArchiveError> {
     Ok(())
 }
 
-fn clean_git() -> Command {
-    let mut command = Command::new("git");
+fn clean_git(program: &Path) -> Command {
+    let mut command = Command::new(program);
     command.env_clear();
     for (key, value) in env::vars_os() {
         if !key.to_string_lossy().starts_with("GIT_") {
@@ -846,18 +860,31 @@ fn canonical_gpg_home(home: &Path) -> Result<PathBuf, GitArchiveError> {
     Ok(home)
 }
 
+fn resolve_host_git_program() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const EXECUTABLE_NAMES: [&str; 2] = ["git.exe", "git"];
+    #[cfg(not(windows))]
+    const EXECUTABLE_NAMES: [&str; 1] = ["git"];
+
+    resolve_host_program(&EXECUTABLE_NAMES)
+}
+
 fn resolve_host_gpg_program() -> Option<PathBuf> {
     #[cfg(windows)]
     const EXECUTABLE_NAMES: [&str; 2] = ["gpg.exe", "gpg"];
     #[cfg(not(windows))]
     const EXECUTABLE_NAMES: [&str; 1] = ["gpg"];
 
+    resolve_host_program(&EXECUTABLE_NAMES)
+}
+
+fn resolve_host_program(executable_names: &[&str]) -> Option<PathBuf> {
     let search_path = env::var_os("PATH")?;
     for directory in env::split_paths(&search_path) {
         if !directory.is_absolute() {
             continue;
         }
-        for name in EXECUTABLE_NAMES {
+        for name in executable_names {
             let candidate = directory.join(name);
             let Ok(metadata) = fs::metadata(&candidate) else {
                 continue;
