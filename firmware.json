@@ -576,6 +576,30 @@
         "size": 48296,
         "sha256": "2efebef3a4442335a4b1c1e488af0078f1b27bf630a40a30217d0fee2a0e3fa6"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.9",
+      "filename": "KK3_NS38_NS39_V4.9.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41165/download",
+      "changelog": "1.Optimized a vibration-related issue in adapter mode on controller.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41165/download",
+      "firmware_member": "NS39_KK3_MAX_V4.9.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.9/KK3_NS38_NS39_V4.9.zip",
+      "size": 99269,
+      "sha256": "0f5fdd657401dfa9cd5d7601bf9e20dc25fbbfbc90e400447d49cd8cd0596242",
+      "firmware_file": {
+        "size": 48304,
+        "sha256": "3fd6f4ddc5f244c2ec72bca72a36eca1ef7fc42f6d3452c9b7a7f7f0088b8979"
+      },
+      "payload": {
+        "size": 48304,
+        "sha256": "3fd6f4ddc5f244c2ec72bca72a36eca1ef7fc42f6d3452c9b7a7f7f0088b8979"
+      }
     }
   ]
 }
