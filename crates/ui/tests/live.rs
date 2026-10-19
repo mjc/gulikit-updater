@@ -1,7 +1,7 @@
 use gulikit_core::{
-    package::Component,
+    package::{ArchiveParserKind, ArchiveSelection, ArchiveSelectionData, Component},
     update::{Outcome, Progress},
-    version::VersionDecision,
+    version::{VersionDecision, VersionPolicy},
 };
 use gulikit_ui::Page;
 use gulikit_ui::live::{Event, LiveApp, Work};
@@ -21,6 +21,60 @@ fn ready() -> LiveApp {
     app
 }
 
+fn archived_main_package(version: &str) -> gulikit_core::package::PackageInfo {
+    let mut info = package();
+    info.version = version.into();
+    let archive = format!("KK3_NS38_NS39_V{version}.zip");
+    let member = format!("NS39_KK3_MAX_V{version}.bin");
+    let source_url = "https://www.gulikit.com/firmware/kk3-max".to_owned();
+    info.source_url.clone_from(&source_url);
+    info.member.clone_from(&member);
+    info.archive_selection = Some(
+        ArchiveSelection::try_from(ArchiveSelectionData {
+            archive_revision: "a".repeat(40),
+            path: format!("/kk3-max/base/v{version}/{archive}"),
+            component: Component::Main,
+            version: version.into(),
+            archive,
+            archive_size: 107_606,
+            archive_sha256: info.archive_sha256.clone(),
+            firmware_member: member,
+            member_size: 51_500,
+            member_sha256: info.payload_sha256.clone(),
+            payload_size: 51_500,
+            payload_sha256: info.payload_sha256.clone(),
+            source_url,
+            parser: ArchiveParserKind::MainBinV1,
+        })
+        .unwrap(),
+    );
+    info
+}
+
+fn inspected_at(version: &str) -> gulikit_updater::updater::Inspection {
+    let mut observed = inspection();
+    observed.installed_version = version.into();
+    observed
+}
+
+fn compiled_bluetooth_package() -> gulikit_core::package::PackageInfo {
+    let release = gulikit_core::package::catalog()
+        .iter()
+        .find(|release| release.component == Component::Bluetooth && release.version == "3.23")
+        .unwrap();
+    gulikit_core::package::PackageInfo {
+        model: gulikit_core::package::Model::Kk3Max,
+        component: Component::Bluetooth,
+        version: release.version.into(),
+        payload_size: release.payload_size(),
+        payload_sha256: release.payload_sha256().into(),
+        archive_sha256: release.archive_sha256.into(),
+        source_url: release.source_url.into(),
+        member: release.member.into(),
+        archive_selection: None,
+    }
+}
+
 #[test]
 fn downloaded_package_can_be_selected_without_a_controller_or_file_dialog() {
     let mut app = LiveApp::default();
@@ -33,6 +87,95 @@ fn downloaded_package_can_be_selected_without_a_controller_or_file_dialog() {
     assert_eq!(app.view().filename, "No firmware selected");
     assert_eq!(app.view().target, "No firmware selected");
     assert_eq!(app.view().page, Page::Connect);
+}
+
+#[test]
+fn archived_downgrade_requires_explicit_one_attempt_consent() {
+    let mut app = LiveApp::default();
+    app.connect().unwrap();
+    app.accept(Event::Inspected(inspected_at("5.9")));
+    assert!(app.use_downloaded_package("cache/firmware.zip".into(), archived_main_package("5.8")));
+
+    assert!(app.view().is_downgrade);
+    assert!(app.view().can_allow_downgrade);
+    assert!(!app.view().allow_downgrade);
+    assert!(!app.can_update());
+    assert!(app.start().is_none());
+
+    app.set_allow_downgrade(true);
+    assert!(app.can_update());
+    let Work::Update { policy, .. } = app.start().unwrap() else {
+        panic!("expected update work");
+    };
+    assert_eq!(policy, VersionPolicy::AllowDowngrade);
+    assert!(
+        !app.view().allow_downgrade,
+        "consent applies to one attempt"
+    );
+}
+
+#[test]
+fn downgrade_consent_is_unavailable_for_equal_unknown_or_upgrade_targets() {
+    let mut app = LiveApp::default();
+    app.use_downloaded_package("cache/firmware.zip".into(), archived_main_package("5.8"));
+    assert!(!app.view().can_allow_downgrade, "unknown installed version");
+    app.connect().unwrap();
+    app.accept(Event::Inspected(inspected_at("5.8")));
+    assert!(!app.view().can_allow_downgrade, "equal target version");
+
+    assert!(app.use_downloaded_package("cache/newer.zip".into(), archived_main_package("5.9")));
+    assert!(!app.view().can_allow_downgrade, "upgrade target");
+    app.set_allow_downgrade(true);
+    assert!(!app.view().allow_downgrade);
+}
+
+#[test]
+fn downgrade_consent_resets_when_package_or_component_changes() {
+    let mut app = LiveApp::default();
+    app.connect().unwrap();
+    app.accept(Event::Inspected(inspected_at("5.9")));
+    app.use_downloaded_package("cache/old.zip".into(), archived_main_package("5.8"));
+    app.set_allow_downgrade(true);
+    assert!(app.view().allow_downgrade);
+
+    app.use_downloaded_package("cache/older.zip".into(), archived_main_package("5.7"));
+    assert!(!app.view().allow_downgrade);
+
+    app.set_allow_downgrade(true);
+    app.connect().unwrap();
+    app.accept(Event::Inspected(inspected_at("5.9")));
+    assert!(
+        !app.view().allow_downgrade,
+        "fresh inspection resets consent"
+    );
+
+    app.set_allow_downgrade(true);
+    assert!(app.select_component(Component::Bluetooth).is_none());
+    assert!(!app.view().allow_downgrade);
+}
+
+#[test]
+fn compiled_bluetooth_downgrade_can_be_explicitly_allowed() {
+    let mut app = LiveApp::default();
+    app.select_component(Component::Bluetooth);
+    app.connect().unwrap();
+    let mut inspection = inspected_at("3.24");
+    inspection.component = Component::Bluetooth;
+    inspection.target.usb = Some(gulikit_platform::discovery::UsbIdentity::for_update_mode(
+        Component::Bluetooth,
+    ));
+    app.accept(Event::Inspected(inspection));
+    assert!(app.use_downloaded_package(
+        "cache/NS39_BT_V3.23.zip".into(),
+        compiled_bluetooth_package()
+    ));
+
+    assert!(app.view().can_allow_downgrade);
+    app.set_allow_downgrade(true);
+    let Work::Update { policy, .. } = app.start().unwrap() else {
+        panic!("expected Bluetooth downgrade request");
+    };
+    assert_eq!(policy, VersionPolicy::AllowDowngrade);
 }
 
 #[test]

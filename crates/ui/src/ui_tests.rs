@@ -63,6 +63,33 @@ fn inside_window(ui: &AppWindow, item: &ElementHandle) {
     );
 }
 
+fn scroll_until_visible(ui: &AppWindow, label: &str, down: bool) -> ElementHandle {
+    for _ in 0..12 {
+        if let Some(item) = ElementHandle::find_by_accessible_label(ui, label).next() {
+            let position = item.absolute_position();
+            let size = item.size();
+            let window = ui.window().size();
+            if size.width > 0.
+                && size.height > 0.
+                && position.x >= 0.
+                && position.y >= 0.
+                && f64::from(position.x + size.width) <= f64::from(window.width) + 1.
+                && f64::from(position.y + size.height) <= f64::from(window.height) + 1.
+            {
+                return item;
+            }
+        }
+
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(520., 350.),
+            delta_x: 0.,
+            delta_y: if down { -120. } else { 120. },
+        });
+        layout(ui);
+    }
+    panic!("UI element never became visible after scrolling: {label}");
+}
+
 #[test]
 fn normal_startup_never_presents_a_simulated_controller() {
     let app = LiveHarness::new();
@@ -379,11 +406,13 @@ impl LiveHarness {
         }
     }
     fn new_with_archive_fixture(release_count: usize) -> Self {
+        Self::new_with_archive_snapshot(archive_snapshot_fixture(release_count))
+    }
+    fn new_with_archive_snapshot(snapshot: gulikit_archive::ArchiveSnapshot) -> Self {
         init_backend();
         let (requests, work) = std::sync::mpsc::channel();
         let (events, replies) = std::sync::mpsc::channel();
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let snapshot = archive_snapshot_fixture(release_count);
         let (archive_requests, archive_request_rx) = std::sync::mpsc::channel();
         let (archive_events, archive_replies) = std::sync::mpsc::channel();
         let archive =
@@ -527,6 +556,83 @@ fn archive_snapshot_fixture(release_count: usize) -> gulikit_archive::ArchiveSna
     .unwrap();
     index.add(bluetooth).unwrap();
     ArchiveSnapshot::from_parts(&"a".repeat(40), &index.to_json().unwrap()).unwrap()
+}
+
+fn archived_package_info(
+    record: &gulikit_archive::ReleaseRecord,
+    revision: &str,
+) -> gulikit_core::package::PackageInfo {
+    use gulikit_core::package::{ArchiveParserKind, ArchiveSelection, ArchiveSelectionData};
+    let payload = record.payload().unwrap();
+    let component = match record.component() {
+        gulikit_archive::Component::Base => Component::Main,
+        gulikit_archive::Component::Bluetooth => Component::Bluetooth,
+    };
+    let info = gulikit_core::package::PackageInfo {
+        model: gulikit_core::package::Model::Kk3Max,
+        component,
+        version: record.version().to_owned(),
+        payload_size: usize::try_from(payload.size).unwrap(),
+        payload_sha256: payload.sha256.clone(),
+        archive_sha256: record.sha256().to_owned(),
+        source_url: record.metadata().source_url.clone(),
+        member: record.metadata().firmware_member.clone(),
+        archive_selection: Some(
+            ArchiveSelection::try_from(ArchiveSelectionData {
+                archive_revision: revision.to_owned(),
+                path: record.path().to_owned(),
+                component,
+                version: record.version().to_owned(),
+                archive: record.filename().to_owned(),
+                archive_size: record.size(),
+                archive_sha256: record.sha256().to_owned(),
+                firmware_member: record.metadata().firmware_member.clone(),
+                member_size: record.firmware_file().size,
+                member_sha256: record.firmware_file().sha256.clone(),
+                payload_size: payload.size,
+                payload_sha256: payload.sha256.clone(),
+                source_url: record.metadata().source_url.clone(),
+                parser: match component {
+                    Component::Main => ArchiveParserKind::MainBinV1,
+                    Component::Bluetooth => ArchiveParserKind::BluetoothPeV1,
+                },
+            })
+            .unwrap(),
+        ),
+    };
+    assert!(info.matches_archive_selection(info.archive_selection.as_ref().unwrap()));
+    info
+}
+
+fn downgrade_archive_fixture() -> (
+    gulikit_archive::ArchiveSnapshot,
+    gulikit_archive::ReleaseRecord,
+) {
+    use gulikit_archive::{
+        ArchiveSnapshot, Component as ArchiveComponent, FirmwareIndex, FirmwareMemberKind,
+        ReleaseMetadata, ReleaseRecord,
+    };
+    let metadata = ReleaseMetadata {
+        product: "kk3-max".into(),
+        member_kind: FirmwareMemberKind::Kk3,
+        component: ArchiveComponent::Base,
+        version: "5.7".into(),
+        filename: "KK3_NS38_NS39_V5.7.zip".into(),
+        source_url: "https://example.org/firmware".into(),
+        released_at: None,
+        retrieved_at: None,
+        retrieved_from: None,
+        changelog: None,
+        changelog_source_url: None,
+        firmware_member: "NS39_KK3_MAX_V5.7.bin".into(),
+        published_hashes: Vec::new(),
+    };
+    let record = ReleaseRecord::measure(metadata, b"zip", b"member", b"member").unwrap();
+    let mut index = FirmwareIndex::empty();
+    index.add(record.clone()).unwrap();
+    let revision = "a".repeat(40);
+    let snapshot = ArchiveSnapshot::from_parts(&revision, &index.to_json().unwrap()).unwrap();
+    (snapshot, record)
 }
 
 #[test]
@@ -1018,9 +1124,7 @@ fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_l
     layout(&app.ui);
     save_preview(&app.ui, "archive-browser-40-releases-minimum-window");
     let version_picker = element(&app.ui, "Firmware version and original ZIP");
-    let download = element(&app.ui, "Download and inspect");
     inside_window(&app.ui, &version_picker);
-    inside_window(&app.ui, &download);
     assert_eq!(app.ui.get_state().archive_releases.row_count(), 40);
 
     let selected_label = "5.9 · NS39_KK3_MAX_V5.9_revision-1.zip";
@@ -1051,7 +1155,10 @@ fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_l
         selected_label
     );
 
-    click(&app.ui, "Download and inspect");
+    let download = scroll_until_visible(&app.ui, "Download and inspect", true);
+    inside_window(&app.ui, &download);
+    download.mock_single_click(PointerEventButton::Left);
+    layout(&app.ui);
     let request = app.archive_requests.as_ref().unwrap().try_recv().unwrap();
     let (snapshot, path) = match request {
         gulikit_ui::archive::Request::Download { snapshot, path } => (snapshot, path),
@@ -1085,11 +1192,103 @@ fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_l
     );
     assert!(app.ui.get_state().archive_status.contains(&cache_path));
     save_preview(&app.ui, "archive-browser-downloaded-long-cache-path");
-    inside_window(&app.ui, &element(&app.ui, "Close firmware archive"));
-    inside_window(&app.ui, &element(&app.ui, "Download and inspect"));
-    click(&app.ui, "Close firmware archive");
+    let download = scroll_until_visible(&app.ui, "Download and inspect", true);
+    inside_window(&app.ui, &download);
+    let close = scroll_until_visible(&app.ui, "Close firmware archive", false);
+    inside_window(&app.ui, &close);
+    close.mock_single_click(PointerEventButton::Left);
+    layout(&app.ui);
     inside_window(&app.ui, &element(&app.ui, "Browse firmware archive"));
     assert!(!app.ui.get_state().connected);
+}
+
+#[test]
+fn starting_an_archive_download_clears_the_previous_candidate_even_when_download_fails() {
+    use gulikit_ui::archive::ArchiveEvent;
+    let app = LiveHarness::new_with_archive_fixture(4);
+    app.prepare_main();
+    assert_eq!(app.ui.get_state().target, "5.9");
+    click(&app.ui, "Browse firmware archive");
+    let download = scroll_until_visible(&app.ui, "Download and inspect", true);
+    download.mock_single_click(PointerEventButton::Left);
+    layout(&app.ui);
+    assert_eq!(app.ui.get_state().target, "No firmware selected");
+    assert!(!app.ui.get_primary_enabled());
+    app.archive_events
+        .as_ref()
+        .unwrap()
+        .send(ArchiveEvent::Failed("offline".into()))
+        .unwrap();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+    layout(&app.ui);
+    assert!(app.ui.get_state().archive_status.contains("offline"));
+    assert_eq!(app.ui.get_state().target, "No firmware selected");
+    assert!(!app.ui.get_primary_enabled());
+    assert!(app.work.try_recv().is_err());
+}
+
+#[test]
+fn archive_historical_download_offers_an_accessible_one_attempt_downgrade_control() {
+    use gulikit_ui::{archive::ArchiveEvent, archive_package::DownloadInspection};
+
+    let (snapshot, record) = downgrade_archive_fixture();
+    let revision = snapshot.revision().to_owned();
+    let app = LiveHarness::new_with_archive_snapshot(snapshot);
+    app.prepare_main();
+    click(&app.ui, "Browse firmware archive");
+    let download = scroll_until_visible(&app.ui, "Download and inspect", true);
+    download.mock_single_click(PointerEventButton::Left);
+    layout(&app.ui);
+    assert!(matches!(
+        app.archive_requests.as_ref().unwrap().try_recv().unwrap(),
+        gulikit_ui::archive::Request::Download { .. }
+    ));
+
+    let cache_path = "/cache/KK3_NS38_NS39_V5.7.zip";
+    app.archive_events
+        .as_ref()
+        .unwrap()
+        .send(ArchiveEvent::Downloaded {
+            path: cache_path.into(),
+            record: Box::new(record.clone()),
+            inspection: Ok(DownloadInspection::Supported(archived_package_info(
+                &record, &revision,
+            ))),
+        })
+        .unwrap();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+    layout(&app.ui);
+
+    assert_eq!(app.ui.get_state().target, "5.7");
+    assert!(app.ui.get_state().is_downgrade);
+    assert!(app.ui.get_state().can_allow_downgrade);
+    let checkbox = scroll_until_visible(&app.ui, "Allow downgrade to selected firmware", true);
+    assert_eq!(checkbox.accessible_enabled(), Some(true));
+    inside_window(&app.ui, &checkbox);
+    click(&app.ui, "Allow downgrade to selected firmware");
+    assert!(app.ui.get_allow_downgrade());
+
+    if cfg!(target_os = "macos") {
+        assert!(app.ui.get_primary_enabled());
+        app.ui.invoke_primary_action();
+        let gulikit_ui::live::Work::Update {
+            policy,
+            expected_package,
+            ..
+        } = app.work.try_recv().unwrap()
+        else {
+            panic!("expected archived downgrade update request");
+        };
+        assert_eq!(policy, gulikit_core::version::VersionPolicy::AllowDowngrade);
+        assert!(expected_package.archive_selection.is_some());
+        assert!(
+            !app.ui.get_allow_downgrade(),
+            "consent is consumed at start"
+        );
+    } else {
+        assert!(!app.ui.get_primary_enabled());
+        assert!(app.work.try_recv().is_err());
+    }
 }
 
 #[test]

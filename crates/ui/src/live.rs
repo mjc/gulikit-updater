@@ -1,9 +1,9 @@
 //! UI intents and backend observations; no native I/O runs in this model.
 use crate::Page;
 use gulikit_core::{
-    package::{Component, Model, PackageInfo, catalog},
+    package::{Component, Model, PackageInfo},
     update::{Outcome, Progress, verify_restart},
-    version::VersionDecision,
+    version::{VersionDecision, VersionPolicy},
 };
 use gulikit_updater::updater::{
     Attachment, Attempt, Inspection, PriorAttempt, Readback, ReceiptIdentity,
@@ -19,6 +19,7 @@ pub enum Work {
     ChoosePackage(Component),
     Update {
         expected_package: PackageInfo,
+        policy: VersionPolicy,
         path: PathBuf,
         component: Component,
         attachment: Attachment,
@@ -94,6 +95,9 @@ pub struct View<'a> {
     pub component: Component,
     pub confirmed: bool,
     pub same_controller: bool,
+    pub allow_downgrade: bool,
+    pub is_downgrade: bool,
+    pub can_allow_downgrade: bool,
     pub busy: bool,
     pub connected: bool,
     pub main_version: &'a str,
@@ -119,6 +123,7 @@ pub struct LiveApp {
     component: Component,
     confirmed: bool,
     same_controller: bool,
+    policy: VersionPolicy,
     page: Page,
     pending: Option<Job>,
     attachment: Option<Attachment>,
@@ -137,6 +142,7 @@ impl Default for LiveApp {
             component: Component::Main,
             confirmed: false,
             same_controller: false,
+            policy: VersionPolicy::UpgradeOnly,
             page: Page::Connect,
             pending: None,
             attachment: None,
@@ -175,6 +181,7 @@ impl LiveApp {
         }
         self.confirmed = confirmed;
         if !confirmed {
+            self.policy = VersionPolicy::UpgradeOnly;
             self.attachment = None;
             self.versions = [None, None];
             self.connected = false;
@@ -197,6 +204,7 @@ impl LiveApp {
             return None;
         }
         self.receipt = None;
+        self.policy = VersionPolicy::UpgradeOnly;
         self.pending = Some(Job::Inspect);
         self.notice = "Reading installed version…".into();
         Some(Work::Inspect {
@@ -209,6 +217,7 @@ impl LiveApp {
             return None;
         }
         self.component = component;
+        self.policy = VersionPolicy::UpgradeOnly;
         self.confirmed = false;
         self.package = None;
         self.receipt = None;
@@ -242,8 +251,21 @@ impl LiveApp {
         {
             return false;
         }
+        self.policy = VersionPolicy::UpgradeOnly;
         self.selected(path, info);
         true
+    }
+
+    /// Change the current, one-attempt permission for an inspected downgrade.
+    pub fn set_allow_downgrade(&mut self, allow: bool) {
+        if self.pending.is_some() {
+            return;
+        }
+        if !allow {
+            self.policy = VersionPolicy::UpgradeOnly;
+        } else if self.can_allow_downgrade() {
+            self.policy = VersionPolicy::AllowDowngrade;
+        }
     }
 
     /// Remove the previous write candidate when the archive selection changes.
@@ -252,6 +274,7 @@ impl LiveApp {
         if !self.can_choose_package() {
             return false;
         }
+        self.policy = VersionPolicy::UpgradeOnly;
         self.package = None;
         if !self.connected {
             self.page = Page::Connect;
@@ -313,22 +336,31 @@ impl LiveApp {
             && self.package.as_ref().is_some_and(|p| {
                 p.info.model == Model::Kk3Max && p.info.component == self.component
             })
-            && self.selected_decision() == Some(VersionDecision::Eligible)
+            && self.selected_decision(self.policy) == Some(VersionDecision::Eligible)
     }
-    fn selected_decision(&self) -> Option<VersionDecision> {
+    fn selected_decision(&self, policy: VersionPolicy) -> Option<VersionDecision> {
         let installed = &self.versions[index(self.component)]
             .as_ref()?
             .installed_version;
         let package = &self.package.as_ref()?.info;
-        catalog()
-            .iter()
-            .find(|release| {
-                release.model == package.model
-                    && release.component == package.component
-                    && release.version == package.version
-            })?
-            .decision_for_installed(installed, gulikit_core::version::VersionPolicy::UpgradeOnly)
-            .ok()
+        package.decision_for_installed(installed, policy).ok()
+    }
+    fn is_downgrade(&self) -> bool {
+        self.selected_decision(VersionPolicy::UpgradeOnly)
+            == Some(VersionDecision::NewerThanSupported)
+    }
+    fn can_allow_downgrade(&self) -> bool {
+        self.can_choose_package()
+            && self.confirmed
+            && self.connected
+            && self.attachment.is_some()
+            && self.versions[index(self.component)]
+                .as_ref()
+                .is_some_and(|inspection| inspection.cleanup_errors.is_empty())
+            && self.package.as_ref().is_some_and(|package| {
+                package.info.model == Model::Kk3Max && package.info.component == self.component
+            })
+            && self.is_downgrade()
     }
     pub fn start(&mut self) -> Option<Work> {
         if !self.can_update() {
@@ -337,11 +369,13 @@ impl LiveApp {
         let package = self.package.as_ref()?;
         let work = Work::Update {
             expected_package: package.info.clone(),
+            policy: self.policy,
             path: package.path.clone(),
             component: self.component,
             attachment: self.attachment?,
             confirmed: self.confirmed,
         };
+        self.policy = VersionPolicy::UpgradeOnly;
         self.progress = Progress {
             submitted: 0,
             confirmed: 0,
@@ -463,6 +497,7 @@ impl LiveApp {
         }
     }
     fn inspected(&mut self, inspection: Inspection) {
+        self.policy = VersionPolicy::UpgradeOnly;
         self.confirmed = inspection.target.has_known_usb_ids(inspection.component);
         if !self.confirmed {
             self.fail("Unrecognized controller USB IDs.".into());
@@ -490,6 +525,7 @@ impl LiveApp {
         };
     }
     fn selected(&mut self, path: PathBuf, info: PackageInfo) {
+        self.policy = VersionPolicy::UpgradeOnly;
         if info.model != Model::Kk3Max || info.component != self.component {
             self.package = None;
             self.pending = None;
@@ -754,7 +790,9 @@ impl LiveApp {
             "Connect the controller in update mode."
         } else if self.package.is_none() {
             "Choose an original reviewed firmware ZIP."
-        } else if self.selected_decision() != Some(VersionDecision::Eligible) {
+        } else if self.is_downgrade() && self.policy == VersionPolicy::UpgradeOnly {
+            "Selected firmware is older than the installed version. Allow a one-time downgrade to continue."
+        } else if self.selected_decision(self.policy) != Some(VersionDecision::Eligible) {
             "Installed version is unknown, already current, or newer. Update unavailable."
         } else {
             ""
@@ -789,6 +827,9 @@ impl LiveApp {
             component: self.component,
             confirmed: self.confirmed,
             same_controller: self.same_controller,
+            allow_downgrade: self.policy == VersionPolicy::AllowDowngrade,
+            is_downgrade: self.is_downgrade(),
+            can_allow_downgrade: self.can_allow_downgrade(),
             busy: self.is_busy(),
             connected: self.connected,
             main_version: self.installed_version(Component::Main),

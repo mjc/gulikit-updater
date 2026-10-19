@@ -16,6 +16,8 @@ export struct ViewState {
     progress: float,
     transfer-label: string,
     can-update: bool,
+    is-downgrade: bool,
+    can-allow-downgrade: bool,
     can-choose-package: bool,
     can-open-attempt: bool,
     can-switch-component: bool,
@@ -124,6 +126,7 @@ component RightmostA inherits HorizontalLayout {
 export component AppWindow inherits Window {
     in property <bool> demo-mode: false;
     in-out property <bool> same-controller: false;
+    in-out property <bool> allow-downgrade: false;
     in property <bool> primary-enabled: false;
     in property <string> primary-label;
     title: root.demo-mode ? "GuliKit updater · Demo" : "GuliKit updater";
@@ -137,6 +140,7 @@ export component AppWindow inherits Window {
     callback primary-action();
     callback scenario-selected(int);
     callback confirm-same(bool);
+    callback set-allow-downgrade(bool);
     callback choose-file();
     callback inspect-controller();
     callback open-attempt();
@@ -302,6 +306,20 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.state.notice != "": Notice { text: root.state.notice; warning: root.state.warning; }
+                        if root.state.can-allow-downgrade: VerticalLayout {
+                            spacing: 4px;
+                            ActionButton {
+                                text: (root.allow-downgrade ? "☑ " : "☐ ") + "Allow downgrade to selected firmware";
+                                accessible-label: "Allow downgrade to selected firmware";
+                                accessible-role: checkbox; accessible-checked: root.allow-downgrade;
+                                enabled: !root.state.busy;
+                                clicked => {
+                                    root.allow-downgrade = !root.allow-downgrade;
+                                    root.set-allow-downgrade(root.allow-downgrade);
+                                }
+                            }
+                            Label { text: "This permits one update to a version older than the installed firmware."; font-size: 11px; }
+                        }
                         ActionButton { text: (root.details-open ? "▾ " : "▸ ") + "Package details"; quiet: true; clicked => { root.details-open = !root.details-open; } }
                         ActionButton { text: "Inspect again"; quiet: true; enabled: !root.state.busy; clicked => { root.inspect-controller(); } }
                         if root.details-open: Label { text: (root.demo-mode ? "Sample package · not read from disk" : "Reviewed release · not a publisher signature") + "\nPayload: " + root.state.payload + "\nSHA-256: " + root.state.digest; font-size: 12px; wrap: char-wrap; }

@@ -6,7 +6,7 @@ use crate::{
 use gulikit_core::{
     package::{Component, Model, PackageInfo, catalog},
     update::{Outcome, Progress, TransferRecord, Verification, verify_restart},
-    version::{BT_SIGNATURE, MainVersion, VersionDecision, bluetooth_info},
+    version::{BT_SIGNATURE, MainVersion, VersionDecision, VersionPolicy, bluetooth_info},
 };
 use gulikit_platform::discovery::NativeCandidate;
 use gulikit_updater::updater::{
@@ -14,7 +14,7 @@ use gulikit_updater::updater::{
     VerificationTransfer,
 };
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -172,22 +172,29 @@ impl DemoDevice {
     }
     fn transfer(
         &mut self,
-        path: &Path,
         component: Component,
         attachment: Attachment,
         confirmed: bool,
+        policy: VersionPolicy,
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
         updater::check_attachment(Some(attachment), &self.target(component))?;
-        if self.observe(component, confirmed)?.decision != VersionDecision::Eligible {
-            return Err("Installed version does not permit an update.".into());
+        if !confirmed {
+            return Err("Simulated controller identity is not confirmed.".into());
         }
         let (_, package) = self
             .selected
             .as_ref()
-            .filter(|(selected, info)| selected.as_path() == path && info.component == component)
             .ok_or("Select a simulated package first")?;
+        let installed = self.versions[index(component)];
+        if package
+            .decision_for_installed(installed, policy)
+            .map_err(|error| error.to_string())?
+            != VersionDecision::Eligible
+        {
+            return Err("Installed version does not permit an update.".into());
+        }
         let transfer = simulate_transfer(
             package.payload_size,
             self.profile,
@@ -342,15 +349,14 @@ impl Device for DemoDevice {
                 attachment,
                 confirmed,
                 expected_package,
+                policy,
             } => {
-                if self
-                    .selected
-                    .as_ref()
-                    .is_none_or(|(_, info)| *info != expected_package)
-                {
+                if self.selected.as_ref().is_none_or(|(selected, info)| {
+                    selected != &path || info.component != component || *info != expected_package
+                }) {
                     return Err("Simulated package changed since selection.".into());
                 }
-                self.transfer(&path, component, attachment, confirmed, cancelled, emit)
+                self.transfer(component, attachment, confirmed, policy, cancelled, emit)
             }
             Work::Verify {
                 attempt,

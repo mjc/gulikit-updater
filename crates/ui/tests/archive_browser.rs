@@ -3,7 +3,7 @@ use gulikit_archive::{
     ReleaseMetadata, ReleaseRecord,
     manifest::{HashTarget, PublishedHash},
 };
-use gulikit_core::package::{Component, Model, VerifiedPackage, catalog};
+use gulikit_core::package::{Component, VerifiedPackage, catalog};
 use gulikit_ui::{
     archive::{ArchiveBrowser, ArchiveEvent, Request},
     archive_package::{DownloadInspection, inspect_download},
@@ -272,11 +272,17 @@ fn published_compiled_releases_download_and_inspect_through_ui_bridge() {
         let path = client
             .download(&snapshot, record.path(), &cancelled)
             .unwrap();
-        let DownloadInspection::Supported(info) = inspect_download(&path, record).unwrap() else {
+        let DownloadInspection::Supported(info) =
+            inspect_download(&path, snapshot.revision(), record).unwrap()
+        else {
             panic!("compiled release should be supported");
         };
         let bytes = gulikit_archive::read_verified_archive(&path, record).unwrap();
-        let parsed = VerifiedPackage::inspect(&bytes, Model::Kk3Max, release.component).unwrap();
+        let parsed = VerifiedPackage::inspect_selected(
+            &bytes,
+            info.archive_selection.as_ref().expect("archive recipe"),
+        )
+        .unwrap();
         assert_eq!(info, *parsed.info());
         assert_eq!(info.version, release.version);
         assert_eq!(info.archive_sha256, release.archive_sha256);

@@ -11,8 +11,9 @@ Updater for the GuliKit KK3 Max (NS39), with two separate executables:
 Native device access currently supports macOS. Windows and Linux support
 package inspection and the UI demo; their device adapters are unfinished.
 
-Reviewed packages: Main 5.9 and Bluetooth 3.23, 3.24 and 5.07. The original ZIP
-selects the release. Bluetooth 3.23 → 3.24 → 3.23 has been verified on hardware;
+The GUI selects KK3 Max main and Bluetooth packages from the firmware archive.
+The CLI's compiled catalog contains Main 5.9 and Bluetooth 3.23, 3.24 and 5.07.
+Bluetooth 3.23 → 3.24 → 3.23 has been verified on hardware;
 an eligible Main update through this CLI still needs hardware acceptance.
 
 ## Run
@@ -34,14 +35,17 @@ the application's cache. Select a version and original filename, then use
 available beside the selection. A cached index and previously verified ZIPs
 remain usable offline; **Refresh** checks for newly archived releases.
 
-Archive availability and updater support are separate. Historical packages
-without a matching reviewed release can be downloaded, but do not become update
-candidates. Existing model, component, version and restart-verification checks
-still apply to supported packages.
+The selected KK3 Max record pins the archive revision, ZIP, member and payload
+hashes, target version and parser. The app rechecks the file before transfer.
+Other products and unknown firmware formats remain download-only. A lower
+target version requires **Allow downgrade** for that attempt; equal and unknown
+installed versions remain blocked. Same-version ZIP variants remain distinct
+archive selections, although version readback cannot distinguish their bytes.
 
-Bluetooth capture currently requires an administrator-authenticated launch;
-the app does not yet request that authorization itself. Native GUI updates
-still need hardware acceptance.
+On macOS, the app requests administrator authorization at launch for native USB
+access. Cancelling the system dialog exits before opening a controller. Demo
+mode does not request authorization. Native GUI updates still need hardware
+acceptance.
 
 Add `-- --demo` to use an in-memory device through the same UI callbacks and
 worker, without USB, files or dialogs:

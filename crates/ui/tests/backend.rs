@@ -64,6 +64,7 @@ fn native_update_rejects_bad_packages_before_dialogs_or_device_access() {
     let mut device = NativeDevice::default();
     let work = Work::Update {
         expected_package: common::package(),
+        policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
         path: path.clone(),
         component: Component::Main,
         attachment: Attachment {
@@ -169,6 +170,7 @@ fn selected_vendor_archives_are_inspectable_and_changed_archives_are_rejected() 
         assert!(inspect_selected_package(&selected, component).is_err());
         let work = Work::Update {
             expected_package: info,
+            policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
             path: selected,
             component,
             attachment: Attachment {

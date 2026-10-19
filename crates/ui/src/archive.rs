@@ -414,10 +414,12 @@ fn archive_worker(
                     let record = snapshot.index().find(&path).cloned().ok_or_else(|| {
                         "Selected release is not in the selected archive snapshot.".to_owned()
                     })?;
+                    let revision = snapshot.revision().to_owned();
                     let cache_path = client
                         .download(&snapshot, &path, cancelled)
                         .map_err(|error| error.to_string())?;
-                    let inspection = crate::archive_package::inspect_download(&cache_path, &record);
+                    let inspection =
+                        crate::archive_package::inspect_download(&cache_path, &revision, &record);
                     Ok((cache_path, record, inspection))
                 })();
                 match result {

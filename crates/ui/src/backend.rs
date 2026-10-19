@@ -182,6 +182,7 @@ fn run_native(
             attachment,
             confirmed,
             expected_package,
+            policy,
         } => {
             if !NATIVE_UPDATE_SUPPORTED {
                 return Err(NATIVE_UPDATE_UNAVAILABLE.into());
@@ -195,6 +196,7 @@ fn run_native(
                     expected: expected_package,
                     attachment,
                     confirmed,
+                    policy,
                 },
                 cancelled,
                 emit,
@@ -227,17 +229,23 @@ struct SelectedUpdate {
     expected: PackageInfo,
     attachment: updater::Attachment,
     confirmed: bool,
+    policy: gulikit_core::version::VersionPolicy,
 }
 
 fn prepare_selected_update(selection: &SelectedUpdate) -> Result<VerifiedPackage, String> {
     if !selection.confirmed {
         return Err("Inspect the controller before updating.".into());
     }
-    let package = gulikit_platform::inspect_package(
-        &selection.path,
-        Model::Kk3Max,
-        selection.expected.component,
-    )
+    let package = match selection.expected.archive_selection.as_ref() {
+        Some(archive_selection) => {
+            gulikit_platform::inspect_archive_package(&selection.path, archive_selection)
+        }
+        None => gulikit_platform::inspect_package(
+            &selection.path,
+            Model::Kk3Max,
+            selection.expected.component,
+        ),
+    }
     .map_err(|error| error.to_string())?;
     if package.info() != &selection.expected {
         return Err("Firmware package changed since selection. Select and review it again.".into());
@@ -269,7 +277,7 @@ fn update_selected(
             confirm_ns39: false,
             record: record.clone(),
             expected_attachment: Some(selection.attachment),
-            policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
+            policy: selection.policy,
         },
         cancelled,
         emit,
@@ -381,6 +389,7 @@ mod tests {
                 generation: 7,
             },
             confirmed: true,
+            policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
         }
     }
 
