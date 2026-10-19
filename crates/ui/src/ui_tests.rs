@@ -85,6 +85,16 @@ fn normal_startup_never_presents_a_simulated_controller() {
         element(&app.ui, "Inspect controller").accessible_enabled(),
         Some(true)
     );
+    app.ui.invoke_inspect_controller();
+    assert!(matches!(
+        app.work.try_recv().unwrap(),
+        gulikit_ui::live::Work::Inspect {
+            confirmed: false,
+            ..
+        }
+    ));
+    app.ui.invoke_primary_action();
+    assert!(app.work.try_recv().is_err());
 }
 
 #[test]
@@ -123,7 +133,7 @@ fn desktop_renders_both_components_and_routes_confirmed_inspection() {
         app.work.try_recv().unwrap(),
         Work::Inspect {
             component: Component::Bluetooth,
-            confirmed: true
+            confirmed: false
         }
     ));
 }
@@ -373,7 +383,7 @@ impl LiveHarness {
             self.work.try_recv().unwrap(),
             Work::Inspect {
                 component: Component::Main,
-                confirmed: true
+                confirmed: false
             }
         ));
         self.send(Event::Inspected(live_fixtures::inspection()));
@@ -763,7 +773,7 @@ fn procedure_reminder_is_prominent_and_mode_switch_waits_for_inspection() {
         app.work.try_recv().unwrap(),
         Work::Inspect {
             component: Component::Bluetooth,
-            confirmed: true
+            confirmed: false
         }
     ));
 }
@@ -882,7 +892,7 @@ fn offline_package_controls_show_metadata_without_claiming_a_controller() {
         app.work.try_recv().unwrap(),
         Work::Inspect {
             component: Component::Main,
-            confirmed: true
+            confirmed: false
         }
     ));
     app.send(Event::Error(

@@ -276,21 +276,47 @@ fn preflight_results_with_write_effects_cannot_release_recovery_holds() {
 }
 
 #[test]
-fn inspection_requires_operator_confirmation_and_only_emits_a_read_request() {
+fn inspection_identifies_from_usb_without_manual_confirmation_and_only_emits_a_read_request() {
     let mut app = LiveApp::default();
-    assert!(app.connect().is_none());
-    app.confirm_model(true);
+    assert!(!app.view().confirmed);
     assert!(matches!(
         app.connect(),
         Some(Work::Inspect {
             component: Component::Main,
-            confirmed: true
+            confirmed: false
         })
     ));
     assert!(
         app.connect().is_none(),
         "a second operation cannot race inspection"
     );
+    app.accept(Event::Inspected(inspection()));
+    assert!(app.view().confirmed);
+}
+
+#[test]
+fn unknown_or_wrong_mode_usb_identity_never_enables_writes() {
+    for usb in [
+        None,
+        Some(gulikit_platform::discovery::UsbIdentity::for_update_mode(
+            Component::Bluetooth,
+        )),
+    ] {
+        let mut app = LiveApp::default();
+        app.connect().unwrap();
+        let mut observed = inspection();
+        observed.target.usb = usb;
+        app.accept(Event::Inspected(observed));
+        assert!(!app.view().confirmed);
+        assert!(!app.view().connected);
+        app.choose_package().unwrap();
+        app.accept(Event::Package {
+            path: "reviewed.zip".into(),
+            info: package(),
+        });
+        assert!(!app.can_update());
+        assert!(app.start().is_none());
+    }
 }
 
 #[test]
@@ -334,7 +360,13 @@ fn unknown_current_newer_and_failed_cleanup_never_enable_update() {
     assert!(!app.can_update());
     assert!(app.view().notice.contains("restoration"));
     app.confirm_model(false);
-    assert!(app.connect().is_none());
+    assert!(matches!(
+        app.connect(),
+        Some(Work::Inspect {
+            confirmed: false,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -550,7 +582,7 @@ fn choosing_the_other_mode_waits_for_instructions_then_explicit_inspection() {
             app.primary(),
             Some(Work::Inspect {
                 component: Component::Bluetooth,
-                confirmed: true
+                confirmed: false
             })
         ));
     }
@@ -628,6 +660,9 @@ fn selected_bluetooth_release_drives_the_version_and_update_label() {
     app.connect();
     let mut read = inspection();
     read.component = Component::Bluetooth;
+    read.target.usb = Some(gulikit_platform::discovery::UsbIdentity::for_update_mode(
+        Component::Bluetooth,
+    ));
     read.installed_version = "3.23".into();
     app.accept(Event::Inspected(read));
     app.choose_package();
@@ -665,6 +700,9 @@ fn loaded_bluetooth_receipt_displays_its_release_before_and_after_readback() {
         app.confirm_same_controller(true);
         app.primary().unwrap();
         let mut result = readback(8, expected);
+        result.target.usb = Some(gulikit_platform::discovery::UsbIdentity::for_update_mode(
+            Component::Bluetooth,
+        ));
         let observation = result.verification.as_mut().unwrap();
         observation.component = Component::Bluetooth;
         observation.expected_version = expected.into();
@@ -833,6 +871,9 @@ fn eligibility_tracks_each_selected_bluetooth_release() {
         app.connect().unwrap();
         let mut read = inspection();
         read.component = Component::Bluetooth;
+        read.target.usb = Some(gulikit_platform::discovery::UsbIdentity::for_update_mode(
+            Component::Bluetooth,
+        ));
         read.installed_version = installed.into();
         app.accept(Event::Inspected(read));
         for selected in ["3.24", "5.07", "3.24", "5.07"] {

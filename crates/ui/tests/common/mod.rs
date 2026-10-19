@@ -23,6 +23,10 @@ pub fn inspection() -> Inspection {
             bluetooth_transport_candidate: true,
             observed_profile: true,
             conflicting_model: false,
+            usb: Some(gulikit_platform::discovery::UsbIdentity {
+                vendor: 0x34d3,
+                product: 0x1100,
+            }),
             disks: vec![],
             mount: None,
         },

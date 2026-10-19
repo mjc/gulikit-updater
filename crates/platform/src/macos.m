@@ -199,6 +199,9 @@ char *gu_snapshot(uint64_t bound_id) {
           [errors addObject:@"USB attachment ID unavailable"];
         else {
           NSMutableDictionary *c = candidate(id);
+          if (p[@"idVendor"] && p[@"idProduct"])
+            c[@"usb"] =
+                @{@"vendor" : p[@"idVendor"], @"product" : p[@"idProduct"]};
           c[@"observed_profile"] = (observed || cached) ? @YES : @NO;
           c[@"storage_identities"] = storage;
           c[@"bluetooth_transport_candidate"] =

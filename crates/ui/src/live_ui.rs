@@ -280,10 +280,8 @@ pub fn create_mode(
 ) -> Result<(AppWindow, slint::Timer), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_demo_mode(demo);
-    let mut app = LiveApp::default();
-    app.confirm_model(true);
     let driver = Rc::new(RefCell::new(Driver {
-        app,
+        app: LiveApp::default(),
         requests,
         cancelled,
     }));

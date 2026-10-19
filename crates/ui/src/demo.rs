@@ -77,7 +77,7 @@ fn release(component: Component) -> &'static gulikit_core::package::Release {
         .expect("supported demo component")
 }
 impl DemoDevice {
-    fn target(&self) -> NativeCandidate {
+    fn target(&self, component: Component) -> NativeCandidate {
         NativeCandidate {
             ancestor: 42,
             generation: self.generation,
@@ -85,13 +85,16 @@ impl DemoDevice {
             bluetooth_transport_candidate: true,
             observed_profile: true,
             conflicting_model: false,
+            usb: Some(gulikit_platform::discovery::UsbIdentity::for_update_mode(
+                component,
+            )),
             storage_identities: vec![],
             disks: vec![],
             mount: None,
         }
     }
     fn observe(&self, component: Component, confirmed: bool) -> Result<Inspection, String> {
-        if !confirmed {
+        if !confirmed && !self.target(component).has_known_usb_ids(component) {
             return Err("NS39 identity not confirmed. Writing refused.".into());
         }
         match self.profile {
@@ -131,7 +134,7 @@ impl DemoDevice {
             raw_version_bytes: raw,
             qualified_bot_lun: (component == Component::Bluetooth).then_some(0),
             cleanup_errors: vec![],
-            target: self.target(),
+            target: self.target(component),
             identity_provenance: "simulated NS39",
         })
     }
@@ -175,7 +178,7 @@ impl DemoDevice {
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
-        updater::check_attachment(Some(attachment), &self.target())?;
+        updater::check_attachment(Some(attachment), &self.target(component))?;
         if self.observe(component, confirmed)?.decision != VersionDecision::Eligible {
             return Err("Installed version does not permit an update.".into());
         }
@@ -201,7 +204,7 @@ impl DemoDevice {
             event: "attempt_result",
             schema_version: 1,
             record_finalized: true,
-            target: self.target(),
+            target: self.target(component),
             package: package.clone(),
             operator_action: updater::operator_action(component, transfer.outcome),
             transfer,
@@ -244,7 +247,7 @@ impl DemoDevice {
             previous_generation: attempt.generation,
             generation: self.generation,
             same_unit_confirmed: same_controller,
-            model_confirmed: confirmed,
+            model_confirmed: confirmed || read.target.has_known_usb_ids(attempt.component),
             version: read.installed_version,
             expected_version: attempt.expected_version.clone(),
         };

@@ -195,6 +195,10 @@ fn replaced_or_reenumerated_desktop_attachment_requires_new_inspection() {
         bluetooth_transport_candidate: true,
         observed_profile: true,
         conflicting_model: false,
+        usb: Some(gulikit_platform::discovery::UsbIdentity {
+            vendor: 0x34d3,
+            product: 0x1100,
+        }),
         storage_identities: vec![],
         disks: vec![],
         mount: None,

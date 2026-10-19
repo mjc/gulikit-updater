@@ -226,7 +226,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-                        Notice { text: root.state.notice; warning: root.state.warning; }
+                        if root.state.notice != "": Notice { text: root.state.notice; warning: root.state.warning; }
                         ActionButton { text: (root.details-open ? "▾ " : "▸ ") + "Package details"; quiet: true; clicked => { root.details-open = !root.details-open; } }
                         ActionButton { text: "Inspect again"; quiet: true; enabled: !root.state.busy; clicked => { root.inspect-controller(); } }
                         if root.details-open: Label { text: (root.demo-mode ? "Sample package · not read from disk" : "Reviewed release · not a publisher signature") + "\nPayload: " + root.state.payload + "\nSHA-256: " + root.state.digest; font-size: 12px; wrap: char-wrap; }

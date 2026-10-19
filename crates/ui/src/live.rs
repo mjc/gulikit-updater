@@ -150,7 +150,7 @@ impl Default for LiveApp {
             },
             retry_block: None,
             connected: false,
-            notice: "Check the physical NS39 label and Max controls.".into(),
+            notice: String::new(),
             log: vec![],
         }
     }
@@ -193,11 +193,7 @@ impl LiveApp {
         }
     }
     pub fn connect(&mut self) -> Option<Work> {
-        if self.pending.is_some()
-            || !self.confirmed
-            || self.retry_block.is_some()
-            || self.has_unverified_receipt()
-        {
+        if self.pending.is_some() || self.retry_block.is_some() || self.has_unverified_receipt() {
             return None;
         }
         self.receipt = None;
@@ -205,7 +201,7 @@ impl LiveApp {
         self.notice = "Reading installed version…".into();
         Some(Work::Inspect {
             component: self.component,
-            confirmed: self.confirmed,
+            confirmed: false,
         })
     }
     pub fn select_component(&mut self, component: Component) -> Option<Work> {
@@ -213,6 +209,7 @@ impl LiveApp {
             return None;
         }
         self.component = component;
+        self.confirmed = false;
         self.package = None;
         self.receipt = None;
         self.same_controller = false;
@@ -334,9 +331,7 @@ impl LiveApp {
         }
         match self.page {
             Page::Ready => self.start(),
-            Page::Restart
-                if self.confirmed && self.same_controller && self.has_unverified_receipt() =>
-            {
+            Page::Restart if self.same_controller && self.has_unverified_receipt() => {
                 let receipt = self.receipt.as_ref()?;
                 self.pending = Some(Job::Verify);
                 self.notice = "Reading the restarted controller…".into();
@@ -441,6 +436,11 @@ impl LiveApp {
         }
     }
     fn inspected(&mut self, inspection: Inspection) {
+        self.confirmed = inspection.target.has_known_usb_ids(inspection.component);
+        if !self.confirmed {
+            self.fail("Unrecognized controller USB IDs.".into());
+            return;
+        }
         let attachment = Attachment::from(&inspection.target);
         if self.attachment != Some(attachment) {
             self.versions = [None, None];
@@ -591,7 +591,7 @@ impl LiveApp {
     fn readback_verifies_receipt(&self, result: &Readback) -> bool {
         self.receipt.as_ref().is_some_and(|receipt| {
             receipt.lifecycle == ReceiptLifecycle::Pending
-                && self.confirmed
+                && result.target.has_known_usb_ids(receipt.identity.component)
                 && self.same_controller
                 && result.source_attempt == receipt.path
                 && result.transfer.outcome == Outcome::InstalledVerified
@@ -628,6 +628,7 @@ impl LiveApp {
                     identity_provenance: result.same_unit_association,
                 });
                 self.connected = true;
+                self.confirmed = true;
                 self.retry_block = None;
             }
             self.page = Page::Verified;
@@ -726,13 +727,13 @@ impl LiveApp {
         } else if self.page == Page::Restart {
             "Verification pending. Follow this component's restart procedure, then check the installed version."
         } else if !self.confirmed {
-            "Check the physical NS39 label and Max controls."
+            "Connect the controller in update mode."
         } else if self.package.is_none() {
             "Choose an original reviewed firmware ZIP."
         } else if self.selected_decision() != Some(VersionDecision::Eligible) {
             "Installed version is unknown, already current, or newer. Update unavailable."
         } else {
-            "Ready. Updating requires an explicit action."
+            ""
         }
     }
     fn can_primary(&self) -> bool {
@@ -740,11 +741,9 @@ impl LiveApp {
             && self.retry_block.is_none()
             && match self.page {
                 Page::Ready => self.can_update(),
-                Page::Restart => {
-                    self.confirmed && self.same_controller && self.has_unverified_receipt()
-                }
+                Page::Restart => self.same_controller && self.has_unverified_receipt(),
                 Page::Writing => false,
-                _ => self.confirmed,
+                _ => true,
             }
     }
     fn primary_label(&self) -> Cow<'_, str> {

@@ -11,8 +11,7 @@ fn demo_uses_the_shared_controller_and_device_operations() {
     let mut device = DemoDevice::with_transfer_wait(|_| {});
     let mut app = LiveApp::default();
     let cancelled = AtomicBool::new(false);
-    assert!(app.connect().is_none());
-    app.confirm_model(true);
+    assert!(!app.view().confirmed);
     let work = app.connect().unwrap();
     let event = device.run(work, &cancelled, &mut |_| {}).unwrap();
     assert!(

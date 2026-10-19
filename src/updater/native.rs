@@ -243,7 +243,7 @@ fn verify_attempt(
                 previous_generation: generation,
                 generation: target.generation,
                 same_unit_confirmed: confirm_same_controller,
-                model_confirmed: confirm_ns39,
+                model_confirmed: confirm_ns39 || target.has_known_usb_ids(component),
                 version,
                 expected_version,
             }),

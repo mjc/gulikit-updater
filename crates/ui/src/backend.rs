@@ -147,11 +147,11 @@ fn run_native(
         Work::OpenAttempt => open_attempt(),
         Work::Inspect {
             component,
-            confirmed,
+            confirmed: _,
         } => match execute(
             Request::Probe {
                 component,
-                confirm_ns39: confirmed,
+                confirm_ns39: false,
             },
             cancelled,
             emit,
@@ -187,17 +187,10 @@ fn run_native(
         }
         Work::Verify {
             attempt,
-            confirmed,
+            confirmed: _,
             same_controller,
             expected_receipt,
-        } => verify(
-            attempt,
-            confirmed,
-            same_controller,
-            expected_receipt,
-            cancelled,
-            emit,
-        ),
+        } => verify(attempt, same_controller, expected_receipt, cancelled, emit),
         Work::ConfigureDemo(_) | Work::ChooseSample { .. } => {
             Err("Simulated device operations are unavailable in native mode.".into())
         }
@@ -214,7 +207,7 @@ struct SelectedUpdate {
 
 fn prepare_selected_update(selection: &SelectedUpdate) -> Result<VerifiedPackage, String> {
     if !selection.confirmed {
-        return Err("Confirm the physical NS39 controller before updating.".into());
+        return Err("Inspect the controller before updating.".into());
     }
     let package = gulikit_platform::inspect_package(
         &selection.path,
@@ -249,7 +242,7 @@ fn update_selected(
         Request::Update {
             archive: selection.path,
             package,
-            confirm_ns39: selection.confirmed,
+            confirm_ns39: false,
             record: record.clone(),
             expected_attachment: Some(selection.attachment),
             policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
@@ -309,7 +302,6 @@ fn open_attempt() -> Result<Event, String> {
 
 fn verify(
     attempt: PathBuf,
-    confirmed: bool,
     same_controller: bool,
     expected_receipt: ReceiptIdentity,
     cancelled: &AtomicBool,
@@ -325,7 +317,7 @@ fn verify(
         Request::Verify {
             attempt,
             record,
-            confirm_ns39: confirmed,
+            confirm_ns39: false,
             confirm_same_controller: same_controller,
             expected_receipt: Some(expected_receipt),
         },
@@ -400,7 +392,7 @@ mod tests {
             |_, _, _| panic!("no device"),
         )
         .unwrap_err();
-        assert!(error.contains("Confirm the physical NS39"), "{error}");
+        assert!(error.contains("Inspect the controller"), "{error}");
     }
 
     fn original(component: Component) -> SelectedUpdate {
@@ -462,7 +454,7 @@ mod tests {
                             generation: 7
                         })
                     );
-                    assert!(confirm_ns39);
+                    assert!(!confirm_ns39, "native requests require USB identification");
                     assert_eq!(policy, gulikit_core::version::VersionPolicy::UpgradeOnly);
                     emit(Event::Progress(gulikit_core::update::Progress {
                         submitted: 512,
