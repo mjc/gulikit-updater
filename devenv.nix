@@ -10,6 +10,14 @@
     toolchainFile = ./rust-toolchain.toml;
   };
 
+  # cc-rs uses Apple's macosx target spelling, which the Nix wrapper warns about.
+  env = lib.optionalAttrs config.stdenv.hostPlatform.isDarwin {
+    "CC_${lib.replaceStrings [ "-" ] [ "_" ] config.stdenv.hostPlatform.rust.rustcTarget}" =
+      "${config.stdenv.cc.cc}/bin/clang";
+    "CFLAGS_${lib.replaceStrings [ "-" ] [ "_" ] config.stdenv.hostPlatform.rust.rustcTarget}" =
+      "-Werror=unguarded-availability";
+  };
+
   packages =
     with pkgs;
     [
