@@ -480,6 +480,30 @@
         "size": 48148,
         "sha256": "c25924fb91dca3ea60123dcc9903402a9c8a814f0f20d8236f6d931a8b046f91"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.5",
+      "filename": "KK3_NS38_NS39_V4.5.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40831/download",
+      "changelog": "1. Fixed the problem where the vibration frequency would follow the Switch mode when switching to XINPUT mode, if the controller was not powered off or the settings were not cleared.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40831/download",
+      "firmware_member": "NS39_KK3_MAX_V4.5.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.5/KK3_NS38_NS39_V4.5.zip",
+      "size": 98940,
+      "sha256": "5d38f464c7d971cd6b32f28f30c85ae719461d8f792fa3870fdf3f11933ffbe4",
+      "firmware_file": {
+        "size": 48084,
+        "sha256": "fe9e648e4dcc9624ec8ee32bed67e100c6290ce694bc4ceeec237916e9fdfcf3"
+      },
+      "payload": {
+        "size": 48084,
+        "sha256": "fe9e648e4dcc9624ec8ee32bed67e100c6290ce694bc4ceeec237916e9fdfcf3"
+      }
     }
   ]
 }
