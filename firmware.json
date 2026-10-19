@@ -1446,6 +1446,32 @@
         "size": 51188,
         "sha256": "486c308e857b24adde6e7b623af67c8d0a74b6038f57ffc41ea7e2b94683e1eb"
       }
+    },
+    {
+      "product": "elves-2-pro",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "5.8",
+      "filename": "NS59_Elves2_PRO_V5.8.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/1050198.html",
+      "released_at": "2026-04-30",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2995143",
+      "changelog": "Fixed extra keystrokes during the first playback of a double-press macro replay.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/1050198.html",
+      "firmware_member": "NS59_Elves2_PRO_V5.8.bin",
+      "published_hashes": [],
+      "path": "/elves-2-pro/base/v5.8/NS59_Elves2_PRO_V5.8.zip",
+      "size": 49985,
+      "sha256": "9a19498cfb5a67310c192c25952a58491ac4a128a4d976819b0cf33a370fabef",
+      "firmware_file": {
+        "size": 47804,
+        "sha256": "f3ad90d00147999692aae04f9b5426ed645ddeeb8f32ff0cc89f3520122cbe77"
+      },
+      "payload": {
+        "size": 47804,
+        "sha256": "f3ad90d00147999692aae04f9b5426ed645ddeeb8f32ff0cc89f3520122cbe77"
+      }
     }
   ]
 }
