@@ -542,13 +542,13 @@ pub trait MainPort {
     ///
     /// Refuses stale ownership, changed topology or a replaced device/volume.
     fn check_session(&mut self) -> Result<(), String>;
-    /// Exclusively create the controller's firmware destination.
+    /// Exclusively create the selected package member's firmware destination.
     ///
     /// # Errors
     ///
     /// Reports creation or audit failure while retaining whether the destination
     /// was actually created, even when no payload bytes were written.
-    fn create_destination(&mut self) -> Result<(), DestinationCreationError>;
+    fn create_destination(&mut self, member: &str) -> Result<(), DestinationCreationError>;
     /// Write a payload slice and report the actual accepted byte count.
     ///
     /// # Errors
@@ -619,8 +619,11 @@ pub fn update_main_with_progress(
     run_main_transaction(
         port,
         package.payload(),
-        &package.info().version,
-        package.info().payload_size,
+        MainTarget {
+            version: &package.info().version,
+            payload_size: package.info().payload_size,
+            member: &package.info().member,
+        },
         policy,
         cancelled,
         progress,
@@ -634,13 +637,31 @@ fn main_transfer(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    run_main_transaction(port, payload, "5.9", 51_500, policy, cancelled, |_| {})
+    run_main_transaction(
+        port,
+        payload,
+        MainTarget {
+            version: "5.9",
+            payload_size: 51_500,
+            member: "NS39_KK3_MAX_V5.9.bin",
+        },
+        policy,
+        cancelled,
+        |_| {},
+    )
 }
+
+#[derive(Clone, Copy)]
+struct MainTarget<'a> {
+    version: &'a str,
+    payload_size: usize,
+    member: &'a str,
+}
+
 fn run_main_transaction(
     port: &mut impl MainPort,
     payload: &[u8],
-    expected_version: &str,
-    expected_payload_size: usize,
+    target: MainTarget<'_>,
     policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(Progress),
@@ -661,7 +682,7 @@ fn run_main_transaction(
         match crate::version::release_decision(
             Component::Main,
             &version.to_string(),
-            expected_version,
+            target.version,
             policy,
         )
         .map_err(|error| error.to_string())?
@@ -676,7 +697,7 @@ fn run_main_transaction(
             }
             VersionDecision::Eligible => {}
         }
-        if payload.len() != expected_payload_size {
+        if payload.len() != target.payload_size {
             return Err("Incorrect Main payload size".into());
         }
         port.prepare_write()?;
@@ -685,7 +706,7 @@ fn run_main_transaction(
             record.outcome = Outcome::CancelledBeforeWrite;
             return Ok(());
         }
-        if let Err(error) = port.create_destination() {
+        if let Err(error) = port.create_destination(target.member) {
             record.main_destination_created = error.created;
             return Err(error.error);
         }
@@ -782,6 +803,7 @@ mod tests {
     struct MainFake {
         events: Vec<&'static str>,
         written: Vec<u8>,
+        destination_name: Option<String>,
         version: &'static [u8],
         refuse_write: bool,
         fail: Option<&'static str>,
@@ -800,7 +822,8 @@ mod tests {
         fn check_session(&mut self) -> Result<(), String> {
             Ok(())
         }
-        fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+        fn create_destination(&mut self, name: &str) -> Result<(), DestinationCreationError> {
+            self.destination_name = Some(name.to_owned());
             if self.fail == Some("creation_audit") {
                 self.events.push("create");
                 return Err(DestinationCreationError {
@@ -868,6 +891,7 @@ mod tests {
         MainFake {
             events: vec![],
             written: vec![],
+            destination_name: None,
             version: b"www.gulikit.com\nversion 5.8",
             refuse_write: false,
             fail: None,
@@ -907,8 +931,11 @@ mod tests {
         let record = run_main_transaction(
             &mut port,
             &payload,
-            "3.1",
-            payload.len(),
+            MainTarget {
+                version: "3.1",
+                payload_size: payload.len(),
+                member: "NS39_KK3_MAX_V3.1.bin",
+            },
             VersionPolicy::AllowDowngrade,
             || false,
             |_| {},
@@ -919,6 +946,10 @@ mod tests {
             Outcome::TransferCompletedAwaitingVerification
         );
         assert_eq!(port.written, payload);
+        assert_eq!(
+            port.destination_name.as_deref(),
+            Some("NS39_KK3_MAX_V3.1.bin")
+        );
     }
 
     #[test]
@@ -927,8 +958,11 @@ mod tests {
         let record = run_main_transaction(
             &mut port,
             &[0x6d; 512],
-            "3.1",
-            1024,
+            MainTarget {
+                version: "3.1",
+                payload_size: 1024,
+                member: "NS39_KK3_MAX_V3.1.bin",
+            },
             VersionPolicy::AllowDowngrade,
             || false,
             |_| {},
@@ -946,8 +980,11 @@ mod tests {
         let result = run_main_transaction(
             &mut port,
             &vec![0; 51500],
-            "5.9",
-            51_500,
+            MainTarget {
+                version: "5.9",
+                payload_size: 51_500,
+                member: "NS39_KK3_MAX_V5.9.bin",
+            },
             VersionPolicy::UpgradeOnly,
             || false,
             |p| progress.push(p),

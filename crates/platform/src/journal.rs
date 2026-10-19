@@ -246,12 +246,12 @@ impl<P: MainPort> MainPort for Recorded<'_, P> {
         let result = self.inner.read_version();
         self.record_result("main_version", result, |bytes| json!(bytes))
     }
-    fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+    fn create_destination(&mut self, member: &str) -> Result<(), DestinationCreationError> {
         self.persist_event(
             "main_create_submitted",
             &SubmissionEvent::MainDestination { index: self.index },
         )?;
-        let result = self.inner.create_destination();
+        let result = self.inner.create_destination(member);
         let created = result
             .as_ref()
             .map_or_else(|error| error.created, |()| true);
@@ -406,6 +406,7 @@ mod tests {
 
     struct MainReadFake {
         finished: bool,
+        member: Option<String>,
     }
     impl MainPort for MainReadFake {
         fn prepare_write(&mut self) -> Result<(), String> {
@@ -417,7 +418,8 @@ mod tests {
         fn read_version(&mut self) -> Result<Vec<u8>, String> {
             Ok(b"version 5.8".to_vec())
         }
-        fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+        fn create_destination(&mut self, member: &str) -> Result<(), DestinationCreationError> {
+            self.member = Some(member.to_owned());
             Ok(())
         }
         fn write(&mut self, _: &[u8]) -> Result<usize, SubmissionError> {
@@ -444,8 +446,15 @@ mod tests {
     fn main_submission_records_preserve_creation_and_actual_short_write_fields() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut journal = file.reopen().unwrap();
-        let mut port = Recorded::new(MainReadFake { finished: false }, &mut journal);
-        port.create_destination().unwrap();
+        let mut port = Recorded::new(
+            MainReadFake {
+                finished: false,
+                member: None,
+            },
+            &mut journal,
+        );
+        port.create_destination("GuliKit_NS39_V3.1.bin").unwrap();
+        assert_eq!(port.inner.member.as_deref(), Some("GuliKit_NS39_V3.1.bin"));
         assert_eq!(port.write(&[0; 8]).unwrap(), 7);
         let events: Vec<serde_json::Value> = std::fs::read_to_string(file.path())
             .unwrap()
@@ -469,7 +478,13 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut readonly = File::open(file.path()).unwrap();
         let mut writable = file.reopen().unwrap();
-        let mut port = Recorded::new(MainReadFake { finished: false }, &mut readonly);
+        let mut port = Recorded::new(
+            MainReadFake {
+                finished: false,
+                member: None,
+            },
+            &mut readonly,
+        );
         assert!(port.read_version().unwrap_err().contains("audit failed"));
         port.journal = &mut writable;
         let error = MainPort::finish(&mut port).unwrap_err();
