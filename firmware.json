@@ -768,6 +768,30 @@
         "size": 53144,
         "sha256": "f31544c8faa8edfea597b2b74ed8e28d95edaca4ca23482127a5bf4daa40021e"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.6",
+      "filename": "KK3_NS38_NS39_V5.6.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41631/download",
+      "changelog": "1. Fixed the issue where the joystick light would flash mistakenly when it was set to the flowing light mode via the web setting tool.\r\n2. Fixed the problem where the joystick light would turn on after the controller was restarted when the joystick light was set to off mode via the web setting tool.\r\n3. Fixed the issue where the exported APG(Auto Pilot Gaming) recording file in version V5.5 were not functioning properly.\r\n4. Fixed the problem where the color of the joystick light was incorrect after the controller was upgraded.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41631/download",
+      "firmware_member": "NS39_KK3_MAX_V5.6.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.6/KK3_NS38_NS39_V5.6.zip",
+      "size": 105778,
+      "sha256": "85920f277f85a7b480fbf7ee21997d4c9eda6c7f9c0cbc0205426e373cbfc401",
+      "firmware_file": {
+        "size": 51456,
+        "sha256": "7f7ad10616d907caf21d4d8aaa81e648fd593f22821c136708a4ddc66c896ca5"
+      },
+      "payload": {
+        "size": 51456,
+        "sha256": "7f7ad10616d907caf21d4d8aaa81e648fd593f22821c136708a4ddc66c896ca5"
+      }
     }
   ]
 }
