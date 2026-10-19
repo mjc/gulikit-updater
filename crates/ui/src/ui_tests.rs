@@ -1012,6 +1012,12 @@ fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_l
             .unwrap(),
         selected_label
     );
+    assert_eq!(
+        element(&app.ui, "Firmware version and original ZIP")
+            .accessible_value()
+            .unwrap(),
+        selected_label
+    );
 
     click(&app.ui, "Download and inspect");
     let request = app.archive_requests.as_ref().unwrap().try_recv().unwrap();
@@ -1052,6 +1058,42 @@ fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_l
     click(&app.ui, "Close firmware archive");
     inside_window(&app.ui, &element(&app.ui, "Browse firmware archive"));
     assert!(!app.ui.get_state().connected);
+}
+
+#[test]
+fn archive_combo_visible_value_tracks_rust_index_projection() {
+    use gulikit_archive::ArchiveSnapshot;
+    use gulikit_ui::archive::ArchiveEvent;
+
+    let app = LiveHarness::new_with_archive_fixture(4);
+    click(&app.ui, "Browse firmware archive");
+    let combo = element(&app.ui, "Firmware version and original ZIP");
+    let releases = app.ui.get_state().archive_releases;
+    let selected = releases.row_data(1).unwrap();
+    assert!(selected.starts_with("6.2 · "));
+
+    click(&app.ui, "Firmware version and original ZIP");
+    key(&app.ui, slint::platform::Key::DownArrow);
+    key(&app.ui, slint::platform::Key::Return);
+    assert_eq!(app.ui.get_state().archive_selected, 1);
+    assert_eq!(combo.accessible_value().unwrap(), selected);
+
+    let refreshed = archive_snapshot_fixture(5);
+    let refreshed_index = refreshed.index().to_json().unwrap();
+    let refreshed = ArchiveSnapshot::from_parts(&"b".repeat(40), &refreshed_index).unwrap();
+    app.archive_events
+        .as_ref()
+        .unwrap()
+        .send(ArchiveEvent::Refreshed(Ok(refreshed)))
+        .unwrap();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+    layout(&app.ui);
+    assert_eq!(app.ui.get_state().archive_selected, 2);
+    assert_eq!(
+        app.ui.get_state().archive_releases.row_data(2).unwrap(),
+        selected
+    );
+    assert_eq!(combo.accessible_value().unwrap(), selected);
 }
 
 #[test]

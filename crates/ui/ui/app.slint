@@ -150,9 +150,12 @@ export component AppWindow inherits Window {
     in-out property <bool> archive-open: false;
     in-out property <bool> archive-metadata-open: false;
     in-out property <bool> log-open: false;
+    in-out property <int> archive-selected-index: root.state.archive-selected;
     property <length> sidebar-width: 280px;
     property <string> screen-title: root.state.page == Page.connect ? "Connect controller" : root.state.page == Page.ready ? root.state.component-name : root.state.page == Page.writing ? "Updating…" : root.state.page == Page.restart ? "Restart controller" : root.state.page == Page.verified ? "Update verified" : "Update stopped";
     forward-focus: primary;
+
+    changed state => { root.archive-selected-index = root.state.archive-selected; }
 
     VerticalLayout {
         spacing: 0px;
@@ -237,7 +240,7 @@ export component AppWindow inherits Window {
                                 Label { text: "VERSION AND ORIGINAL ZIP"; font-size: 10px; }
                                 ComboBox {
                                     model: root.state.archive-releases;
-                                    current-index: root.state.archive-selected;
+                                    current-index <=> root.archive-selected-index;
                                     enabled: !root.state.archive-busy && root.state.can-choose-package;
                                     min-width: 0px;
                                     horizontal-stretch: 1;

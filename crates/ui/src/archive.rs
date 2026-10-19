@@ -2,6 +2,7 @@
 
 use gulikit_archive::{
     ArchiveClient, ArchiveSnapshot, Component as ArchiveComponent, ReleaseRecord,
+    manifest::HashTarget,
 };
 use gulikit_core::package::Component;
 use std::{
@@ -462,19 +463,39 @@ fn details(record: &ReleaseRecord) -> String {
     let metadata = record.metadata();
     let mut lines = vec![
         format!("Original ZIP · {} bytes", record.size()),
-        format!("ZIP SHA-256 · {}", record.sha256()),
+        format!("Measured ZIP SHA-256 · {}", record.sha256()),
     ];
     lines.push(format!(
-        "Firmware member · {} · {} bytes · SHA-256 {}",
+        "Measured firmware member · {} · {} bytes · SHA-256 {}",
         metadata.firmware_member,
         record.firmware_file().size,
         record.firmware_file().sha256
     ));
     if let Some(payload) = record.payload() {
         lines.push(format!(
-            "Firmware payload · {} bytes · SHA-256 {}",
+            "Measured firmware payload · {} bytes · SHA-256 {}",
             payload.size, payload.sha256
         ));
+    }
+    if let Some(changelog) = &metadata.changelog {
+        lines.push(format!("Full changelog · {changelog}"));
+    } else {
+        lines.push("Full changelog · No release notes supplied.".into());
+    }
+    if metadata.published_hashes.is_empty() {
+        lines.push("Published checksum claims · None supplied.".into());
+    } else {
+        for claim in &metadata.published_hashes {
+            let target = match claim.target {
+                HashTarget::Zip => "original ZIP",
+                HashTarget::FirmwareFile => "firmware member",
+                HashTarget::Payload => "firmware payload",
+            };
+            lines.push(format!(
+                "Published checksum claim · {target} · {} · {} · source {}",
+                claim.algorithm, claim.value, claim.source_url
+            ));
+        }
     }
     if let Some(url) = &metadata.changelog_source_url {
         lines.push(format!("Changelog source · {url}"));

@@ -1,6 +1,7 @@
 use gulikit_archive::{
     ArchiveSnapshot, Component as ArchiveComponent, FirmwareIndex, FirmwareMemberKind,
     ReleaseMetadata, ReleaseRecord,
+    manifest::{HashTarget, PublishedHash},
 };
 use gulikit_core::package::{Component, Model, VerifiedPackage, catalog};
 use gulikit_ui::{
@@ -83,6 +84,14 @@ fn offline_refresh_failure_preserves_cached_snapshot_and_selection() {
     assert_eq!(browser.selected_path(), Some(selected.as_str()));
     assert_eq!(view.releases.len(), 1);
     assert!(view.status.contains("showing cached releases"));
+    assert!(
+        view.details
+            .contains("Full changelog · No release notes supplied.")
+    );
+    assert!(
+        view.details
+            .contains("Published checksum claims · None supplied.")
+    );
 }
 
 #[test]
@@ -145,6 +154,49 @@ fn version_sort_orders_numeric_prefix_and_alpha_suffix() {
             "3.5 · v3.5.zip"
         ]
     );
+}
+
+#[test]
+fn details_preserve_full_changelog_and_separate_published_claims_from_measured_hashes() {
+    let changelog = "A detailed release note. ".repeat(12);
+    let record = ReleaseRecord::measure(
+        ReleaseMetadata {
+            product: "kk3-max".into(),
+            member_kind: FirmwareMemberKind::Kk3,
+            component: ArchiveComponent::Base,
+            version: "5.9".into(),
+            filename: "release.zip".into(),
+            source_url: "https://example.com/release".into(),
+            released_at: None,
+            retrieved_at: None,
+            retrieved_from: None,
+            changelog: Some(changelog.clone()),
+            changelog_source_url: Some("https://example.com/notes".into()),
+            firmware_member: "firmware.bin".into(),
+            published_hashes: vec![PublishedHash {
+                target: HashTarget::Zip,
+                algorithm: "MD5".into(),
+                value: "b343ae3b747c660f0606f82bf6e90b0a".into(),
+                source_url: "https://example.com/checksums".into(),
+            }],
+        },
+        b"measured archive bytes",
+        b"measured member bytes",
+        b"measured payload bytes",
+    )
+    .unwrap();
+    let (browser, _requests) = browser(snapshot(REVISION_1, vec![record]));
+    let view = browser.view();
+
+    assert!(view.changelog.ends_with('…'));
+    assert!(
+        view.details
+            .contains(&format!("Full changelog · {changelog}"))
+    );
+    assert!(view.details.contains("Measured ZIP SHA-256 · "));
+    assert!(view.details.contains(
+        "Published checksum claim · original ZIP · MD5 · b343ae3b747c660f0606f82bf6e90b0a · source https://example.com/checksums"
+    ));
 }
 
 #[test]

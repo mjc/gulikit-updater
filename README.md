@@ -36,6 +36,7 @@ Archive availability and updater support are separate. Historical packages
 without a matching reviewed release can be downloaded, but do not become update
 candidates. Existing model, component, version and restart-verification checks
 still apply to supported packages.
+
 **Native desktop updates are disabled.** Add `-- --demo` to use an in-memory
 device through the same UI callbacks and worker, without USB, files or dialogs:
 
