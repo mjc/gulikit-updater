@@ -504,6 +504,30 @@
         "size": 48084,
         "sha256": "fe9e648e4dcc9624ec8ee32bed67e100c6290ce694bc4ceeec237916e9fdfcf3"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.6",
+      "filename": "KK3_NS38_NS39_V4.6.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40843/download",
+      "changelog": "1.The power management strategy of the controller has been adjusted, increasing the usage time from full charge to low battery indicator flashing by 40%.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40843/download",
+      "firmware_member": "NS39_KK3_MAX_V4.6.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.6/KK3_NS38_NS39_V4.6.zip",
+      "size": 98902,
+      "sha256": "d022fac7d901364c86d3881cbfdf898e7af9ecad99dfea4a29f7aa853d609b6f",
+      "firmware_file": {
+        "size": 48076,
+        "sha256": "f5e82a10dca665d4c18f4f306581c4bc5f7edee300b5325c8e8b7b032d58600b"
+      },
+      "payload": {
+        "size": 48076,
+        "sha256": "f5e82a10dca665d4c18f4f306581c4bc5f7edee300b5325c8e8b7b032d58600b"
+      }
     }
   ]
 }
