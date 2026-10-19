@@ -312,6 +312,30 @@
         "size": 47724,
         "sha256": "2217d8e19a5321835b7b3a1ce407304428d6701c470b4e949e20793e78474a74"
       }
+    },
+    {
+      "component": "base",
+      "version": "3.8",
+      "filename": "GuliKit_NS39_V3.8.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40524/download",
+      "changelog": "1. Optimized the vibration effects of Super Haptic vibration mode and HD Linear vibration mode for the controller in Switch mode.\r\n2. Fixed an issue where the default Switch mode could not save the functional settings after upgrading the controller firmware without switching modes.\r\n3. Fixed some system bugs.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/40524/download",
+      "firmware_member": "GuliKit_NS39_V3.8.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v3.8/GuliKit_NS39_V3.8.zip",
+      "size": 50116,
+      "sha256": "e2c87524f38ce35bb59eec796da84db139294b371effba2e9412b90f50f22771",
+      "firmware_file": {
+        "size": 47692,
+        "sha256": "ec8b8d5a9eebebb3a723f7ca25654563d45361e3d74f538f077017d532afad99"
+      },
+      "payload": {
+        "size": 47692,
+        "sha256": "ec8b8d5a9eebebb3a723f7ca25654563d45361e3d74f538f077017d532afad99"
+      }
     }
   ]
 }
