@@ -1172,6 +1172,32 @@
         "size": 2245632,
         "sha256": "77a812e950160660b8ee47c4c8c3c6941c2f0e7489dc0f87420e0e281f1e22cd"
       }
+    },
+    {
+      "product": "kingkong",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "5.1",
+      "filename": "GuliKit_NS08_NS09_V5.1.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/588841.html",
+      "released_at": "2022-02-14",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/104591",
+      "changelog": "Strengthened gyroscope stability; joystick/trigger calibration now starts after holding L+R+A+D-pad Left for two seconds.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/588841.html",
+      "firmware_member": "NS08_V5.1.bin",
+      "published_hashes": [],
+      "path": "/kingkong/base/v5.1/GuliKit_NS08_NS09_V5.1.zip",
+      "size": 57880,
+      "sha256": "ab1819502b9050292dad46a9e93b1a97b7a451e400d1a6100cc4a4b9a28a4402",
+      "firmware_file": {
+        "size": 27928,
+        "sha256": "be072c10b6a115033ea2eb0c90ec7bbad9b869e750ff74a712174565892757f9"
+      },
+      "payload": {
+        "size": 27928,
+        "sha256": "be072c10b6a115033ea2eb0c90ec7bbad9b869e750ff74a712174565892757f9"
+      }
     }
   ]
 }
