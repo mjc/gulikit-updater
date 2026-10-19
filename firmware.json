@@ -552,6 +552,30 @@
         "size": 48140,
         "sha256": "7b3e15a510b551024c7c873569d049b182f55ddf2df0e485c96b33e81daa0822"
       }
+    },
+    {
+      "component": "base",
+      "version": "4.8",
+      "filename": "KK3_NS38_NS39_V4.8.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41164/download",
+      "changelog": "1. Fixed an issue where the previous button occasionally wouldn't release when rapidly switching between buttons.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41164/download",
+      "firmware_member": "NS39_KK3_MAX_V4.8.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v4.8/KK3_NS38_NS39_V4.8.zip",
+      "size": 99300,
+      "sha256": "fe8662df9572f1363db4fa2768dd18663a3018991bd78ac1016c5ad38873d1d4",
+      "firmware_file": {
+        "size": 48296,
+        "sha256": "2efebef3a4442335a4b1c1e488af0078f1b27bf630a40a30217d0fee2a0e3fa6"
+      },
+      "payload": {
+        "size": 48296,
+        "sha256": "2efebef3a4442335a4b1c1e488af0078f1b27bf630a40a30217d0fee2a0e3fa6"
+      }
     }
   ]
 }
