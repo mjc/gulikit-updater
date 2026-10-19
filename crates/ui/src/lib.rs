@@ -1,6 +1,7 @@
 //! Desktop controller and interchangeable native and simulated devices.
 #![forbid(unsafe_code)]
 
+pub mod archive;
 pub mod archive_package;
 pub mod backend;
 pub mod demo;
