@@ -720,6 +720,30 @@
         "size": 48576,
         "sha256": "2cd553cb01cc2fcb69ceb3c594d4a47f5fb137b249c9cc65a5ba3a124b00eb7d"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.4",
+      "filename": "KK3_NS38_NS39_V5.4.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41226/download",
+      "changelog": "1. Adjusted the triggering mode of the digital trigger to trigger when the micro switch is active. (On KK3 Max only)\r\n2. Fixed a button system bug.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41226/download",
+      "firmware_member": "NS39_KK3_MAX_V5.4.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.4/KK3_NS38_NS39_V5.4.zip",
+      "size": 100014,
+      "sha256": "e80be56e4e109015f342bddf0fcdabbf16b836610a3141bf825ad8255174ff52",
+      "firmware_file": {
+        "size": 48624,
+        "sha256": "5cf093c0f92a0fccff80925d090255c8c96b265ee15b215712d100ef03593095"
+      },
+      "payload": {
+        "size": 48624,
+        "sha256": "5cf093c0f92a0fccff80925d090255c8c96b265ee15b215712d100ef03593095"
+      }
     }
   ]
 }
