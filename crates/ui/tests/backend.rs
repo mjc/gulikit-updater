@@ -55,13 +55,14 @@ fn unsupported_native_record_access_is_refused_before_any_dialog() {
 }
 
 #[test]
-fn native_update_is_unavailable_before_package_io_or_dialogs() {
+fn native_update_rejects_bad_packages_before_dialogs_or_device_access() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("changed-package.zip");
     std::fs::write(&path, b"not a reviewed firmware archive").unwrap();
     assert!(inspect_selected_package(&path, Component::Main).is_err());
     let mut device = NativeDevice;
     let work = Work::Update {
+        expected_package: common::package(),
         path: path.clone(),
         component: Component::Main,
         attachment: Attachment {
@@ -75,8 +76,7 @@ fn native_update_is_unavailable_before_package_io_or_dialogs() {
             .run(work, &AtomicBool::new(false), &mut |_| panic!(
                 "rejected packages cannot publish progress"
             ))
-            .unwrap_err()
-            .contains(gulikit_ui::backend::NATIVE_UPDATE_UNAVAILABLE)
+            .is_err()
     );
     std::fs::remove_file(&path).unwrap();
     assert!(inspect_selected_package(&path, Component::Main).is_err());
@@ -167,6 +167,7 @@ fn selected_vendor_archives_are_inspectable_and_changed_archives_are_rejected() 
         std::fs::write(&selected, bytes).unwrap();
         assert!(inspect_selected_package(&selected, component).is_err());
         let work = Work::Update {
+            expected_package: info,
             path: selected,
             component,
             attachment: Attachment {

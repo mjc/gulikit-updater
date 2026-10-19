@@ -2,7 +2,7 @@ use super::{AppWindow, Page};
 use gulikit_core::{package::Component, update::Progress};
 use gulikit_ui::{
     Page as ModelPage,
-    backend::NATIVE_UPDATE_UNAVAILABLE,
+    backend::{NATIVE_UPDATE_SUPPORTED, NATIVE_UPDATE_UNAVAILABLE},
     live::{Event, LiveApp, Work},
 };
 use slint::ComponentHandle;
@@ -49,9 +49,8 @@ impl Driver {
 
 fn present(ui: &AppWindow, app: &LiveApp) {
     let v = app.view();
-    ui.set_model_confirmed(v.confirmed);
     ui.set_same_controller(v.same_controller);
-    let can_update = v.can_update && ui.get_demo_mode();
+    let can_update = v.can_update && (ui.get_demo_mode() || NATIVE_UPDATE_SUPPORTED);
     ui.set_primary_enabled(v.can_primary && (v.page != ModelPage::Ready || can_update));
     let mut primary_label = ui.get_primary_label();
     update_text(&mut primary_label, &v.primary_label);
@@ -109,7 +108,7 @@ fn present(ui: &AppWindow, app: &LiveApp) {
     state.connected = v.connected;
     state.identity_known = v.confirmed && v.connected;
     state.warning = !can_update && v.page != ModelPage::Verified;
-    let notice = if v.can_update && !ui.get_demo_mode() {
+    let notice = if v.can_update && !ui.get_demo_mode() && !NATIVE_UPDATE_SUPPORTED {
         NATIVE_UPDATE_UNAVAILABLE
     } else {
         v.notice
@@ -187,15 +186,6 @@ fn act(
 fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
     {
         let (weak, driver) = (ui.as_weak(), driver.clone());
-        ui.on_confirm_model(move |confirmed| {
-            act(&weak, &driver, |app| {
-                app.confirm_model(confirmed);
-                None
-            });
-        });
-    }
-    {
-        let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_confirm_same(move |confirmed| {
             act(&weak, &driver, |app| {
                 app.confirm_same_controller(confirmed);
@@ -207,7 +197,7 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
         let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_primary_action(move || {
             act(&weak, &driver, |app| {
-                if !demo && app.can_update() {
+                if !demo && !NATIVE_UPDATE_SUPPORTED && app.can_update() {
                     return None;
                 }
                 app.primary()
@@ -290,8 +280,10 @@ pub fn create_mode(
 ) -> Result<(AppWindow, slint::Timer), slint::PlatformError> {
     let ui = AppWindow::new()?;
     ui.set_demo_mode(demo);
+    let mut app = LiveApp::default();
+    app.confirm_model(true);
     let driver = Rc::new(RefCell::new(Driver {
-        app: LiveApp::default(),
+        app,
         requests,
         cancelled,
     }));

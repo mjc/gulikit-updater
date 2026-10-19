@@ -4,14 +4,22 @@
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
+use gulikit_ui::{
+    backend::{NativeDevice, Worker},
+    demo::DemoDevice,
+};
 use slint::ComponentHandle;
 slint::include_modules!();
 
 fn main() -> Result<(), slint::PlatformError> {
-    use gulikit_ui::{
-        backend::{NativeDevice, Worker},
-        demo::DemoDevice,
-    };
+    #[cfg(target_os = "macos")]
+    if let Some(code) = std::env::args_os()
+        .nth(1)
+        .as_deref()
+        .and_then(gulikit_updater::supervision::dispatch_internal)
+    {
+        std::process::exit(i32::from(code));
+    }
     let mut args = std::env::args_os().skip(1);
     let argument = args.next();
     let extra = args.next().is_some();

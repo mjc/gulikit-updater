@@ -111,7 +111,6 @@ component RightmostA inherits HorizontalLayout {
 
 export component AppWindow inherits Window {
     in property <bool> demo-mode: false;
-    in-out property <bool> model-confirmed: false;
     in-out property <bool> same-controller: false;
     in property <bool> primary-enabled: false;
     in property <string> primary-label;
@@ -125,7 +124,6 @@ export component AppWindow inherits Window {
     callback select-package(int);
     callback primary-action();
     callback scenario-selected(int);
-    callback confirm-model(bool);
     callback confirm-same(bool);
     callback choose-file();
     callback inspect-controller();
@@ -193,22 +191,12 @@ export component AppWindow inherits Window {
                         horizontal-scrollbar-policy: always-off;
                         VerticalLayout {
                             spacing: 20px; alignment: start;
-                    if root.state.page == Page.connect || root.state.page == Page.ready || root.state.page == Page.restart || root.state.page == Page.failed: VerticalLayout {
-                        spacing: 8px;
-                        ActionButton {
-                            text: (root.model-confirmed ? "☑ " : "☐ ") + "I checked the NS39 label and Max controls";
-                            accessible-label: "I checked the NS39 label and Max controls";
-                            accessible-role: checkbox; accessible-checked: root.model-confirmed;
-                            horizontal-stretch: 1; enabled: !root.state.busy;
-                            clicked => { root.model-confirmed = !root.model-confirmed; root.confirm-model(root.model-confirmed); }
-                        }
-                        if root.state.page == Page.restart: ActionButton {
-                            text: (root.same-controller ? "☑ " : "☐ ") + "I reconnected the same controller";
-                            accessible-label: "I reconnected the same controller";
-                            accessible-role: checkbox; accessible-checked: root.same-controller;
-                            horizontal-stretch: 1; enabled: !root.state.busy;
-                            clicked => { root.same-controller = !root.same-controller; root.confirm-same(root.same-controller); }
-                        }
+                    if root.state.page == Page.restart: ActionButton {
+                        text: (root.same-controller ? "☑ " : "☐ ") + "Confirm same controller";
+                        accessible-label: "Confirm same controller";
+                        accessible-role: checkbox; accessible-checked: root.same-controller;
+                        horizontal-stretch: 1; enabled: !root.state.busy;
+                        clicked => { root.same-controller = !root.same-controller; root.confirm-same(root.same-controller); }
                     }
                     if root.state.page == Page.connect && root.state.can-troubleshoot: VerticalLayout {
                         spacing: 12px;
@@ -240,7 +228,7 @@ export component AppWindow inherits Window {
                         }
                         Notice { text: root.state.notice; warning: root.state.warning; }
                         ActionButton { text: (root.details-open ? "▾ " : "▸ ") + "Package details"; quiet: true; clicked => { root.details-open = !root.details-open; } }
-                        ActionButton { text: "Inspect again"; quiet: true; enabled: !root.state.busy && root.model-confirmed; clicked => { root.inspect-controller(); } }
+                        ActionButton { text: "Inspect again"; quiet: true; enabled: !root.state.busy; clicked => { root.inspect-controller(); } }
                         if root.details-open: Label { text: (root.demo-mode ? "Sample package · not read from disk" : "Reviewed release · not a publisher signature") + "\nPayload: " + root.state.payload + "\nSHA-256: " + root.state.digest; font-size: 12px; wrap: char-wrap; }
                     }
                     if root.state.page == Page.writing: VerticalLayout {

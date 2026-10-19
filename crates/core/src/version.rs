@@ -1,5 +1,5 @@
 //! Component-specific installed-version policy. Unknown versions never authorize writes.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub const BT_SIGNATURE: [u8; 16] = [
@@ -15,7 +15,7 @@ pub enum VersionDecision {
 }
 
 /// Explicit version-direction permission; it never authorizes an unverified device or package.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VersionPolicy {
     #[default]

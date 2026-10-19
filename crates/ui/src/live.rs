@@ -18,6 +18,7 @@ pub enum Work {
     },
     ChoosePackage(Component),
     Update {
+        expected_package: PackageInfo,
         path: PathBuf,
         component: Component,
         attachment: Attachment,
@@ -311,6 +312,7 @@ impl LiveApp {
         }
         let package = self.package.as_ref()?;
         let work = Work::Update {
+            expected_package: package.info.clone(),
             path: package.path.clone(),
             component: self.component,
             attachment: self.attachment?,

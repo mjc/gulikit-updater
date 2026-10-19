@@ -64,6 +64,14 @@ fn inside_window(ui: &AppWindow, item: &ElementHandle) {
 fn normal_startup_never_presents_a_simulated_controller() {
     let app = LiveHarness::new();
     assert!(
+        ElementHandle::find_by_accessible_label(
+            &app.ui,
+            "I checked the NS39 label and Max controls"
+        )
+        .next()
+        .is_none()
+    );
+    assert!(
         ElementHandle::find_by_accessible_label(&app.ui, "DEMO")
             .next()
             .is_none(),
@@ -72,6 +80,10 @@ fn normal_startup_never_presents_a_simulated_controller() {
     assert!(
         app.work.try_recv().is_err(),
         "startup must not open devices or start an update"
+    );
+    assert_eq!(
+        element(&app.ui, "Inspect controller").accessible_enabled(),
+        Some(true)
     );
 }
 
@@ -106,7 +118,6 @@ fn desktop_renders_both_components_and_routes_confirmed_inspection() {
         assert_ne!(main.as_bytes(), bluetooth.as_bytes());
     }
     assert!(app.work.try_recv().is_err());
-    app.ui.invoke_confirm_model(true);
     app.ui.invoke_inspect_controller();
     assert!(matches!(
         app.work.try_recv().unwrap(),
@@ -179,24 +190,41 @@ fn native_record_control_matches_platform_verification_support() {
 }
 
 #[test]
-fn native_ready_does_not_enable_an_unavailable_update() {
+fn native_ready_enables_updates_only_on_supported_platforms() {
     let app = LiveHarness::new();
     app.prepare_main();
     assert_eq!(app.ui.get_state().page, Page::Ready);
-    assert!(!app.ui.get_state().can_update);
-    assert!(!app.ui.get_primary_enabled());
+    assert_eq!(app.ui.get_state().can_update, cfg!(target_os = "macos"));
+    assert_eq!(app.ui.get_primary_enabled(), cfg!(target_os = "macos"));
     click(&app.ui, "Update to 5.9  →");
-    assert!(app.work.try_recv().is_err());
+    if cfg!(target_os = "macos") {
+        assert!(matches!(
+            app.work.try_recv().unwrap(),
+            gulikit_ui::live::Work::Update { .. }
+        ));
+        assert_eq!(app.ui.get_state().page, Page::Writing);
+    } else {
+        assert!(app.work.try_recv().is_err());
+    }
 }
 
 #[test]
-fn native_primary_callback_cannot_queue_an_unavailable_update() {
+fn native_primary_callback_dispatches_only_on_supported_platforms() {
     let app = LiveHarness::new();
     app.prepare_main();
     app.ui.invoke_primary_action();
-    assert!(app.work.try_recv().is_err());
-    assert_eq!(app.ui.get_state().page, Page::Ready);
-    assert!(!app.ui.get_state().busy);
+    if cfg!(target_os = "macos") {
+        assert!(matches!(
+            app.work.try_recv().unwrap(),
+            gulikit_ui::live::Work::Update { .. }
+        ));
+        assert_eq!(app.ui.get_state().page, Page::Writing);
+        assert!(app.ui.get_state().busy);
+    } else {
+        assert!(app.work.try_recv().is_err());
+        assert_eq!(app.ui.get_state().page, Page::Ready);
+        assert!(!app.ui.get_state().busy);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -231,7 +259,6 @@ fn recovery_hold_hides_connection_troubleshooting_advice() {
         Outcome::DestinationCreatedWithoutPayload,
     ] {
         let app = LiveHarness::new();
-        click(&app.ui, "I checked the NS39 label and Max controls");
         let mut result = live_fixtures::attempt(outcome);
         if outcome == Outcome::DestinationCreatedWithoutPayload {
             result.transfer.bytes_submitted = 0;
@@ -265,7 +292,6 @@ fn recovery_hold_hides_connection_troubleshooting_advice() {
             element(&app.ui, "Connection help").accessible_enabled(),
             Some(false)
         );
-        click(&app.ui, "I checked the NS39 label and Max controls");
         assert_eq!(app.ui.get_state().page, Page::Failed);
         assert!(
             ElementHandle::find_by_accessible_label(
@@ -342,7 +368,6 @@ impl LiveHarness {
     }
     fn prepare_main(&self) {
         use gulikit_ui::live::{Event, Work};
-        click(&self.ui, "I checked the NS39 label and Max controls");
         click(&self.ui, "Inspect controller");
         assert!(matches!(
             self.work.try_recv().unwrap(),
@@ -402,9 +427,8 @@ fn shared_controls_only_transfer_on_click_and_only_verify_after_fresh_readback()
     let app = LiveHarness::new_mode(true);
     assert_eq!(
         element(&app.ui, "Inspect controller").accessible_enabled(),
-        Some(false)
+        Some(true)
     );
-    click(&app.ui, "Inspect controller");
     assert!(app.work.try_recv().is_err());
     app.prepare_main();
     click(&app.ui, "Update to 5.9  →");
@@ -444,7 +468,7 @@ fn shared_controls_only_transfer_on_click_and_only_verify_after_fresh_readback()
     assert_eq!(app.ui.get_state().main_version, "5.8");
     click(&app.ui, "Check version  →");
     assert!(app.work.try_recv().is_err());
-    click(&app.ui, "I reconnected the same controller");
+    click(&app.ui, "Confirm same controller");
     click(&app.ui, "Check version  →");
     assert!(matches!(
         app.work.try_recv().unwrap(),
@@ -558,7 +582,6 @@ impl DemoHarness {
         self.pump();
     }
     fn prepare(&mut self) {
-        self.click("I checked the NS39 label and Max controls");
         self.click("Inspect controller");
         self.click("Choose file…");
         self.click("NS39 · Main 5.9");
@@ -575,7 +598,7 @@ fn demo_controls_use_the_same_inspection_transfer_and_verification_callbacks() {
     assert_eq!(demo.app.ui.get_state().main_version, "5.8");
     demo.click("Check version  →");
     assert_eq!(demo.app.ui.get_state().page, Page::Restart);
-    demo.click("I reconnected the same controller");
+    demo.click("Confirm same controller");
     demo.click("Check version  →");
     assert_eq!(demo.app.ui.get_state().page, Page::Verified);
     assert_eq!(demo.app.ui.get_state().main_version, "5.9");
@@ -754,7 +777,7 @@ fn both_component_flows_show_their_own_restart_procedure() {
         &demo.app.ui,
         "Wait for automatic power-off and for the GuliKit drive to disappear. Then turn on normally.",
     );
-    demo.click("I reconnected the same controller");
+    demo.click("Confirm same controller");
     demo.click("Check version  →");
     assert_eq!(demo.app.ui.get_state().page, Page::Verified);
     demo.click("Other firmware  →");
@@ -854,7 +877,6 @@ fn offline_package_controls_show_metadata_without_claiming_a_controller() {
     assert!(!app.ui.get_state().connected);
     assert!(!app.ui.get_primary_enabled());
     assert!(app.work.try_recv().is_err());
-    click(&app.ui, "I checked the NS39 label and Max controls");
     click(&app.ui, "Inspect again");
     assert!(matches!(
         app.work.try_recv().unwrap(),

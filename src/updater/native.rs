@@ -38,6 +38,7 @@ pub(super) fn execute(
             record,
             expected_attachment,
             policy,
+            ..
         } => {
             let component = package.info().component;
             if component == Component::Main && main_lease.is_none() {
@@ -51,7 +52,7 @@ pub(super) fn execute(
             let target = session.target.clone();
             check_attachment(expected_attachment, &target)?;
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
-            let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":"user-confirmed NS39; observed update profile","post_restart_association":"pending; no USB serial is available"});
+            let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":super::IDENTITY_PROVENANCE,"post_restart_association":"pending; no USB serial is available"});
             write_event(&mut journal, &header).map_err(AppError::host_io)?;
             let result =
                 transfer_package(session, &package, policy, &mut journal, cancelled, progress);
@@ -185,7 +186,7 @@ fn probe(
         }
     };
     Ok(
-        json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"qualified_bot_lun":qualified_lun,"cleanup_errors":cleanup_errors,"target":target,"identity_provenance":"user-confirmed NS39; observed update profile"}),
+        json!({"component":component,"installed_version":version,"raw_version_bytes":raw,"qualified_bot_lun":qualified_lun,"cleanup_errors":cleanup_errors,"target":target,"identity_provenance":super::IDENTITY_PROVENANCE}),
     )
 }
 

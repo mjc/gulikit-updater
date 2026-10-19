@@ -27,6 +27,7 @@ pub enum Message {
     Ready,
     Go,
     Cancel,
+    Progress(gulikit_core::update::Progress),
     Result(serde_json::Value),
     Failed {
         kind: String,
@@ -272,6 +273,9 @@ fn guardian_with_clock(
                     ready = true;
                     parent.send(&Message::Ready)?;
                 }
+                Ok(Some(Message::Progress(value))) if started => {
+                    parent.send(&Message::Progress(value))?;
+                }
                 Ok(Some(message @ Message::Result(_))) if started => result = Some(message),
                 Ok(Some(message @ Message::Failed { .. })) => result = Some(message),
                 Ok(None) => {}
@@ -294,14 +298,8 @@ fn guardian_with_clock(
             .map_err(|error| error.to_string())?
             .is_some()
         {
-            if result.is_none()
-                && let Ok(Some(message)) = worker.poll()
-            {
-                match message {
-                    Message::Result(_) if started => result = Some(message),
-                    Message::Failed { .. } => result = Some(message),
-                    _ => return Err("Main worker exited in an unexpected protocol phase".into()),
-                }
+            if result.is_none() {
+                result = drain_final_response(&mut worker, &mut parent, started)?;
             }
             parent.send(&result.unwrap_or_else(|| Message::Unknown {
                 reason: "Main worker exited without a final result".into(),
@@ -317,15 +315,50 @@ fn guardian_with_clock(
     }
 }
 
+fn drain_final_response(
+    worker: &mut Channel,
+    parent: &mut Channel,
+    started: bool,
+) -> Result<Option<Message>, String> {
+    loop {
+        match worker.poll() {
+            Ok(Some(Message::Progress(value))) if started => {
+                parent.send(&Message::Progress(value))?;
+            }
+            Ok(Some(message @ Message::Result(_))) if started => return Ok(Some(message)),
+            Ok(Some(message @ Message::Failed { .. })) => return Ok(Some(message)),
+            Ok(None) | Err(_) => return Ok(None),
+            Ok(Some(_)) => {
+                return Err("Main worker exited in an unexpected protocol phase".into());
+            }
+        }
+    }
+}
+
 ///
 /// # Errors
 ///
 /// Returns an error if the guardian cannot be started or its reporting channel fails before a final response. Unknown results retain their explicit worker-stopped evidence.
 pub fn run(
+    guardian_command: Command,
+    request: serde_json::Value,
+    budget: Duration,
+    cancelled: impl FnMut() -> bool,
+) -> Result<Message, String> {
+    run_with_progress(guardian_command, request, budget, cancelled, |_| {})
+}
+
+/// Run a supervised filesystem operation and forward observed progress.
+///
+/// # Errors
+/// Reports guardian startup or channel failures. Reporting failures after GO
+/// retain an unknown outcome and the guardian's ownership of its worker.
+pub fn run_with_progress(
     mut guardian_command: Command,
     request: serde_json::Value,
     budget: Duration,
     mut cancelled: impl FnMut() -> bool,
+    mut progress: impl FnMut(gulikit_core::update::Progress),
 ) -> Result<Message, String> {
     // Terminal signals reach the reporting process. It forwards cancellation to
     // the owned I/O child; the guardian must survive to retain its lease.
@@ -364,6 +397,7 @@ pub fn run(
                 }
                 started = true;
             }
+            Ok(Some(Message::Progress(value))) if started => progress(value),
             Ok(Some(Message::Unknown { reason, .. })) if !started => {
                 return Ok(reporting_failure(false, reason));
             }
@@ -460,6 +494,17 @@ mod tests {
             Message::Go
         ));
         drop(lock); // Worker closes its duplicate; the guardian still owns the lease.
+        if request["progress"] == true {
+            for confirmed in [0, 512, 1024] {
+                channel
+                    .send(&Message::Progress(gulikit_core::update::Progress {
+                        submitted: confirmed,
+                        confirmed,
+                        total: 1024,
+                    }))
+                    .unwrap();
+            }
+        }
         channel
             .send(&Message::Result(serde_json::json!({"completed":true,"process_group":nix::unistd::getpgrp().as_raw()})))
             .unwrap();
@@ -512,6 +557,43 @@ mod tests {
             "A closed guardian must be observed immediately: {message}"
         );
     }
+    #[test]
+    fn progress_is_forwarded_before_the_reaped_workers_final_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lease");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "main_worker::tests::guardian_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GULIKIT_TEST_LEASE", &path);
+        let mut observed = Vec::new();
+        let response = run_with_progress(
+            command,
+            serde_json::json!({"lock":path,"progress":true}),
+            Duration::from_secs(3),
+            || false,
+            |value| observed.push(value),
+        )
+        .unwrap();
+        assert!(matches!(response, Message::Result(_)), "{response:?}");
+        assert_eq!(
+            observed
+                .iter()
+                .map(|value| value.confirmed)
+                .collect::<Vec<_>>(),
+            [0, 512, 1024]
+        );
+        assert!(
+            observed
+                .iter()
+                .all(|value| value.total == 1024 && value.confirmed == value.submitted)
+        );
+    }
+
     #[test]
     fn terminal_interruption_is_forwarded_by_the_reporter_instead_of_killing_the_guardian() {
         let directory = tempfile::tempdir().unwrap();

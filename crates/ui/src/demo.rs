@@ -337,7 +337,17 @@ impl Device for DemoDevice {
                 component,
                 attachment,
                 confirmed,
-            } => self.transfer(&path, component, attachment, confirmed, cancelled, emit),
+                expected_package,
+            } => {
+                if self
+                    .selected
+                    .as_ref()
+                    .is_none_or(|(_, info)| *info != expected_package)
+                {
+                    return Err("Simulated package changed since selection.".into());
+                }
+                self.transfer(&path, component, attachment, confirmed, cancelled, emit)
+            }
             Work::Verify {
                 attempt,
                 confirmed,

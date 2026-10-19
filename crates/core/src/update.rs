@@ -113,7 +113,7 @@ pub fn verify_restart(previous: Outcome, observation: &Verification) -> Outcome 
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CommandRecord {
     pub index: usize,
     pub opcode: u8,
@@ -122,7 +122,7 @@ pub struct CommandRecord {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TransferRecord {
     pub outcome: Outcome,
     pub version_policy: VersionPolicy,
@@ -266,7 +266,7 @@ pub trait BluetoothPort {
     fn finish(&mut self) -> Result<(), String>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub submitted: usize,
     pub confirmed: usize,

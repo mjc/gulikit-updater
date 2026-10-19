@@ -24,9 +24,13 @@ devenv shell
 cargo run -p gulikit-ui --bin gulikit-ui
 ```
 
-The desktop app can inspect the controller and firmware packages on macOS.
-**Native desktop updates are disabled.** Add `-- --demo` to use an in-memory
-device through the same UI callbacks and worker, without USB, files or dialogs:
+On macOS, the desktop app inspects the controller, checks the selected firmware
+ZIP and updates either component. It saves a host operation record and requires
+a fresh version read after restart before showing the update as verified.
+Native GUI updates still need hardware acceptance.
+
+Add `-- --demo` to use an in-memory device through the same UI callbacks and
+worker, without USB, files or dialogs:
 
 ```sh
 cargo run -p gulikit-ui --bin gulikit-ui -- --demo

@@ -9,6 +9,8 @@ use gulikit_platform::discovery::{NativeCandidate, Snapshot};
 use serde::Serialize;
 use std::path::PathBuf;
 
+const IDENTITY_PROVENANCE: &str = "NS39 target selected; observed update profile";
+
 #[derive(Debug)]
 pub enum Request {
     Devices,
@@ -17,6 +19,7 @@ pub enum Request {
         confirm_ns39: bool,
     },
     Update {
+        archive: PathBuf,
         package: VerifiedPackage,
         confirm_ns39: bool,
         record: PathBuf,
@@ -32,7 +35,7 @@ pub enum Request {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub ancestor: u64,
     pub generation: u64,
@@ -110,6 +113,11 @@ pub enum Reply {
     Inspection(Inspection),
     Attempt(Attempt),
     Readback(Readback),
+    Uncertain {
+        #[serde(serialize_with = "serialize_record_path")]
+        record: PathBuf,
+        reason: String,
+    },
 }
 
 /// Receipt fields presented before the user confirmed a verification request.
@@ -292,6 +300,17 @@ impl From<&str> for ApplicationError {
         message.to_owned().into()
     }
 }
+impl From<gulikit_platform::InspectError> for ApplicationError {
+    fn from(error: gulikit_platform::InspectError) -> Self {
+        let (kind, code) = match &error {
+            gulikit_platform::InspectError::Rejected(_) => ("package_rejected", 3),
+            gulikit_platform::InspectError::Io(_) | gulikit_platform::InspectError::NotFile => {
+                ("package_io", 4)
+            }
+        };
+        Self::new(kind, code, error.to_string())
+    }
+}
 impl From<gulikit_platform::acquisition::AcquisitionError> for ApplicationError {
     fn from(error: gulikit_platform::acquisition::AcquisitionError) -> Self {
         Self::from(error.error).with_cleanup(error.cleanup_errors)
@@ -303,23 +322,58 @@ mod native;
 /// Installation is verified only by a fresh version readback.
 ///
 /// # Errors
-/// Rejects desktop writes, unavailable native access and failed request preflight,
+/// Rejects unavailable native access and failed request preflight,
 /// device or host-record operations. Also rejects malformed native replies.
 pub fn execute(
     request: Request,
     cancelled: &mut dyn FnMut() -> bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Reply, String> {
-    let reply = ReplyContext::for_request(&request)?;
-    let value = execute_raw(request, cancelled, progress)
+    let reply = ReplyContext::for_request(&request);
+    let value = execute_frontend(request, cancelled, progress)
         .map_err(|error| format!("{}; cleanup={:?}", error.message, error.cleanup_errors))?;
     reply.decode(value)
+}
+
+fn execute_frontend(
+    request: Request,
+    cancelled: &mut dyn FnMut() -> bool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<serde_json::Value, ApplicationError> {
+    match request {
+        #[cfg(target_os = "macos")]
+        Request::Update {
+            archive,
+            package,
+            confirm_ns39,
+            record,
+            expected_attachment,
+            policy,
+        } if package.info().component == Component::Main => crate::supervision::update(
+            crate::supervision::MainUpdate {
+                archive,
+                record,
+                model: package.info().model,
+                policy,
+                confirm_ns39,
+                expected_attachment,
+                expected_archive_sha256: Some(package.info().archive_sha256.clone()),
+            },
+            cancelled,
+            progress,
+        ),
+        request => execute_raw(request, cancelled, progress),
+    }
 }
 
 /// Retain only the request context needed to interpret a native response.
 enum ReplyContext {
     Devices,
     Inspection(Component),
+    Attempt {
+        package: PackageInfo,
+        record: PathBuf,
+    },
     Readback {
         source_attempt: PathBuf,
         confirmed: bool,
@@ -327,15 +381,24 @@ enum ReplyContext {
 }
 
 impl ReplyContext {
-    fn for_request(request: &Request) -> Result<Self, String> {
+    fn for_request(request: &Request) -> Self {
         match request {
-            Request::Devices => Ok(Self::Devices),
-            Request::Probe { component, .. } => Ok(Self::Inspection(*component)),
-            Request::Verify { attempt, confirm_same_controller, .. } => Ok(Self::Readback {
+            Request::Devices => Self::Devices,
+            Request::Probe { component, .. } => Self::Inspection(*component),
+            Request::Verify {
+                attempt,
+                confirm_same_controller,
+                ..
+            } => Self::Readback {
                 source_attempt: attempt.clone(),
                 confirmed: *confirm_same_controller,
-            }),
-            Request::Update { .. } => Err("Desktop firmware writes are not available until a verified rollback path and desktop update supervision are ready.".into()),
+            },
+            Request::Update {
+                package, record, ..
+            } => Self::Attempt {
+                package: package.info().clone(),
+                record: record.clone(),
+            },
         }
     }
 
@@ -346,12 +409,52 @@ impl ReplyContext {
                 coverage: "Observed GuliKit update profiles and correlated GuliKit volumes. Put only one device in update mode; future unknown identities may not be recognized.",
             })),
             Self::Inspection(component) => decode_inspection(value, component),
+            Self::Attempt { package, record } => Ok(decode_attempt(value, package, record)),
             Self::Readback {
                 source_attempt,
                 confirmed,
             } => decode_readback(value, source_attempt, confirmed),
         }
     }
+}
+
+fn decode_attempt(value: serde_json::Value, package: PackageInfo, record: PathBuf) -> Reply {
+    if value["event"] == "attempt_supervision_result" {
+        return Reply::Uncertain {
+            record,
+            reason: value["transfer"]["error"]
+                .as_str()
+                .unwrap_or("Main supervisor could not establish a final result.")
+                .into(),
+        };
+    }
+    match parse_attempt_result(value, package) {
+        Ok(attempt) => Reply::Attempt(attempt),
+        Err(reason) => Reply::Uncertain { record, reason },
+    }
+}
+
+fn parse_attempt_result(
+    mut value: serde_json::Value,
+    package: PackageInfo,
+) -> Result<Attempt, String> {
+    if value["event"] != "attempt_result" || value["schema_version"] != 1 {
+        return Err("Invalid transfer result header. Inspect the operation record.".into());
+    }
+    if value["package"] != serde_json::to_value(&package).map_err(|error| error.to_string())? {
+        return Err("Transfer result does not match the reviewed package.".into());
+    }
+    let transfer: TransferRecord = field(&mut value, "transfer")?;
+    let operator_action = operator_action(package.component, transfer.outcome);
+    Ok(Attempt {
+        event: "attempt_result",
+        schema_version: 1,
+        record_finalized: field(&mut value, "record_finalized")?,
+        target: field(&mut value, "target")?,
+        package,
+        transfer,
+        operator_action,
+    })
 }
 
 fn decode_inspection(mut value: serde_json::Value, component: Component) -> Result<Reply, String> {
@@ -372,7 +475,7 @@ fn decode_inspection(mut value: serde_json::Value, component: Component) -> Resu
         qualified_bot_lun: field(&mut value, "qualified_bot_lun")?,
         cleanup_errors: field(&mut value, "cleanup_errors")?,
         target: field(&mut value, "target")?,
-        identity_provenance: "user-confirmed NS39; observed update profile",
+        identity_provenance: IDENTITY_PROVENANCE,
     }))
 }
 
@@ -496,6 +599,63 @@ pub fn operator_action(component: Component, outcome: Outcome) -> &'static str {
 mod tests {
     use super::*;
 
+    fn main_package() -> PackageInfo {
+        let release = gulikit_core::package::catalog()
+            .iter()
+            .find(|release| release.component == Component::Main)
+            .unwrap();
+        PackageInfo {
+            model: release.model,
+            component: release.component,
+            version: release.version.into(),
+            payload_size: release.payload_size(),
+            payload_sha256: release.payload_sha256().into(),
+            archive_sha256: release.archive_sha256.into(),
+            source_url: release.source_url,
+            member: release.member,
+        }
+    }
+
+    #[test]
+    fn typed_transfer_retains_pending_outcome_and_original_package() {
+        let package = main_package();
+        let value = serde_json::json!({
+            "event":"attempt_result", "schema_version":1, "record_finalized":true,
+            "target":{"ancestor":42,"generation":7,"main_volume_candidate":true,"bluetooth_transport_candidate":false,"observed_profile":true,"conflicting_model":false,"storage_identities":[],"disks":[],"mount":null},
+            "package":package,
+            "transfer":TransferRecord { outcome: Outcome::TransferCompletedAwaitingVerification, bytes_submitted:51500, bytes_confirmed:51500, ..TransferRecord::default() }
+        });
+        let reply = decode_attempt(value.clone(), main_package(), "attempt.jsonl".into());
+        let Reply::Attempt(attempt) = reply else {
+            panic!("{reply:?}");
+        };
+        assert_eq!(attempt.package, main_package());
+        assert_eq!(
+            attempt.transfer.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert!(attempt.record_finalized);
+        assert_eq!(attempt.target.generation, 7);
+        for invalid in [
+            serde_json::json!({"event":"attempt_supervision_result","transfer":{"outcome":"outcome_unknown","error":"worker response lost"}}),
+            {
+                let mut changed = value.clone();
+                changed["package"]["version"] = "5.8".into();
+                changed
+            },
+            {
+                let mut changed = value;
+                changed["transfer"] = serde_json::Value::Null;
+                changed
+            },
+        ] {
+            let reply = decode_attempt(invalid, main_package(), "attempt.jsonl".into());
+            assert!(
+                matches!(reply, Reply::Uncertain {record, reason} if record == std::path::Path::new("attempt.jsonl") && !reason.is_empty())
+            );
+        }
+    }
+
     #[test]
     fn typed_readback_serializes_native_source_path_units_losslessly() {
         #[cfg(unix)]
@@ -550,6 +710,12 @@ mod tests {
                 serde_json::from_value(value["source_attempt"]["windows_wide"].clone()).unwrap();
             assert_eq!(units, path.as_os_str().encode_wide().collect::<Vec<_>>());
         }
+        let uncertain = serde_json::to_value(Reply::Uncertain {
+            record: path,
+            reason: "worker response lost".into(),
+        })
+        .unwrap();
+        assert_eq!(uncertain["record"], value["source_attempt"]);
     }
 
     #[test]

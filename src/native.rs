@@ -20,11 +20,13 @@ fn request(command: Command, package: Option<VerifiedPackage>) -> Result<Request
             confirm_ns39,
         }),
         Command::Update {
+            path,
             allow_downgrade,
             confirm_ns39,
             record,
             ..
         } => Ok(Request::Update {
+            archive: path,
             package: package.ok_or("Missing verified package")?,
             confirm_ns39,
             record,
@@ -70,21 +72,6 @@ pub fn execute(command: Command, package: Option<VerifiedPackage>) -> Result<Val
     let cancelled = Arc::new(AtomicBool::new(false));
     updater::execute_raw(
         request,
-        &mut || cancelled.load(Ordering::SeqCst),
-        &mut |_| {},
-    )
-}
-#[cfg(target_os = "macos")]
-pub fn execute_main_worker(
-    command: Command,
-    package: VerifiedPackage,
-    lease: gulikit_platform::lock::ProcessLock,
-) -> Result<Value, AppError> {
-    let request = request(command, Some(package))?;
-    let cancelled = cancellation(&request)?;
-    updater::execute_main_worker(
-        request,
-        lease,
         &mut || cancelled.load(Ordering::SeqCst),
         &mut |_| {},
     )
