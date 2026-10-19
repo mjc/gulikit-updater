@@ -1056,6 +1056,30 @@
         "size": 345088,
         "sha256": "71e184637f619746afdac4e3b9e539a53c11d0ae01c02168faefc1e22d45f28a"
       }
+    },
+    {
+      "component": "bluetooth",
+      "version": "5.07",
+      "filename": "GuliKit_NS38_NS39_NS59_BT_V5.07.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "released_at": "2025-12-10",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2976391",
+      "changelog": "Fixed an issue where, if the controller had previously paired with a Switch in Switch mode, pressing the HOME button to power on while connected to a PC via USB cable would also wake up the paired Switch console.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "GuliKit_NS38_NS39_NS59_BT_V5.07.exe",
+      "published_hashes": [],
+      "path": "/kk3-max/bluetooth/v5.07/GuliKit_NS38_NS39_NS59_BT_V5.07.zip",
+      "size": 1148144,
+      "sha256": "6ce3db166031d30ff9f61e83387c6f8cb0475eef57321c2347ee32afe9152dad",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "3dc8fd352597de4b619efcf139933fbbccc5c1c335aa580455bf5f64f4b9c97a"
+      },
+      "payload": {
+        "size": 345088,
+        "sha256": "2e0e89d458eb39f30eaa1ba9f4038039ad95c2eeed0e392ecfb0d5ece3441826"
+      }
     }
   ]
 }
