@@ -1025,11 +1025,15 @@ fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_l
     assert!(path.ends_with("revision-1.zip"));
 
     let record = snapshot.index().find(&path).unwrap().clone();
+    let cache_path = format!(
+        "/Users/archive-test/Library/Caches/gulikit-updater/archives/{}/NS39_KK3_MAX_V5.9_revision-1.zip",
+        "0123456789abcdef".repeat(4)
+    );
     app.archive_events
         .as_ref()
         .unwrap()
         .send(ArchiveEvent::Downloaded {
-            path: "firmware-cache.zip".into(),
+            path: cache_path.clone().into(),
             record: Box::new(record),
             inspection: Ok(DownloadInspection::Supported(live_fixtures::package())),
         })
@@ -1037,7 +1041,16 @@ fn archive_browser_keeps_many_versions_compact_and_hands_supported_download_to_l
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
     layout(&app.ui);
     assert_eq!(app.ui.get_state().page, Page::Ready);
-    assert_eq!(app.ui.get_state().filename, "firmware-cache.zip");
+    assert_eq!(
+        app.ui.get_state().filename,
+        "NS39_KK3_MAX_V5.9_revision-1.zip"
+    );
+    assert!(app.ui.get_state().archive_status.contains(&cache_path));
+    save_preview(&app.ui, "archive-browser-downloaded-long-cache-path");
+    inside_window(&app.ui, &element(&app.ui, "Close firmware archive"));
+    inside_window(&app.ui, &element(&app.ui, "Download and inspect"));
+    click(&app.ui, "Close firmware archive");
+    inside_window(&app.ui, &element(&app.ui, "Browse firmware archive"));
     assert!(!app.ui.get_state().connected);
 }
 

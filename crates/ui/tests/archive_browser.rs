@@ -120,6 +120,34 @@ fn component_filter_keeps_distinct_same_version_archives_selectable() {
 }
 
 #[test]
+fn version_sort_orders_numeric_prefix_and_alpha_suffix() {
+    let versions = ["3.5", "3.6", "3.6a", "3.10"];
+    let records = versions
+        .iter()
+        .rev()
+        .map(|version| {
+            record(
+                ArchiveComponent::Base,
+                version,
+                &format!("v{version}.zip"),
+                version.as_bytes(),
+            )
+        })
+        .collect();
+    let (browser, _requests) = browser(snapshot(REVISION_1, records));
+
+    assert_eq!(
+        browser.view().releases,
+        [
+            "3.10 · v3.10.zip",
+            "3.6a · v3.6a.zip",
+            "3.6 · v3.6.zip",
+            "3.5 · v3.5.zip"
+        ]
+    );
+}
+
+#[test]
 fn selected_download_is_pinned_and_background_refresh_cannot_replace_it() {
     let first = record(ArchiveComponent::Base, "5.9", "same.zip", b"revision one");
     let second = record(ArchiveComponent::Base, "5.9", "same.zip", b"revision two");

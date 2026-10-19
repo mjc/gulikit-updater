@@ -217,10 +217,13 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 VerticalLayout {
                                     Text { text: "Firmware archive"; color: #293e2d; font-size: 15px; font-weight: 600; }
-                                    Label { text: root.archive-open ? root.state.archive-status : "Browse archived KK3 Max firmware releases"; font-size: 11px; }
+                                    Label {
+                                        text: root.archive-open ? root.state.archive-status : "Browse archived KK3 Max firmware releases";
+                                        font-size: 11px; wrap: char-wrap; min-width: 0px; horizontal-stretch: 1;
+                                    }
                                 }
                                 Rectangle { horizontal-stretch: 1; background: transparent; }
-                                ActionButton { text: root.archive-open ? "Close archive" : "Browse archive"; quiet: true; accessible-label: "Browse firmware archive"; clicked => { root.archive-open = !root.archive-open; } }
+                                ActionButton { text: root.archive-open ? "Close archive" : "Browse archive"; quiet: true; accessible-label: root.archive-open ? "Close firmware archive" : "Browse firmware archive"; clicked => { root.archive-open = !root.archive-open; } }
                             }
                             if root.archive-open: VerticalLayout {
                                 spacing: 8px;

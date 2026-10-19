@@ -493,10 +493,16 @@ fn details(record: &ReleaseRecord) -> String {
 }
 
 fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    fn parts(value: &str) -> Vec<u64> {
+    fn parts(value: &str) -> Vec<(u64, &str)> {
         value
             .split('.')
-            .map(|part| part.parse().unwrap_or(0))
+            .map(|part| {
+                let suffix_start = part
+                    .find(|character: char| !character.is_ascii_digit())
+                    .unwrap_or(part.len());
+                let (numeric, suffix) = part.split_at(suffix_start);
+                (numeric.parse().unwrap_or(0), suffix)
+            })
             .collect()
     }
     parts(left).cmp(&parts(right))
