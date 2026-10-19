@@ -1324,6 +1324,28 @@
         "size": 2245632,
         "sha256": "18e3875f5ce99c05ac665bfd6696e888bb43bd9119b5499a0699b7c257fd618e"
       }
+    },
+    {
+      "product": "kingkong2-pro",
+      "member_kind": "opaque_updater_exe",
+      "component": "bluetooth",
+      "version": "1.19",
+      "filename": "GuliKit_KingKong2_NS08_NS09_V1.19.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/593338.html",
+      "released_at": "2025-07-03",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/161183",
+      "changelog": "Optimized Nintendo Switch Bluetooth compatibility and NFC compatibility (NS09).",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/593338.html",
+      "firmware_member": "GuliKit_KingKong2_NS08_NS09_V1.19.exe",
+      "published_hashes": [],
+      "path": "/kingkong2-pro/bluetooth/v1.19/GuliKit_KingKong2_NS08_NS09_V1.19.zip",
+      "size": 1167666,
+      "sha256": "306c1d238a3bd8194473f869b47e783551b755b65e99774a5f3216dd82cd6e18",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "18e3875f5ce99c05ac665bfd6696e888bb43bd9119b5499a0699b7c257fd618e"
+      }
     }
   ]
 }
