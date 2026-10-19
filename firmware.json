@@ -1728,6 +1728,32 @@
         "size": 131072,
         "sha256": "787fb076258743dc263bf188d52aa4a114875b2d9d639e53a3d116efc032f676"
       }
+    },
+    {
+      "product": "hyperlink-2-pc05",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "2.0",
+      "filename": "PC05_V2.0.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/1092663.html",
+      "released_at": "2026-05-27",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/2998531",
+      "changelog": "Added support for the latest firmware of GuliKit TT Series, ES Series, and Elves 2 Series controllers.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/1092663.html",
+      "firmware_member": "PC05_V2.0.bin",
+      "published_hashes": [],
+      "path": "/hyperlink-2-pc05/base/v2.0/PC05_V2.0.zip",
+      "size": 64152,
+      "sha256": "801c6e398aea2851533e5989f782bd6c6ea7d176de095245c9ec368087f12d04",
+      "firmware_file": {
+        "size": 88392,
+        "sha256": "9a3201856e40f64e3a9612e8696f13d62c8c0d9d9c6e4ad0f0b8d05ca19dd37d"
+      },
+      "payload": {
+        "size": 88392,
+        "sha256": "9a3201856e40f64e3a9612e8696f13d62c8c0d9d9c6e4ad0f0b8d05ca19dd37d"
+      }
     }
   ]
 }
