@@ -58,7 +58,7 @@ unsafe extern "C" {
         capacity: usize,
     ) -> i32;
     fn gu_usb_clear_stall(value: *mut c_void, error: *mut c_char, capacity: usize) -> i32;
-    fn gu_usb_close(value: *mut c_void, surrender: i32);
+    fn gu_usb_surrender(value: *mut c_void);
     #[cfg(test)]
     fn gu_max_lun_result(succeeded: i32, actual: usize, code: i32) -> i32;
     fn gu_usb_max_lun(value: *mut c_void, lun: *mut u8, error: *mut c_char, capacity: usize)
@@ -494,25 +494,19 @@ impl NativeUsb {
     fn pointer(&self) -> Result<NonNull<c_void>, String> {
         self.ptr.ok_or_else(|| "USB claim is closed".into())
     }
-    fn close(mut self, surrender: bool) {
+    fn surrender(&mut self) {
         if let Some(ptr) = self.ptr.take() {
             // SAFETY: unique bridge ownership, consumed exactly once. Explicit
             // destruction precedes ARC release; later destruction is idempotent.
             unsafe {
-                gu_usb_close(ptr.as_ptr(), i32::from(surrender));
+                gu_usb_surrender(ptr.as_ptr());
             }
         }
     }
 }
 impl Drop for NativeUsb {
     fn drop(&mut self) {
-        // Panic/early-drop must never choose reset after an unknown F0. Normal
-        // read-only reset/restoration is an explicit successful finish phase.
-        if let Some(ptr) = self.ptr.take() {
-            unsafe {
-                gu_usb_close(ptr.as_ptr(), 1);
-            }
-        }
+        self.surrender();
     }
 }
 fn transfer_result(
@@ -684,7 +678,7 @@ impl BluetoothSession {
     pub fn surrender(mut self) {
         self.finished = true;
         if let Some(usb) = self.usb.take() {
-            usb.into_inner().close(true);
+            usb.into_inner().surrender();
         }
     }
 
@@ -1020,8 +1014,8 @@ impl BluetoothPort for BluetoothSession {
         }
         self.finished = true;
         if let Some(mut usb) = self.usb.take() {
-            let preserve = usb.firmware_may_have_been_submitted();
-            let detached = preserve
+            let firmware_submitted = usb.firmware_may_have_been_submitted();
+            let detached = firmware_submitted
                 && self
                     .session
                     .completion_observation()
@@ -1030,21 +1024,29 @@ impl BluetoothPort for BluetoothSession {
                     });
             if usb.io_mut().diagnostic {
                 eprintln!(
-                    "Cleanup disposition: {}",
-                    if preserve {
-                        "no-reset DeviceSurrender; driver restoration pending"
-                    } else {
-                        "read-only ordinary destroy; documented USB reset and driver rematch"
-                    }
+                    "Cleanup disposition: no-reset DeviceSurrender; driver restoration pending"
                 );
             }
-            usb.into_inner().close(preserve);
-            if preserve && !detached {
-                return Err(crate::acquisition::SURRENDER_PENDING_NOTICE.into());
-            }
+            finish_bluetooth_transport(firmware_submitted, detached, || {
+                usb.into_inner().surrender();
+            })?;
         }
         Ok(())
     }
+}
+
+fn finish_bluetooth_transport(
+    firmware_submitted: bool,
+    detached: bool,
+    surrender: impl FnOnce(),
+) -> Result<(), String> {
+    // Resetting after an F1 read exits Bluetooth update mode. Use the same
+    // no-reset surrender for inspection, verification, cancellation and errors.
+    surrender();
+    if firmware_submitted && !detached {
+        return Err(crate::acquisition::SURRENDER_PENDING_NOTICE.into());
+    }
+    Ok(())
 }
 impl Drop for BluetoothSession {
     fn drop(&mut self) {
@@ -1068,6 +1070,31 @@ mod tests {
     use super::{
         NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
     };
+    #[test]
+    fn bluetooth_readback_cleanup_surrenders_without_resetting() {
+        let mut releases = Vec::new();
+        super::finish_bluetooth_transport(false, false, || releases.push("surrender")).unwrap();
+        assert_eq!(releases, ["surrender"], "reading F1 must release ownership");
+    }
+
+    #[test]
+    fn bluetooth_write_cleanup_keeps_the_pending_restoration_notice() {
+        for detached in [false, true] {
+            let mut releases = Vec::new();
+            let result = super::finish_bluetooth_transport(true, detached, || {
+                releases.push("surrender");
+            });
+            assert_eq!(releases, ["surrender"]);
+            if detached {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    crate::acquisition::SURRENDER_PENDING_NOTICE
+                );
+            }
+        }
+    }
     #[test]
     fn bluetooth_capture_refuses_media_including_unmounted_disks() {
         super::bluetooth_media_capability(&[]).unwrap();

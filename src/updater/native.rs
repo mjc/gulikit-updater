@@ -273,16 +273,14 @@ fn probe(
             (target, raw, version.to_string(), None, cleanup_errors)
         }
         Component::Bluetooth => {
-            let mut port = Session::open(confirm_ns39, Component::Bluetooth)?.bluetooth()?;
+            let port = Session::open(confirm_ns39, Component::Bluetooth)?.bluetooth()?;
             let target = port.target().clone();
-            let qualified_lun = port.qualified_lun();
-            let (raw, cleanup) = read_with_cleanup(
-                &mut port,
-                gulikit_platform::macos::BluetoothSession::read_info,
-                BluetoothPort::finish,
-                &mut *cancelled,
-            );
-            let mut cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
+            let VersionReadback {
+                raw,
+                cleanup,
+                qualified_lun,
+            } = read_bluetooth_version(port, cancelled);
+            let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
             let raw = match raw {
                 Ok(raw) => raw,
                 Err(error) => return Err(AppError::from(error).with_cleanup(cleanup_errors)),
@@ -292,18 +290,6 @@ fn probe(
                 Err(error) => {
                     return Err(AppError::from(format!("{error}; raw={raw:02x?}"))
                         .with_cleanup(cleanup_errors));
-                }
-            };
-            // Read-only cleanup may reset USB and restart driver matching.
-            // Discover again before returning an attachment for later operations.
-            let target = match discover()
-                .and_then(|snapshot| post_cleanup_target(&target, &snapshot, confirm_ns39))
-            {
-                Ok(current) => current,
-                Err(error) => {
-                    cleanup_errors
-                        .push(format!("Attachment after cleanup is unconfirmed: {error}"));
-                    target
                 }
             };
             (target, raw, version, qualified_lun, cleanup_errors)
@@ -347,11 +333,7 @@ fn verify_attempt(
             )?;
             Ok((target, journal))
         })?;
-        (
-            target,
-            journal,
-            read_bluetooth_verification(port, cancelled),
-        )
+        (target, journal, read_bluetooth_version(port, cancelled))
     } else {
         let mut session = Session::open(confirm_ns39, component)?;
         let target = session.target.clone();
@@ -487,7 +469,7 @@ fn read_verification_version(
             },
         },
         Component::Bluetooth => match session.bluetooth() {
-            Ok(port) => read_bluetooth_verification(port, cancelled),
+            Ok(port) => read_bluetooth_version(port, cancelled),
             Err(error) => VersionReadback {
                 raw: Err(error.error),
                 cleanup: if error.cleanup_errors.is_empty() {
@@ -502,7 +484,7 @@ fn read_verification_version(
 }
 
 #[cfg(target_os = "macos")]
-fn read_bluetooth_verification(
+fn read_bluetooth_version(
     mut port: gulikit_platform::macos::BluetoothSession,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> VersionReadback {
@@ -567,21 +549,6 @@ pub(super) fn record_path(path: &std::path::Path) -> Value {
             serde_json::json!(path.as_os_str().encode_wide().collect::<Vec<_>>());
     }
     value
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn post_cleanup_target(
-    original: &gulikit_platform::discovery::NativeCandidate,
-    snapshot: &gulikit_platform::discovery::Snapshot,
-    confirmed: bool,
-) -> Result<gulikit_platform::discovery::NativeCandidate, String> {
-    let current = snapshot.select(confirmed, gulikit_core::package::Component::Bluetooth)?;
-    if current.ancestor != original.ancestor {
-        return Err(
-            "The physical attachment changed during cleanup. Confirm and inspect it again.".into(),
-        );
-    }
-    Ok(current)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -811,59 +778,6 @@ mod tests {
         );
         // This production boundary returns before Session::open; the test never
         // creates a controller session or verification output record.
-    }
-
-    #[test]
-    fn probe_attachment_is_refreshed_after_cleanup_without_adopting_a_new_physical_unit() {
-        use gulikit_platform::discovery::{NativeCandidate, Snapshot};
-        let original:NativeCandidate=serde_json::from_value(serde_json::json!({"ancestor":42,"generation":7,"main_volume_candidate":false,"bluetooth_transport_candidate":true,"observed_profile":true,"conflicting_model":false,"storage_identities":[],"disks":[],"mount":null})).unwrap();
-        let mut current = original.clone();
-        current.generation = 8;
-        assert_eq!(
-            post_cleanup_target(
-                &original,
-                &Snapshot {
-                    candidates: vec![current.clone()],
-                    incomplete: vec![]
-                },
-                true
-            )
-            .unwrap(),
-            current
-        );
-        let mut replaced = current.clone();
-        replaced.ancestor = 43;
-        for snapshot in [
-            Snapshot {
-                candidates: vec![replaced.clone()],
-                incomplete: vec![],
-            },
-            Snapshot {
-                candidates: vec![current.clone(), replaced],
-                incomplete: vec![],
-            },
-            Snapshot {
-                candidates: vec![],
-                incomplete: vec![],
-            },
-            Snapshot {
-                candidates: vec![current.clone()],
-                incomplete: vec!["discovery pending".into()],
-            },
-        ] {
-            assert!(post_cleanup_target(&original, &snapshot, true).is_err());
-        }
-        assert!(
-            post_cleanup_target(
-                &original,
-                &Snapshot {
-                    candidates: vec![current],
-                    incomplete: vec![]
-                },
-                false
-            )
-            .is_err()
-        );
     }
 
     #[test]

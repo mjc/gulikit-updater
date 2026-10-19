@@ -392,6 +392,11 @@ void gu_watch_close(void *context) {
 @end
 @implementation GuTransport
 @end
+static void surrender_transport(GuTransport *transport) {
+  [transport.interface destroy];
+  // DeviceSurrender is bit0 in the public Apple SDK; ordinary destroy resets.
+  [transport.device destroyWithOptions:1U];
+}
 static void error_text(char *buffer, size_t size, NSString *text) {
   if (size)
     snprintf(buffer, size, "%s", text.UTF8String ?: "unknown IOUSBHost error");
@@ -436,9 +441,8 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
     if (transport.trace)
       fprintf(stderr, "USB_CAPTURE_BEGIN mono=%.6f ancestor=%llu\n",
               trace_time(), (unsigned long long)id);
-    // Modern Capture includes MSC interfaces. Ordinary destroy
-    // resets/rematches; Rust selects explicit DeviceSurrender after any
-    // possible firmware submission.
+    // Modern Capture includes MSC interfaces. DeviceSurrender releases capture
+    // without resetting update mode, including when acquisition fails.
     transport.device = [[IOUSBHostDevice alloc]
         initWithIOService:service
                   options:IOUSBHostObjectInitOptionsDeviceCapture
@@ -465,7 +469,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
           message, capacity,
           [NSString stringWithFormat:@"Capture did not reach quiet state: 0x%x",
                                      quiet]);
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     io_iterator_t children = 0;
@@ -474,7 +478,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
     IOObjectRelease(service);
     if (kr) {
       error_text(message, capacity, @"Interface enumeration failed");
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     io_service_t child;
@@ -501,8 +505,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
     if (matches != 1 || !transport.interface) {
       error_text(message, capacity,
                  error.description ?: @"Expected one BOT interface");
-      [transport.interface destroy];
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     const IOUSBInterfaceDescriptor *interface =
@@ -511,8 +514,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
         transport.interface.configurationDescriptor;
     if (!interface || !config) {
       error_text(message, capacity, @"Descriptors unavailable after capture");
-      [transport.interface destroy];
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     const uint8_t *bytes = (const uint8_t *)config;
@@ -552,8 +554,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
         ![transport.input respondsToSelector:@selector(clearStallWithError:)]) {
       error_text(message, capacity,
                  error.description ?: @"Invalid bulk endpoint descriptors");
-      [transport.interface destroy];
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     transport.inputAddress = input;
@@ -626,18 +627,14 @@ int gu_usb_clear_stall(void *context, char *message, size_t capacity) {
     return result ? 0 : -1;
   }
 }
-void gu_usb_close(void *context, int surrender) {
+void gu_usb_surrender(void *context) {
   @autoreleasepool {
     GuTransport *transport = CFBridgingRelease(context);
     if (transport.trace)
-      fprintf(stderr, "USB_CLOSE_BEGIN mono=%.6f surrender=%d\n", trace_time(),
-              surrender);
-    [transport.interface destroy];
-    // DeviceSurrender is bit0 in the current public Apple SDK.
-    [transport.device destroyWithOptions:surrender ? 1U : 0U];
+      fprintf(stderr, "USB_CLOSE_BEGIN mono=%.6f surrender=1\n", trace_time());
+    surrender_transport(transport);
     if (transport.trace)
-      fprintf(stderr, "USB_CLOSE_END mono=%.6f surrender=%d\n", trace_time(),
-              surrender);
+      fprintf(stderr, "USB_CLOSE_END mono=%.6f surrender=1\n", trace_time());
   }
 }
 int gu_max_lun_result(int succeeded, size_t actual, int32_t code) {
