@@ -624,6 +624,30 @@
         "size": 48512,
         "sha256": "9c266bbc17bc68209fd021774adfa973c31c943af8069204261ea2995927afe0"
       }
+    },
+    {
+      "component": "base",
+      "version": "5.1",
+      "filename": "KK3_NS38_NS39_V5.1.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/history",
+      "released_at": null,
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41167/download",
+      "changelog": "1. Optimized the wireless connection, and increased the Bluetooth polling rate in Xinput mode to 170Hz.\r\n2. Added the function of power off by pressing and holding the Home button for 4 seconds.\r\n3. Controller reconnect time increased from 20 seconds to 70 seconds.\r\n4. Added the function that the controller does not shut down when it is USB wired connection.\r\n5. The automatic shutdown has been increased from 10 minutes to 15 minutes when the controller is inactive.",
+      "changelog_source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-firmware.38417/version/41167/download",
+      "firmware_member": "NS39_KK3_MAX_V5.1.bin",
+      "published_hashes": [],
+      "path": "/kk3-max/base/v5.1/KK3_NS38_NS39_V5.1.zip",
+      "size": 100025,
+      "sha256": "33273fe0445a5a7df905ab0268e79bbc15070ae4a580faed3996e93b8f2d0375",
+      "firmware_file": {
+        "size": 48552,
+        "sha256": "ad88654e54021c81411bdb83b3e914be2c7f3a1d6755e6351f17d2f8c5a4621e"
+      },
+      "payload": {
+        "size": 48552,
+        "sha256": "ad88654e54021c81411bdb83b3e914be2c7f3a1d6755e6351f17d2f8c5a4621e"
+      }
     }
   ]
 }
