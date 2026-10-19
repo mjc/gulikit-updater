@@ -11,6 +11,17 @@ pub(crate) fn firmware_bytes(
     metadata: &ReleaseMetadata,
     zip: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), GitArchiveError> {
+    if metadata.component == Component::Base
+        && !metadata
+            .firmware_member
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("bin"))
+    {
+        return Err(invalid(
+            "selected base firmware member must have a .bin extension",
+        ));
+    }
+
     let mut archive = zip::ZipArchive::new(Cursor::new(zip)).map_err(invalid)?;
     let member = archive
         .by_name(&metadata.firmware_member)
@@ -82,6 +93,33 @@ fn invalid(error: impl std::fmt::Display) -> GitArchiveError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    fn metadata(firmware_member: &str) -> ReleaseMetadata {
+        ReleaseMetadata {
+            component: Component::Base,
+            version: "5.9".to_owned(),
+            filename: "firmware.zip".to_owned(),
+            source_url: "https://example.com/release".to_owned(),
+            released_at: None,
+            retrieved_at: None,
+            retrieved_from: None,
+            changelog: None,
+            changelog_source_url: None,
+            firmware_member: firmware_member.to_owned(),
+            published_hashes: Vec::new(),
+        }
+    }
+
+    fn zip_with_member(name: &str, content: &[u8]) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(name, SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(content).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
 
     fn image() -> Vec<u8> {
         let mut bytes = vec![0; 0x800];
@@ -117,5 +155,16 @@ mod tests {
         let mut oversized = exe;
         oversized[0x4e4..0x4e8].copy_from_slice(&0xffff_ffff_u32.to_le_bytes());
         assert!(bluetooth_payload(&oversized, "3.24").is_err());
+    }
+
+    #[test]
+    fn base_firmware_member_must_be_a_bin_file() {
+        let readme_zip = zip_with_member("readme.txt", b"not firmware");
+        assert!(firmware_bytes(&metadata("readme.txt"), &readme_zip).is_err());
+
+        let firmware_zip = zip_with_member("firmware.BIN", b"firmware bytes");
+        let (file, payload) = firmware_bytes(&metadata("firmware.BIN"), &firmware_zip).unwrap();
+        assert_eq!(file, b"firmware bytes");
+        assert_eq!(payload, b"firmware bytes");
     }
 }

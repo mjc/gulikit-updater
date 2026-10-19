@@ -85,11 +85,15 @@ impl ReleaseMetadata {
         validate_version(&self.version)?;
         validate_filename(&self.filename)?;
         validate_https_url(&self.source_url, "source_url")?;
-        if let Some(date) = &self.released_at {
-            validate_text(date, MAX_RELEASED_AT_BYTES, "released_at")?;
+        if let Some(date) = &self.released_at
+            && (date.len() > MAX_RELEASED_AT_BYTES || !valid_calendar_date(date))
+        {
+            return Err(Error::InvalidMetadata("released_at"));
         }
-        if let Some(date) = &self.retrieved_at {
-            validate_text(date, MAX_RELEASED_AT_BYTES, "retrieved_at")?;
+        if let Some(date) = &self.retrieved_at
+            && (date.len() > MAX_RELEASED_AT_BYTES || !valid_utc_timestamp(date))
+        {
+            return Err(Error::InvalidMetadata("retrieved_at"));
         }
         if let Some(url) = &self.retrieved_from {
             validate_https_url(url, "retrieved_from")?;
@@ -614,6 +618,7 @@ fn verify_content(
 }
 
 fn is_sha256_algorithm(algorithm: &str) -> bool {
+    let algorithm = algorithm.trim();
     algorithm.eq_ignore_ascii_case("sha256") || algorithm.eq_ignore_ascii_case("sha-256")
 }
 
@@ -628,7 +633,74 @@ fn claim_matches(
         HashTarget::FirmwareFile => firmware_file,
         HashTarget::Payload => payload,
     };
-    claim.value.eq_ignore_ascii_case(&digest.sha256)
+    claim.value.trim().eq_ignore_ascii_case(&digest.sha256)
+}
+
+fn valid_calendar_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let Some(year) = parse_decimal(&bytes[0..4]) else {
+        return false;
+    };
+    let Some(month) = parse_decimal(&bytes[5..7]) else {
+        return false;
+    };
+    let Some(day) = parse_decimal(&bytes[8..10]) else {
+        return false;
+    };
+    if year == 0 || !(1..=12).contains(&month) {
+        return false;
+    }
+    let days_in_month = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=days_in_month).contains(&day)
+}
+
+fn valid_utc_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || !bytes[..10].is_ascii()
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return false;
+    }
+    if !valid_calendar_date(&value[..10]) {
+        return false;
+    }
+    let Some(hour) = parse_decimal(&bytes[11..13]) else {
+        return false;
+    };
+    let Some(minute) = parse_decimal(&bytes[14..16]) else {
+        return false;
+    };
+    let Some(second) = parse_decimal(&bytes[17..19]) else {
+        return false;
+    };
+    if hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    if bytes[19] == b'Z' {
+        return bytes.len() == 20;
+    }
+    bytes[19] == b'.'
+        && bytes.last() == Some(&b'Z')
+        && bytes.len() > 21
+        && bytes[20..bytes.len() - 1].iter().all(u8::is_ascii_digit)
+}
+
+fn parse_decimal(bytes: &[u8]) -> Option<u32> {
+    bytes.iter().try_fold(0_u32, |value, byte| {
+        byte.is_ascii_digit()
+            .then(|| value * 10 + u32::from(*byte - b'0'))
+    })
 }
 
 fn validate_version(value: &str) -> Result<(), Error> {

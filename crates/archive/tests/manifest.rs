@@ -212,8 +212,8 @@ fn published_sha256_claims_must_match_the_measured_target() {
     let mut metadata = metadata(Component::Base, "5.9", "firmware.zip");
     metadata.published_hashes.push(PublishedHash {
         target: HashTarget::FirmwareFile,
-        algorithm: "sHa-256".to_owned(),
-        value: sample.firmware_file().sha256.to_ascii_uppercase(),
+        algorithm: " sHa-256 ".to_owned(),
+        value: format!(" {} ", sample.firmware_file().sha256.to_ascii_uppercase()),
         source_url: "https://community.example/checksums".to_owned(),
     });
     let measured = ReleaseRecord::measure(
@@ -225,10 +225,22 @@ fn published_sha256_claims_must_match_the_measured_target() {
     .unwrap();
     assert_eq!(
         measured.metadata().published_hashes[0].value,
-        sample.firmware_file().sha256.to_ascii_uppercase()
+        format!(" {} ", sample.firmware_file().sha256.to_ascii_uppercase())
+    );
+    let mut measured_index = FirmwareIndex::empty();
+    measured_index.add(measured).unwrap();
+    let measured_json: Value = serde_json::from_slice(&measured_index.to_json().unwrap()).unwrap();
+    assert_eq!(
+        measured_json["releases"][0]["published_hashes"][0]["algorithm"],
+        " sHa-256 "
+    );
+    assert_eq!(
+        measured_json["releases"][0]["published_hashes"][0]["value"],
+        format!(" {} ", sample.firmware_file().sha256.to_ascii_uppercase())
     );
 
-    metadata.published_hashes[0].value = "0".repeat(64);
+    metadata.published_hashes[0].algorithm = " SHA-256 ".to_owned();
+    metadata.published_hashes[0].value = format!(" {} ", "0".repeat(64));
     assert_eq!(
         ReleaseRecord::measure(
             metadata,
@@ -238,6 +250,38 @@ fn published_sha256_claims_must_match_the_measured_target() {
         ),
         Err(Error::PublishedHashMismatch)
     );
+}
+
+#[test]
+fn dates_require_real_calendar_days_and_strict_utc_timestamps() {
+    let mut valid = metadata(Component::Base, "5.9", "firmware.zip");
+    valid.released_at = Some("2024-02-29".to_owned());
+    valid.retrieved_at = Some("2024-02-29T23:59:59.123456Z".to_owned());
+    assert!(ReleaseRecord::measure(valid, b"zip", b"member", b"payload").is_ok());
+
+    for date in ["2023-02-29", "2024-02-30", "2024-2-09", "0000-01-01"] {
+        let mut invalid = metadata(Component::Base, "5.9", "firmware.zip");
+        invalid.released_at = Some(date.to_owned());
+        assert_eq!(
+            ReleaseRecord::measure(invalid, b"zip", b"member", b"payload"),
+            Err(Error::InvalidMetadata("released_at"))
+        );
+    }
+
+    for timestamp in [
+        "2026-02-30T12:00:00Z",
+        "2026-10-18 12:00:00Z",
+        "2026-10-18T12:00:00+00:00",
+        "2026-10-18T12:00:00",
+        "2026-10-18T12:00:00.Z",
+    ] {
+        let mut invalid = metadata(Component::Base, "5.9", "firmware.zip");
+        invalid.retrieved_at = Some(timestamp.to_owned());
+        assert_eq!(
+            ReleaseRecord::measure(invalid, b"zip", b"member", b"payload"),
+            Err(Error::InvalidMetadata("retrieved_at"))
+        );
+    }
 }
 
 #[test]

@@ -207,12 +207,16 @@ impl GitArchive {
             .tree
             .get(path)
             .ok_or(GitArchiveError::InvalidTree)?;
+        self.verified_zip(oid, record)
+    }
+
+    fn verified_zip(&self, oid: &str, record: &ReleaseRecord) -> Result<Vec<u8>, GitArchiveError> {
         let bytes = self.read_blob(oid, MAX_ARCHIVE_BYTES)?;
+        validate_zip(&bytes)?;
         let (firmware_file, payload) = crate::content::firmware_bytes(record.metadata(), &bytes)?;
         record
             .verify(&bytes, &firmware_file, &payload)
             .map_err(|_| GitArchiveError::InvalidBlob)?;
-        validate_zip(&bytes)?;
         Ok(bytes)
     }
 
@@ -269,7 +273,7 @@ impl GitArchive {
             let index = FirmwareIndex::parse(&index_bytes)?;
             validate_tree_paths(&tree, &index)?;
 
-            if let Some(parent) = &previous {
+            let introduced = if let Some(parent) = &previous {
                 if index.releases().len() != parent.index.releases().len() + 1
                     || parent.index.releases().iter().any(|old| {
                         index.find(old.path()) != Some(old)
@@ -282,33 +286,23 @@ impl GitArchive {
                 {
                     return Err(GitArchiveError::InvalidHistory("commit is not append-only"));
                 }
-                let new = index
+                index
                     .releases()
                     .iter()
                     .find(|release| parent.index.find(release.path()).is_none())
-                    .ok_or(GitArchiveError::InvalidHistory("new release is missing"))?;
-                let new_path = new
-                    .path()
-                    .strip_prefix('/')
-                    .ok_or(GitArchiveError::InvalidTree)?;
-                let new_oid = tree.get(new_path).ok_or(GitArchiveError::InvalidTree)?;
-                if self.object_size(new_oid)? != new.size() {
-                    return Err(GitArchiveError::InvalidBlob);
-                }
+                    .ok_or(GitArchiveError::InvalidHistory("new release is missing"))?
             } else {
                 if index.releases().len() != 1 {
                     return Err(GitArchiveError::InvalidHistory("root must add one release"));
                 }
-                let first = &index.releases()[0];
-                let path = first
-                    .path()
-                    .strip_prefix('/')
-                    .ok_or(GitArchiveError::InvalidTree)?;
-                let blob_oid = tree.get(path).ok_or(GitArchiveError::InvalidTree)?;
-                if self.object_size(blob_oid)? != first.size() {
-                    return Err(GitArchiveError::InvalidBlob);
-                }
-            }
+                &index.releases()[0]
+            };
+            let path = introduced
+                .path()
+                .strip_prefix('/')
+                .ok_or(GitArchiveError::InvalidTree)?;
+            let blob = tree.get(path).ok_or(GitArchiveError::InvalidTree)?;
+            self.verified_zip(blob, introduced)?;
             previous = Some(Snapshot {
                 tree_oid,
                 index,
@@ -353,7 +347,7 @@ impl GitArchive {
         if self.object_size(oid)? > MAX_TREE_BYTES {
             return Err(GitArchiveError::InvalidTree);
         }
-        let bytes = self.git(&["ls-tree", "-rz", "--full-tree", oid], None)?;
+        let bytes = self.tree_output(oid)?;
         let mut tree = BTreeMap::new();
         for entry in bytes
             .split(|byte| *byte == 0)
@@ -388,6 +382,37 @@ impl GitArchive {
             }
         }
         Ok(tree)
+    }
+
+    fn tree_output(&self, oid: &str) -> Result<Vec<u8>, GitArchiveError> {
+        let mut child = clean_git()
+            .current_dir(&self.path)
+            .arg("--git-dir=.")
+            .args(["ls-tree", "-rz", "--full-tree", oid])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut bytes = Vec::new();
+        let read = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("missing tree output"))
+            .and_then(|stdout| stdout.take(MAX_TREE_BYTES + 1).read_to_end(&mut bytes));
+        if let Err(error) = read {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.into());
+        }
+        if bytes.len() as u64 > MAX_TREE_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GitArchiveError::InvalidTree);
+        }
+        if !child.wait()?.success() {
+            return Err(GitArchiveError::InvalidTree);
+        }
+        Ok(bytes)
     }
 
     fn read_blob(&self, oid: &str, limit: usize) -> Result<Vec<u8>, GitArchiveError> {

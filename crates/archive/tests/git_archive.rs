@@ -266,6 +266,137 @@ fn duplicate_identity_and_invalid_zip_leave_the_archive_ref_unchanged() {
 }
 
 #[test]
+fn signed_same_length_blob_replacement_is_rejected_before_listing_or_extending() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SignedFixture::new(temp.path());
+    let repo = temp.path().join("archive.git");
+    let archive = GitArchive::init(&repo).unwrap();
+    configure_archive(&repo, &fixture, true);
+    let package = temp.path().join("original.zip");
+    fs::write(&package, synthetic_zip("firmware.bin", b"one")).unwrap();
+    let original = archive
+        .import(&package, metadata(Component::Base, "5.9", "original.zip"))
+        .unwrap();
+    let replacement = temp.path().join("replacement.zip");
+    fs::write(&replacement, synthetic_zip("firmware.bin", b"two")).unwrap();
+    assert_eq!(
+        fs::metadata(&package).unwrap().len(),
+        fs::metadata(&replacement).unwrap().len()
+    );
+    let blob = git_text(
+        &repo,
+        &[
+            "hash-object",
+            "-w",
+            "--no-filters",
+            &replacement.display().to_string(),
+        ],
+    );
+    git_repo(&repo, &["read-tree", &original]);
+    git_repo(
+        &repo,
+        &[
+            "update-index",
+            "--cacheinfo",
+            "100644",
+            &blob,
+            "kk3-max/base/v5.9/original.zip",
+        ],
+    );
+    let tree = git_text(&repo, &["write-tree"]);
+    let rewritten = git_text(
+        &repo,
+        &["commit-tree", &tree, "-S", "-m", "same-length invalid root"],
+    );
+    git_repo(&repo, &["update-ref", BRANCH, &rewritten, &original]);
+    assert!(matches!(
+        GitArchive::open(&repo),
+        Err(GitArchiveError::InvalidBlob)
+    ));
+    assert!(matches!(archive.index(), Err(GitArchiveError::InvalidBlob)));
+    assert!(matches!(
+        archive.import(&package, metadata(Component::Base, "5.8", "new.zip")),
+        Err(GitArchiveError::InvalidBlob)
+    ));
+    assert_eq!(git_text(&repo, &["rev-parse", BRANCH]), rewritten);
+}
+
+#[test]
+fn recursive_tree_expansion_is_rejected_despite_a_small_root_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = SignedFixture::new(temp.path());
+    let repo = temp.path().join("archive.git");
+    let archive = GitArchive::init(&repo).unwrap();
+    configure_archive(&repo, &fixture, true);
+    let package = temp.path().join("original.zip");
+    fs::write(&package, synthetic_zip("firmware.bin", b"one")).unwrap();
+    let original = archive
+        .import(&package, metadata(Component::Base, "5.9", "original.zip"))
+        .unwrap();
+    let blob = git_text(&repo, &["rev-parse", &format!("{original}:firmware.json")]);
+    let mut expanded_tree = Vec::new();
+    for n in 0..2400 {
+        expanded_tree.extend_from_slice(format!("100644 {n:04}{}\0", "x".repeat(230)).as_bytes());
+        expanded_tree.extend_from_slice(&hex::decode(&blob).unwrap());
+    }
+    let subtree_file = temp.path().join("subtree");
+    fs::write(&subtree_file, expanded_tree).unwrap();
+    let subtree = git_text(
+        &repo,
+        &[
+            "hash-object",
+            "-w",
+            "-t",
+            "tree",
+            &subtree_file.display().to_string(),
+        ],
+    );
+    let tree = git_repo(
+        &repo,
+        &["cat-file", "tree", &format!("{original}^{{tree}}")],
+    )
+    .stdout;
+    let mut root = tree;
+    root.extend_from_slice(b"40000 overflow\0");
+    root.extend_from_slice(&hex::decode(&subtree).unwrap());
+    assert!(root.len() < 1024);
+    let root_file = temp.path().join("root");
+    fs::write(&root_file, root).unwrap();
+    let tree = git_text(
+        &repo,
+        &[
+            "hash-object",
+            "-w",
+            "-t",
+            "tree",
+            &root_file.display().to_string(),
+        ],
+    );
+    let rewritten = git_text(
+        &repo,
+        &["commit-tree", &tree, "-S", "-m", "oversized recursive tree"],
+    );
+    git_repo(&repo, &["update-ref", BRANCH, &rewritten, &original]);
+    assert!(matches!(
+        GitArchive::open(&repo),
+        Err(GitArchiveError::InvalidTree)
+    ));
+}
+
+fn git_repo(repo: &Path, args: &[&str]) -> Output {
+    let mut command = Command::new("git");
+    command.current_dir(repo).arg("--git-dir=.").args(args);
+    run_git(&mut command)
+}
+
+fn git_text(repo: &Path, args: &[&str]) -> String {
+    String::from_utf8(git_repo(repo, args).stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+#[test]
 #[cfg(unix)]
 fn failed_gpg_signing_does_not_publish_a_ref() {
     let temp = tempfile::tempdir().unwrap();
