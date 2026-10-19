@@ -1032,6 +1032,30 @@
         "size": 361472,
         "sha256": "5a289a659f80d33ab9383c512a51066b12814903e028dca03aae416811cd07e5"
       }
+    },
+    {
+      "component": "bluetooth",
+      "version": "5.03",
+      "filename": "GuliKit_NS38_NS39_NS59_BT_V5.03.zip",
+      "source_url": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/history",
+      "released_at": "2025-10-15",
+      "retrieved_at": "2026-10-19T00:50:06Z",
+      "retrieved_from": "https://gbatemp.net/download/gulikit-kk3-max-ns39-kk3pro-elves2-pro-bluetooth-module-firmware.38620/version/41872/download",
+      "changelog": "Enable the Switch 2 wake-up feature.\nSPECIAL pairing method for wake-up support on Switch 2 : 1.1 Set the controller to Switch mode, then hold the pairing button to enter pairing mode. 1.2 Enter the Controller → Change Grip/Order interface on Switch 2. 1.3 After the Switch 2 displays that the controller has been paired successfully, take off any one of the left and right JOYCON controllers on Switch 2, wait until Switch 2 shows that the JOYCON controller has reconnected, and next install the JOYCON controller back onto Switch 2 to complete the special pairing process.\nDue to the limitations of the Bluetooth chip in the KK3 MAX controller, pairing this controller with the Switch 2 is not as same and convenient as other new controllers like ES. Thanks for your understanding.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/915900.html",
+      "firmware_member": "GuliKit_NS38_NS39_NS59_BT_V5.03.exe",
+      "published_hashes": [],
+      "path": "/kk3-max/bluetooth/v5.03/GuliKit_NS38_NS39_NS59_BT_V5.03.zip",
+      "size": 1147769,
+      "sha256": "b2b5e1873bb56128184859b58b584bcbff59f7961400edc125a65706f07f1088",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "019cedd5da677cb96a81b0514bf6e272107cef27fe6ec4189f8d115339dbee57"
+      },
+      "payload": {
+        "size": 345088,
+        "sha256": "71e184637f619746afdac4e3b9e539a53c11d0ae01c02168faefc1e22d45f28a"
+      }
     }
   ]
 }
