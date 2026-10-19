@@ -39,6 +39,21 @@ fn main() -> Result<(), slint::PlatformError> {
             "Usage: gulikit-ui [--demo]".into(),
         ));
     }
+    #[cfg(target_os = "macos")]
+    if !demo {
+        match elevation::ensure_administrator() {
+            Ok(elevation::StartupDisposition::Continue) => {}
+            Ok(elevation::StartupDisposition::Exit) => return Ok(()),
+            Err(error) => {
+                rfd::MessageDialog::new()
+                    .set_title("GuliKit Updater could not start")
+                    .set_description(&error)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                return Err(slint::PlatformError::Other(error));
+            }
+        }
+    }
     let (worker, events) = if demo {
         Worker::spawn(DemoDevice::default())
     } else {
@@ -57,6 +72,8 @@ fn main() -> Result<(), slint::PlatformError> {
     result
 }
 
+#[cfg(target_os = "macos")]
+mod elevation;
 mod live_ui;
 #[cfg(test)]
 mod ui_tests;

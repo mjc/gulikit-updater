@@ -1797,6 +1797,7 @@ dependencies = [
  "gulikit-platform",
  "gulikit-updater",
  "i-slint-backend-testing",
+ "nix",
  "rfd",
  "serde_json",
  "slint",

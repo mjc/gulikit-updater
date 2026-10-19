@@ -22,6 +22,9 @@ slint = { version = "=1.18.1", default-features = false, features = [
   "compat-1-18",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "0.31.3", features = ["user"] }
+
 [build-dependencies]
 slint-build = "=1.18.1"
 
