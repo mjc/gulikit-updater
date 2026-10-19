@@ -1754,6 +1754,32 @@
         "size": 88392,
         "sha256": "9a3201856e40f64e3a9612e8696f13d62c8c0d9d9c6e4ad0f0b8d05ca19dd37d"
       }
+    },
+    {
+      "product": "kk3-hyperlink-adapter",
+      "member_kind": "raw_binary",
+      "component": "base",
+      "version": "1.1",
+      "filename": "KK3_Hyperlink_Adapter_V1.1.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/983834.html",
+      "released_at": "2024-12-10",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/140991",
+      "changelog": "Optimized wireless connection for faster transmission and lower latency.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/983834.html",
+      "firmware_member": "KK3_Hyperlink_Adapter_V1.1.bin",
+      "published_hashes": [],
+      "path": "/kk3-hyperlink-adapter/base/v1.1/KK3_Hyperlink_Adapter_V1.1.zip",
+      "size": 90006,
+      "sha256": "5f30c0a23a118141fee1022e9f795ab32a4fe74c982288607e4d8a8aacd6a556",
+      "firmware_file": {
+        "size": 134744,
+        "sha256": "8511f6633024a7cf47842bc8e785e405f55e26db42b2939a0be06e44e0317f66"
+      },
+      "payload": {
+        "size": 134744,
+        "sha256": "8511f6633024a7cf47842bc8e785e405f55e26db42b2939a0be06e44e0317f66"
+      }
     }
   ]
 }
