@@ -1150,6 +1150,28 @@
         "size": 2245632,
         "sha256": "3dc8fd352597de4b619efcf139933fbbccc5c1c335aa580455bf5f64f4b9c97a"
       }
+    },
+    {
+      "product": "kk3-ns37",
+      "member_kind": "opaque_updater_exe",
+      "component": "bluetooth",
+      "version": "3.23",
+      "filename": "GuliKit_KK3_NS37_BT_V3.23.zip",
+      "source_url": "https://www.gulikit.com/newsinfo/998404.html",
+      "released_at": "2025-02-10",
+      "retrieved_at": null,
+      "retrieved_from": "https://www.gulikit.com/filedownload/152264",
+      "changelog": "Fixed key mapping when connecting controllers to GuliKit PC02 and NS26 adapters.",
+      "changelog_source_url": "https://www.gulikit.com/newsinfo/998404.html",
+      "firmware_member": "GuliKit_KK3_NS37_BT_V3.23.exe",
+      "published_hashes": [],
+      "path": "/kk3-ns37/bluetooth/v3.23/GuliKit_KK3_NS37_BT_V3.23.zip",
+      "size": 1184348,
+      "sha256": "8bd815dfffe52c50104416307761c81ab1ca3e42f461a4c29e02bb6cc3faed9b",
+      "firmware_file": {
+        "size": 2245632,
+        "sha256": "77a812e950160660b8ee47c4c8c3c6941c2f0e7489dc0f87420e0e281f1e22cd"
+      }
     }
   ]
 }
