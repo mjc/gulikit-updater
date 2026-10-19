@@ -318,6 +318,44 @@ impl From<gulikit_platform::acquisition::AcquisitionError> for ApplicationError 
 }
 mod native;
 
+/// An interactive frontend owns its inspected USB session on one worker thread.
+///
+/// Closing the owner surrenders an idle inspection without resetting the device;
+/// surrender does not restore operating-system drivers.
+#[derive(Default)]
+pub struct InteractiveUpdater {
+    #[cfg(target_os = "macos")]
+    native: native::Interactive,
+}
+
+impl InteractiveUpdater {
+    /// Execute a request, retaining a successful Bluetooth inspection for update.
+    ///
+    /// # Errors
+    /// Rejects invalid requests, changed attachments, failed device operations,
+    /// or host record errors using the same contracts as [`execute`].
+    pub fn execute(
+        &mut self,
+        request: Request,
+        cancelled: &mut dyn FnMut() -> bool,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<Reply, String> {
+        #[cfg(target_os = "macos")]
+        {
+            let reply = ReplyContext::for_request(&request);
+            let value = self
+                .native
+                .execute(request, cancelled, progress)
+                .map_err(|error| {
+                    format!("{}; cleanup={:?}", error.message, error.cleanup_errors)
+                })?;
+            reply.decode(value)
+        }
+        #[cfg(not(target_os = "macos"))]
+        execute(request, cancelled, progress)
+    }
+}
+
 /// Run a desktop request through shared transactions and native resource ownership.
 /// Installation is verified only by a fresh version readback.
 ///

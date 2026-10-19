@@ -159,7 +159,7 @@ impl Session {
     ///
     /// Returns an error if attachment or lock identity changes, disk correlation is invalid, or the host record cannot be created durably outside device storage.
     pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
-        self.check()?;
+        self.check_record_session()?;
         let devices = record_exclusions(&self.target.disks, |bsd| {
             use std::os::unix::fs::{FileTypeExt, MetadataExt};
             if !bsd.starts_with("disk") || !bsd.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
@@ -172,8 +172,15 @@ impl Session {
             }
             Ok(metadata.rdev())
         })?;
-        self.check()?;
+        self.check_record_session()?;
         crate::journal::create_host_record(path, &devices)
+    }
+
+    fn check_record_session(&self) -> Result<(), String> {
+        match self.component {
+            Component::Main => self.check(),
+            Component::Bluetooth => self.check_transport(),
+        }
     }
 
     ///
@@ -672,6 +679,24 @@ pub struct BluetoothSession {
     write_gate: BluetoothWriteGate,
 }
 impl BluetoothSession {
+    /// Release ownership without resetting the device or restoring its drivers.
+    /// An imported recovery hold must survive closing an idle desktop window.
+    pub fn surrender(mut self) {
+        self.finished = true;
+        if let Some(usb) = self.usb.take() {
+            usb.into_inner().close(true);
+        }
+    }
+
+    /// Create an audit record while retaining the inspected transport claim.
+    ///
+    /// # Errors
+    /// Rejects invalidated ownership or a path on controller storage.
+    pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
+        self.check_session()?;
+        self.session.create_record(path)
+    }
+
     fn native(&mut self) -> Result<&mut NativeUsb, String> {
         self.usb
             .as_mut()

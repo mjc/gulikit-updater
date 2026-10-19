@@ -18,6 +18,127 @@ use serde_json::Value;
 use serde_json::json;
 
 #[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(super) struct Interactive {
+    inspected: Option<gulikit_platform::macos::BluetoothSession>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Interactive {
+    fn drop(&mut self) {
+        if let Some(port) = self.inspected.take() {
+            port.surrender();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Interactive {
+    pub(super) fn execute(
+        &mut self,
+        request: Request,
+        cancelled: &mut dyn FnMut() -> bool,
+        progress: &mut dyn FnMut(gulikit_core::update::Progress),
+    ) -> Result<Value, AppError> {
+        match request {
+            Request::Probe {
+                component: Component::Bluetooth,
+                confirm_ns39,
+            } => {
+                let (port, raw) = inspect_retaining_port(
+                    &mut self.inspected,
+                    || Ok(Session::open(confirm_ns39, Component::Bluetooth)?.bluetooth()?),
+                    |port| {
+                        let raw = port.read_info()?;
+                        bluetooth_info(&raw).map_err(|error| error.to_string())?;
+                        Ok(raw)
+                    },
+                    BluetoothPort::finish,
+                    cancelled,
+                )?;
+                let version = bluetooth_info(&raw).map_err(|error| error.to_string())?;
+                let value = json!({"component":Component::Bluetooth,"installed_version":version.to_string(),"raw_version_bytes":raw,"qualified_bot_lun":port.qualified_lun(),"cleanup_errors":[],"target":port.target(),"identity_provenance":super::IDENTITY_PROVENANCE});
+                Ok(value)
+            }
+            Request::Update {
+                package,
+                confirm_ns39: _,
+                record,
+                expected_attachment,
+                policy,
+                ..
+            } if package.info().component == Component::Bluetooth => {
+                let (port, (target, mut journal)) =
+                    prepare_retained_port(&mut self.inspected, |port| {
+                        let target = port.target().clone();
+                        check_attachment(expected_attachment, &target)?;
+                        port.check_session()?;
+                        let mut journal = port.create_record(&record).map_err(AppError::host_io)?;
+                        start_attempt(&mut journal, &target, package.info(), policy)?;
+                        Ok((target, journal))
+                    })?;
+                let result = update_bluetooth_with_progress(
+                    &mut Recorded::new(port, &mut journal),
+                    &package,
+                    policy,
+                    cancelled,
+                    progress,
+                );
+                Ok(finish_attempt(
+                    &mut journal,
+                    &target,
+                    package.info(),
+                    &result,
+                ))
+            }
+            Request::Verify {
+                attempt,
+                record,
+                confirm_ns39,
+                confirm_same_controller,
+                expected_receipt,
+            } => verify_attempt(
+                &attempt,
+                &record,
+                confirm_ns39,
+                confirm_same_controller,
+                expected_receipt.as_ref(),
+                cancelled,
+                &mut self.inspected,
+            ),
+            request => {
+                self.inspected = None;
+                super::execute_frontend(request, cancelled, progress)
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_attempt(
+    journal: &mut std::fs::File,
+    target: &gulikit_platform::discovery::NativeCandidate,
+    package: &gulikit_core::package::PackageInfo,
+    policy: gulikit_core::version::VersionPolicy,
+) -> Result<(), AppError> {
+    write_event(journal, &json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package,"identity_provenance":super::IDENTITY_PROVENANCE,"post_restart_association":"pending; no USB serial is available"})).map_err(AppError::host_io)
+}
+
+#[cfg(target_os = "macos")]
+fn finish_attempt(
+    journal: &mut std::fs::File,
+    target: &gulikit_platform::discovery::NativeCandidate,
+    package: &gulikit_core::package::PackageInfo,
+    result: &TransferRecord,
+) -> Value {
+    let action = super::operator_action(package.component, result.outcome);
+    finalize_record(
+        journal,
+        json!({"event":"attempt_result","schema_version":1,"target":target,"package":package,"transfer":result,"operator_action":action}),
+    )
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn execute(
     request: Request,
     mut main_lease: Option<gulikit_platform::lock::ProcessLock>,
@@ -52,13 +173,15 @@ pub(super) fn execute(
             let target = session.target.clone();
             check_attachment(expected_attachment, &target)?;
             let mut journal = session.create_record(&record).map_err(AppError::host_io)?;
-            let header = json!({"event":"attempt_started","schema_version":1,"version_policy":policy,"target":target,"package":package.info(),"identity_provenance":super::IDENTITY_PROVENANCE,"post_restart_association":"pending; no USB serial is available"});
-            write_event(&mut journal, &header).map_err(AppError::host_io)?;
+            start_attempt(&mut journal, &target, package.info(), policy)?;
             let result =
                 transfer_package(session, &package, policy, &mut journal, cancelled, progress);
-            let action = super::operator_action(component, result.outcome);
-            let value = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package.info(),"transfer":result,"operator_action":action});
-            Ok(finalize_record(&mut journal, value))
+            Ok(finish_attempt(
+                &mut journal,
+                &target,
+                package.info(),
+                &result,
+            ))
         }
         Request::Verify {
             attempt,
@@ -73,6 +196,7 @@ pub(super) fn execute(
             confirm_same_controller,
             expected_receipt.as_ref(),
             cancelled,
+            &mut None,
         ),
     }
 }
@@ -198,6 +322,7 @@ fn verify_attempt(
     confirm_same_controller: bool,
     expected_receipt: Option<&super::ReceiptIdentity>,
     cancelled: &mut dyn FnMut() -> bool,
+    retained: &mut Option<gulikit_platform::macos::BluetoothSession>,
 ) -> Result<Value, AppError> {
     let prior = read_verification_receipt(attempt, expected_receipt)?;
     let component = prior.component;
@@ -205,23 +330,50 @@ fn verify_attempt(
     let previous = prior.outcome;
     let generation = prior.generation;
     let prior = prior.record;
-    let mut session = Session::open(confirm_ns39, component)?;
-    let target = session.target.clone();
-    let mut journal = session.create_record(record).map_err(AppError::host_io)?;
-    write_event(
-        &mut journal,
-        &json!({
-            "event": "verification_started", "schema_version": 1,
-            "source_attempt": record_path(attempt), "prior_result": prior, "target": target,
-            "same_unit_association": super::same_unit_association(confirm_same_controller)
-        }),
-    )
-    .map_err(AppError::host_io)?;
+    let (target, mut journal, readback) = if retained.is_some() {
+        if component != Component::Bluetooth {
+            return Err("The inspected component does not match the original attempt.".into());
+        }
+        let (port, (target, journal)) = prepare_retained_port(retained, |port| {
+            port.check_session()?;
+            let target = port.target().clone();
+            let mut journal = port.create_record(record).map_err(AppError::host_io)?;
+            start_verification(
+                &mut journal,
+                attempt,
+                &prior,
+                &target,
+                confirm_same_controller,
+            )?;
+            Ok((target, journal))
+        })?;
+        (
+            target,
+            journal,
+            read_bluetooth_verification(port, cancelled),
+        )
+    } else {
+        let mut session = Session::open(confirm_ns39, component)?;
+        let target = session.target.clone();
+        let mut journal = session.create_record(record).map_err(AppError::host_io)?;
+        start_verification(
+            &mut journal,
+            attempt,
+            &prior,
+            &target,
+            confirm_same_controller,
+        )?;
+        (
+            target,
+            journal,
+            read_verification_version(session, component, cancelled),
+        )
+    };
     let VersionReadback {
         raw: readback,
         cleanup,
         qualified_lun,
-    } = read_verification_version(session, component, cancelled);
+    } = readback;
     let (version, raw_version_bytes) = match readback {
         Ok(raw) => {
             let version = match component {
@@ -265,6 +417,25 @@ fn verify_attempt(
             "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
         }),
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn start_verification(
+    journal: &mut std::fs::File,
+    attempt: &std::path::Path,
+    prior: &Value,
+    target: &gulikit_platform::discovery::NativeCandidate,
+    same_controller: bool,
+) -> Result<(), AppError> {
+    write_event(
+        journal,
+        &json!({
+            "event": "verification_started", "schema_version": 1,
+            "source_attempt": record_path(attempt), "prior_result": prior, "target": target,
+            "same_unit_association": super::same_unit_association(same_controller)
+        }),
+    )
+    .map_err(AppError::host_io)
 }
 
 #[cfg(target_os = "macos")]
@@ -316,20 +487,7 @@ fn read_verification_version(
             },
         },
         Component::Bluetooth => match session.bluetooth() {
-            Ok(mut port) => {
-                let qualified_lun = port.qualified_lun();
-                let (raw, cleanup) = read_with_cleanup(
-                    &mut port,
-                    gulikit_platform::macos::BluetoothSession::read_info,
-                    BluetoothPort::finish,
-                    &mut *cancelled,
-                );
-                VersionReadback {
-                    raw,
-                    cleanup,
-                    qualified_lun,
-                }
-            }
+            Ok(port) => read_bluetooth_verification(port, cancelled),
             Err(error) => VersionReadback {
                 raw: Err(error.error),
                 cleanup: if error.cleanup_errors.is_empty() {
@@ -340,6 +498,25 @@ fn read_verification_version(
                 qualified_lun: None,
             },
         },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_bluetooth_verification(
+    mut port: gulikit_platform::macos::BluetoothSession,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> VersionReadback {
+    let qualified_lun = port.qualified_lun();
+    let (raw, cleanup) = read_with_cleanup(
+        &mut port,
+        gulikit_platform::macos::BluetoothSession::read_info,
+        BluetoothPort::finish,
+        cancelled,
+    );
+    VersionReadback {
+        raw,
+        cleanup,
+        qualified_lun,
     }
 }
 
@@ -408,13 +585,73 @@ fn post_cleanup_target(
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn prepare_retained_port<P, T>(
+    retained: &mut Option<P>,
+    prepare: impl FnOnce(&mut P) -> Result<T, super::ApplicationError>,
+) -> Result<(P, T), super::ApplicationError> {
+    let prepared = prepare(
+        retained
+            .as_mut()
+            .ok_or("Inspect Bluetooth before continuing.")?,
+    )?;
+    let port = retained
+        .take()
+        .ok_or("Inspected USB session is unavailable.")?;
+    Ok((port, prepared))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn inspect_retaining_port<P>(
+    retained: &mut Option<P>,
+    open: impl FnOnce() -> Result<P, super::ApplicationError>,
+    read: impl FnOnce(&mut P) -> Result<Vec<u8>, String>,
+    finish: impl FnOnce(&mut P) -> Result<(), String>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<(&mut P, Vec<u8>), super::ApplicationError> {
+    let port = match retained.take() {
+        Some(port) => port,
+        None => open()?,
+    };
+    let (port, raw) = read_for_interactive_inspection(port, read, finish, cancelled)?;
+    Ok((retained.insert(port), raw))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn read_for_interactive_inspection<P>(
+    mut port: P,
+    read: impl FnOnce(&mut P) -> Result<Vec<u8>, String>,
+    finish: impl FnOnce(&mut P) -> Result<(), String>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(P, Vec<u8>), super::ApplicationError> {
+    let raw = read_version(&mut port, read, &mut cancelled);
+    match raw {
+        Ok(raw) => Ok((port, raw)),
+        Err(error) => {
+            let errors = finish(&mut port).err().into_iter().collect();
+            Err(super::ApplicationError::from(error).with_cleanup(errors))
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn read_with_cleanup<P>(
     port: &mut P,
     read: impl FnOnce(&mut P) -> Result<Vec<u8>, String>,
     finish: impl FnOnce(&mut P) -> Result<(), String>,
     mut cancelled: impl FnMut() -> bool,
 ) -> (Result<Vec<u8>, String>, Result<(), String>) {
-    let result = if cancelled() {
+    let result = read_version(port, read, &mut cancelled);
+    let cleanup = finish(port);
+    (result, cleanup)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn read_version<P>(
+    port: &mut P,
+    read: impl FnOnce(&mut P) -> Result<Vec<u8>, String>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, String> {
+    if cancelled() {
         Err("Cancelled before version read".into())
     } else {
         let result = read(port);
@@ -426,14 +663,128 @@ fn read_with_cleanup<P>(
         } else {
             result
         }
-    };
-    let cleanup = finish(port);
-    (result, cleanup)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_host_preparation_keeps_the_inspected_port_for_a_corrected_record_path() {
+        let mut retained = Some(vec!["inspected"]);
+        let error = prepare_retained_port(&mut retained, |events| {
+            events.push("host record refused");
+            Err::<(), _>(super::super::ApplicationError::host_io(
+                "record exists".into(),
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.message, "record exists");
+        assert_eq!(
+            retained.as_ref().unwrap(),
+            &["inspected", "host record refused"]
+        );
+        let (port, record) = prepare_retained_port(&mut retained, |events| {
+            events.push("host record created");
+            Ok("new record")
+        })
+        .unwrap();
+        assert_eq!(record, "new record");
+        assert_eq!(
+            port,
+            ["inspected", "host record refused", "host record created"]
+        );
+        assert!(retained.is_none());
+    }
+    #[test]
+    fn inspecting_again_reads_the_owned_port_without_reopening_or_resetting() {
+        let mut retained = None;
+        inspect_retaining_port(
+            &mut retained,
+            || Ok(vec!["open"]),
+            |events| {
+                events.push("read");
+                Ok(vec![1])
+            },
+            |_| panic!("successful inspection must retain its claim"),
+            || false,
+        )
+        .unwrap();
+        let (port, _) = inspect_retaining_port(
+            &mut retained,
+            || panic!("Inspect again must not reacquire the USB device"),
+            |events| {
+                events.push("read");
+                Ok(vec![1])
+            },
+            |_| panic!("successful reinspection must not reset"),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(port, &["open", "read", "read"]);
+    }
+    #[test]
+    fn interactive_inspection_retains_the_live_port_without_resetting_it() {
+        let (port, raw) = read_for_interactive_inspection(
+            Vec::new(),
+            |events| {
+                events.push("read");
+                Ok(vec![1, 2, 3])
+            },
+            |events| {
+                events.push("reset");
+                Ok(())
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(raw, [1, 2, 3]);
+        assert_eq!(port, ["read"]);
+    }
+
+    #[test]
+    fn failed_or_cancelled_interactive_inspection_releases_its_claim() {
+        for (cancel_before, cancel_during, fail_read) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let mut events = Vec::new();
+            let cancelled = std::cell::Cell::new(cancel_before);
+            let error = read_for_interactive_inspection(
+                &mut events,
+                |events| {
+                    events.push("read");
+                    cancelled.set(cancel_during);
+                    if fail_read {
+                        Err("F1 failed".into())
+                    } else {
+                        Ok(vec![1])
+                    }
+                },
+                |events| {
+                    events.push("finish");
+                    Err("restoration failed".into())
+                },
+                || cancelled.get(),
+            )
+            .unwrap_err();
+            assert_eq!(error.cleanup_errors, ["restoration failed"]);
+            assert_eq!(
+                events,
+                if cancel_before {
+                    vec!["finish"]
+                } else {
+                    vec!["read", "finish"]
+                }
+            );
+            assert!(
+                error
+                    .message
+                    .contains(if fail_read { "F1 failed" } else { "Cancelled" })
+            );
+        }
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn replaced_receipt_is_rejected_at_the_pre_session_read_boundary() {

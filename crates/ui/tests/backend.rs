@@ -15,7 +15,7 @@ use std::{
 
 #[test]
 fn native_cancellation_and_simulator_requests_never_enter_device_access() {
-    let mut device = NativeDevice;
+    let mut device = NativeDevice::default();
     assert!(matches!(
         device
             .run(
@@ -48,9 +48,10 @@ fn native_cancellation_and_simulator_requests_never_enter_device_access() {
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn unsupported_native_record_access_is_refused_before_any_dialog() {
-    let result = NativeDevice.run(Work::OpenAttempt, &AtomicBool::new(false), &mut |_| {
-        panic!("unsupported record access cannot publish events")
-    });
+    let result =
+        NativeDevice::default().run(Work::OpenAttempt, &AtomicBool::new(false), &mut |_| {
+            panic!("unsupported record access cannot publish events")
+        });
     assert!(result.unwrap_err().contains("macOS only"));
 }
 
@@ -60,7 +61,7 @@ fn native_update_rejects_bad_packages_before_dialogs_or_device_access() {
     let path = directory.path().join("changed-package.zip");
     std::fs::write(&path, b"not a reviewed firmware archive").unwrap();
     assert!(inspect_selected_package(&path, Component::Main).is_err());
-    let mut device = NativeDevice;
+    let mut device = NativeDevice::default();
     let work = Work::Update {
         expected_package: common::package(),
         path: path.clone(),
@@ -177,7 +178,7 @@ fn selected_vendor_archives_are_inspectable_and_changed_archives_are_rejected() 
             confirmed: true,
         };
         assert!(
-            NativeDevice
+            NativeDevice::default()
                 .run(work, &AtomicBool::new(false), &mut |_| panic!(
                     "changed archive cannot publish progress"
                 ))
@@ -301,4 +302,54 @@ fn paced_demo_exposes_progress_and_accepts_cancellation_before_completion() {
     assert_eq!(app.view().page, Page::Failed);
     assert!(!app.view().can_primary);
     drop(worker);
+}
+
+#[test]
+fn thread_bound_device_is_created_used_and_released_on_its_worker() {
+    use std::{rc::Rc, sync::mpsc, thread};
+    struct ThreadBoundDevice {
+        owner: thread::ThreadId,
+        local: Rc<()>,
+        released: mpsc::Sender<thread::ThreadId>,
+    }
+    impl Device for ThreadBoundDevice {
+        fn run(
+            &mut self,
+            _: Work,
+            _: &AtomicBool,
+            _: &mut dyn FnMut(Event),
+        ) -> Result<Event, String> {
+            assert_eq!(thread::current().id(), self.owner);
+            assert_eq!(Rc::strong_count(&self.local), 1);
+            Ok(Event::Cancelled)
+        }
+    }
+    impl Drop for ThreadBoundDevice {
+        fn drop(&mut self) {
+            self.released.send(thread::current().id()).unwrap();
+        }
+    }
+    let (created, owner) = mpsc::channel();
+    let (released, finished) = mpsc::channel();
+    let (worker, events) = Worker::spawn_with(move || {
+        let owner = thread::current().id();
+        created.send(owner).unwrap();
+        ThreadBoundDevice {
+            owner,
+            local: Rc::new(()),
+            released,
+        }
+    });
+    let owner = owner.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_ne!(owner, thread::current().id());
+    worker.requests.send(Work::OpenAttempt).unwrap();
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Event::Cancelled
+    ));
+    drop(worker);
+    assert_eq!(
+        finished.recv_timeout(Duration::from_secs(5)).unwrap(),
+        owner
+    );
 }

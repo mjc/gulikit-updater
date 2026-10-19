@@ -42,7 +42,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let (worker, events) = if demo {
         Worker::spawn(DemoDevice::default())
     } else {
-        Worker::spawn(NativeDevice)
+        Worker::spawn_with(NativeDevice::default)
     };
     let (ui, timer) = live_ui::create_mode(
         worker.requests.clone(),

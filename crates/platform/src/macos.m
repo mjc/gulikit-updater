@@ -447,7 +447,14 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
           interestHandler:trace_interest("device")];
     if (!transport.device) {
       IOObjectRelease(service);
-      error_text(message, capacity, error.description);
+      if ([error.domain isEqualToString:@"IOUSBHostErrorDomain"] &&
+          error.code == kIOReturnNotPrivileged)
+        error_text(message, capacity,
+                   @"USB capture denied (kIOReturnNotPrivileged). This build "
+                    "requires an administrator-authenticated launch; the "
+                    "desktop authorization flow is not implemented.");
+      else
+        error_text(message, capacity, error.description);
       return NULL;
     }
     mach_timespec_t deadline = {5, 0};

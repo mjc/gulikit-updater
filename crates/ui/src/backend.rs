@@ -14,7 +14,7 @@ use std::{
 };
 
 /// Native and demo devices execute requests on the same serialized worker.
-pub trait Device: Send {
+pub trait Device {
     /// Execute one request and emit observations before its terminal event.
     ///
     /// # Errors
@@ -28,7 +28,10 @@ pub trait Device: Send {
     ) -> Result<Event, String>;
 }
 
-pub struct NativeDevice;
+#[derive(Default)]
+pub struct NativeDevice {
+    application: updater::InteractiveUpdater,
+}
 pub const NATIVE_UPDATE_SUPPORTED: bool = cfg!(target_os = "macos");
 pub const NATIVE_UPDATE_UNAVAILABLE: &str = "Native device updates currently support macOS only.";
 impl Device for NativeDevice {
@@ -38,7 +41,13 @@ impl Device for NativeDevice {
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
-        run_native(work, cancelled, emit)
+        run_native(work, cancelled, emit, &mut |request, cancelled, emit| {
+            self.application.execute(
+                request,
+                &mut || cancelled.load(Ordering::Acquire),
+                &mut |progress| emit(Event::Progress(progress)),
+            )
+        })
     }
 }
 
@@ -48,12 +57,19 @@ pub struct Worker {
     handle: Option<JoinHandle<()>>,
 }
 impl Worker {
-    pub fn spawn(device: impl Device + 'static) -> (Self, Receiver<Event>) {
+    pub fn spawn(device: impl Device + Send + 'static) -> (Self, Receiver<Event>) {
+        Self::spawn_with(move || device)
+    }
+
+    /// Construct thread-bound native resources on the worker that owns them.
+    pub fn spawn_with<D: Device + 'static>(
+        factory: impl FnOnce() -> D + Send + 'static,
+    ) -> (Self, Receiver<Event>) {
         let (requests, work) = mpsc::channel();
         let (events, replies) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
-        let handle = thread::spawn(move || serve_requests(device, work, &events, &flag));
+        let handle = thread::spawn(move || serve_requests(factory(), work, &events, &flag));
         (
             Self {
                 requests,
@@ -138,6 +154,7 @@ fn run_native(
     work: Work,
     cancelled: &AtomicBool,
     emit: &mut dyn FnMut(Event),
+    perform: &mut impl FnMut(Request, &AtomicBool, &mut dyn FnMut(Event)) -> Result<Reply, String>,
 ) -> Result<Event, String> {
     if cancelled.load(Ordering::Acquire) {
         return Ok(Event::Cancelled);
@@ -148,7 +165,7 @@ fn run_native(
         Work::Inspect {
             component,
             confirmed: _,
-        } => match execute(
+        } => match perform(
             Request::Probe {
                 component,
                 confirm_ns39: false,
@@ -182,7 +199,7 @@ fn run_native(
                 cancelled,
                 emit,
                 record_path,
-                execute,
+                perform,
             )
         }
         Work::Verify {
@@ -190,7 +207,14 @@ fn run_native(
             confirmed: _,
             same_controller,
             expected_receipt,
-        } => verify(attempt, same_controller, expected_receipt, cancelled, emit),
+        } => verify(
+            attempt,
+            same_controller,
+            expected_receipt,
+            cancelled,
+            emit,
+            perform,
+        ),
         Work::ConfigureDemo(_) | Work::ChooseSample { .. } => {
             Err("Simulated device operations are unavailable in native mode.".into())
         }
@@ -306,6 +330,7 @@ fn verify(
     expected_receipt: ReceiptIdentity,
     cancelled: &AtomicBool,
     emit: &mut dyn FnMut(Event),
+    perform: &mut impl FnMut(Request, &AtomicBool, &mut dyn FnMut(Event)) -> Result<Reply, String>,
 ) -> Result<Event, String> {
     let Some(record) = record_path() else {
         return Ok(Event::Cancelled);
@@ -313,7 +338,7 @@ fn verify(
     if cancelled.load(Ordering::Acquire) {
         return Ok(Event::Cancelled);
     }
-    match execute(
+    match perform(
         Request::Verify {
             attempt,
             record,
@@ -327,18 +352,6 @@ fn verify(
         Reply::Readback(result) => Ok(Event::Verified(result)),
         _ => Err("Unexpected verification result".into()),
     }
-}
-
-fn execute(
-    request: Request,
-    cancelled: &AtomicBool,
-    emit: &mut dyn FnMut(Event),
-) -> Result<Reply, String> {
-    updater::execute(
-        request,
-        &mut || cancelled.load(Ordering::Acquire),
-        &mut |progress| emit(Event::Progress(progress)),
-    )
 }
 
 #[cfg(test)]
