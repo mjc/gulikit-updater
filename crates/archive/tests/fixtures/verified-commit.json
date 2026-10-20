@@ -1,0 +1,35 @@
+{
+  "sha": "9e23e8fba1d3597953d7d44072092f8ac5a4d373",
+  "node_id": "C_kwDOVNuRKdoAKDllMjNlOGZiYTFkMzU5Nzk1M2Q3ZDQ0MDcyMDkyZjhhYzVhNGQzNzM",
+  "url": "https://api.github.com/repos/mjc/gulikit-updater/git/commits/9e23e8fba1d3597953d7d44072092f8ac5a4d373",
+  "html_url": "https://github.com/mjc/gulikit-updater/commit/9e23e8fba1d3597953d7d44072092f8ac5a4d373",
+  "author": {
+    "name": "Mika Cohen",
+    "email": "mjc@kernel.org",
+    "date": "2026-10-19T01:59:49Z"
+  },
+  "committer": {
+    "name": "Mika Cohen",
+    "email": "mjc@kernel.org",
+    "date": "2026-10-19T01:59:49Z"
+  },
+  "tree": {
+    "sha": "ff0e7630823dcb6991b87bc950fe0f30d05f201e",
+    "url": "https://api.github.com/repos/mjc/gulikit-updater/git/trees/ff0e7630823dcb6991b87bc950fe0f30d05f201e"
+  },
+  "message": "Add switch-2-dock-ns35 base firmware 00.00.7E.10",
+  "parents": [
+    {
+      "sha": "b22982c02b9cd27b66841787b1f84232be0112b0",
+      "url": "https://api.github.com/repos/mjc/gulikit-updater/git/commits/b22982c02b9cd27b66841787b1f84232be0112b0",
+      "html_url": "https://github.com/mjc/gulikit-updater/commit/b22982c02b9cd27b66841787b1f84232be0112b0"
+    }
+  ],
+  "verification": {
+    "verified": true,
+    "reason": "valid",
+    "signature": "-----BEGIN PGP SIGNATURE-----\n\niQIzBAABCgAdFiEEU+BxtJf59u9z9sNW10Feiy6A2JMFAmrVeZUACgkQ10Feiy6A\n2JPQmw/+Kqe8sHBs/AEF2vGn7b1ojLSeNeYNA1q9Nng7JRLR8GPRoPPKYoeiZhUe\n24ik3gXFk5FBUSp5ZCml9G75A4+McCRk/fmK2kb5kmH6N4es1ZFtYhYJppnqEawV\nm1JuedH94KO+of8UVr0O4b8C8pFkzxJ1otMqTAc7gr9BRDcQEXuiHK3D7BYfSzYW\nAUE7tthElTsfrMAZarw3PxqEy+O+rGAVvt4l8C8lypsuVefcWmhn8WkdeXZsjBsd\nGV4itzit93eIgRBWiRcEaiGTMcKkXv7UPig5UJxv1IVcqOWS+uOVYhUiTNqhy0vJ\njjf0j9uXil0tRPFGPP6e9INpPxNPScME4J9Y79PT0CI63v7IIapu3uaSJ8Szqw9P\nFUUt8gNU73odNHTme2lfayEjCb5pZmz1UT8NmfReLiFWAAEwKFXikAfYNuqj2fMX\n54YyxAWw01zTtthaDDCsmzhelDRB5ajJZpb+3k17epLl643ePiL2cAjgMOtFm+7L\nADM/lHH8IHHetj0Ro2HBggxziK2/KXey0X2kr8qTDcCnXphdeAksWTilnCjxAQrs\ni8fTaCL+KtrbqiV//PI374LGRYEpauO+1Zzkb7GQ1I3+zDJCc/F3ZvW4e02ScWG4\nAPe9jSEC71XXO/ai1nb4gTbaryZYbVLMzUYIpTzEnYmeJZufvpo=\n=sXQO\n-----END PGP SIGNATURE-----",
+    "payload": "tree ff0e7630823dcb6991b87bc950fe0f30d05f201e\nparent b22982c02b9cd27b66841787b1f84232be0112b0\nauthor Mika Cohen <mjc@kernel.org> 1792375189 -0600\ncommitter Mika Cohen <mjc@kernel.org> 1792375189 -0600\n\nAdd switch-2-dock-ns35 base firmware 00.00.7E.10\n",
+    "verified_at": "2026-10-19T01:59:54Z"
+  }
+}

@@ -1,8 +1,9 @@
-//! Bounded access to the public firmware orphan branch. Remote bytes remain
-//! descriptive archive data and do not authorize a controller write.
+//! Bounded access to the public firmware orphan branch. Cached records remain
+//! descriptive until authenticated against the immutable signed catalog commit.
 
 use crate::{
     FirmwareIndex, ReleaseRecord,
+    admission::{AdmissionError, verify_commit},
     manifest::{Error as ManifestError, MAX_ARCHIVE_BYTES, MAX_INDEX_BYTES},
 };
 use serde::Deserialize;
@@ -46,6 +47,10 @@ pub enum RemoteError {
     Compressed,
     #[error("remote firmware branch returned an invalid revision")]
     InvalidRevision,
+    #[error("remote firmware commit was not admitted: {0}")]
+    Admission(#[from] AdmissionError),
+    #[error("cached firmware index does not match its authenticated commit")]
+    UntrustedSnapshot,
     #[error("requested archive path is not present in the selected snapshot")]
     ReleaseNotFound,
     #[error("remote operation was cancelled")]
@@ -64,6 +69,7 @@ pub struct ArchiveSnapshot {
     revision: String,
     index: FirmwareIndex,
     index_bytes: Vec<u8>,
+    authenticated: bool,
 }
 
 impl ArchiveSnapshot {
@@ -83,6 +89,7 @@ impl ArchiveSnapshot {
             revision: revision.to_ascii_lowercase(),
             index,
             index_bytes: index_bytes.to_vec(),
+            authenticated: false,
         })
     }
 
@@ -94,6 +101,31 @@ impl ArchiveSnapshot {
     #[must_use]
     pub fn index(&self) -> &FirmwareIndex {
         &self.index
+    }
+}
+
+/// A package archive admitted against a verified immutable firmware commit.
+#[derive(Clone, Debug)]
+pub struct AuthorizedArchive {
+    path: PathBuf,
+    revision: String,
+    record: ReleaseRecord,
+}
+
+impl AuthorizedArchive {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    #[must_use]
+    pub fn record(&self) -> &ReleaseRecord {
+        &self.record
     }
 }
 
@@ -160,7 +192,7 @@ impl ArchiveClient {
     }
 
     /// Resolve the current branch commit and fetch its manifest at that commit.
-    /// The cache changes only after both responses and manifest validation succeed.
+    /// The cache changes only after commit authentication and manifest validation succeed.
     ///
     /// # Errors
     /// Returns an error for cancellation, network failures, invalid revisions or
@@ -178,11 +210,7 @@ impl ArchiveClient {
         if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(RemoteError::InvalidRevision);
         }
-        let index_url = raw_url(&revision, "firmware.json")?;
-        let index_bytes = self
-            .fetcher
-            .fetch(index_url.as_str(), MAX_INDEX_BYTES, cancelled)?;
-        let snapshot = ArchiveSnapshot::from_parts(&revision, &index_bytes)?;
+        let snapshot = self.fetch_authenticated_snapshot(&revision, cancelled)?;
         check_cancelled(cancelled)?;
         fs::create_dir_all(&self.cache_dir)?;
         let mut cache_bytes = snapshot.revision.as_bytes().to_vec();
@@ -203,21 +231,35 @@ impl ArchiveClient {
         snapshot: &ArchiveSnapshot,
         archive_path: &str,
         cancelled: &AtomicBool,
-    ) -> Result<PathBuf, RemoteError> {
+    ) -> Result<AuthorizedArchive, RemoteError> {
         check_cancelled(cancelled)?;
-        let record = snapshot
+        let admitted_snapshot = if snapshot.authenticated {
+            snapshot.clone()
+        } else {
+            let admitted = self.fetch_authenticated_snapshot(&snapshot.revision, cancelled)?;
+            if admitted.index_bytes != snapshot.index_bytes {
+                return Err(RemoteError::UntrustedSnapshot);
+            }
+            admitted
+        };
+        let record = admitted_snapshot
             .index
             .find(archive_path)
+            .cloned()
             .ok_or(RemoteError::ReleaseNotFound)?;
         let cache_path = self
             .cache_dir
             .join("archives")
             .join(record.sha256())
             .join(record.filename());
-        match read_verified_archive(&cache_path, record) {
+        match read_verified_archive(&cache_path, &record) {
             Ok(_) => {
                 check_cancelled(cancelled)?;
-                return Ok(cache_path);
+                return Ok(AuthorizedArchive {
+                    path: cache_path,
+                    revision: admitted_snapshot.revision,
+                    record,
+                });
             }
             Err(RemoteError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
@@ -228,7 +270,7 @@ impl ArchiveClient {
             .path()
             .strip_prefix('/')
             .ok_or(RemoteError::ReleaseNotFound)?;
-        let url = raw_url(&snapshot.revision, relative)?;
+        let url = raw_url(&admitted_snapshot.revision, relative)?;
         let bytes = self.fetcher.fetch(
             url.as_str(),
             usize::try_from(record.size()).unwrap_or(MAX_ARCHIVE_BYTES),
@@ -245,7 +287,35 @@ impl ArchiveClient {
         fs::create_dir_all(cache_parent)?;
         check_cancelled(cancelled)?;
         atomic_write(&cache_path, &bytes, cancelled)?;
-        Ok(cache_path)
+        Ok(AuthorizedArchive {
+            path: cache_path,
+            revision: admitted_snapshot.revision,
+            record,
+        })
+    }
+
+    fn fetch_authenticated_snapshot(
+        &self,
+        revision: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<ArchiveSnapshot, RemoteError> {
+        check_cancelled(cancelled)?;
+        let api = Url::parse(&format!(
+            "https://api.github.com/repos/{OWNER}/{REPOSITORY}/git/commits/{revision}"
+        ))
+        .map_err(|error| RemoteError::Request(error.to_string()))?;
+        let commit = self.fetcher.fetch(api.as_str(), 128 * 1024, cancelled)?;
+        check_cancelled(cancelled)?;
+        verify_commit(revision, &commit)?;
+        check_cancelled(cancelled)?;
+        let index_url = raw_url(revision, "firmware.json")?;
+        let index_bytes = self
+            .fetcher
+            .fetch(index_url.as_str(), MAX_INDEX_BYTES, cancelled)?;
+        check_cancelled(cancelled)?;
+        let mut snapshot = ArchiveSnapshot::from_parts(revision, &index_bytes)?;
+        snapshot.authenticated = true;
+        Ok(snapshot)
     }
 }
 

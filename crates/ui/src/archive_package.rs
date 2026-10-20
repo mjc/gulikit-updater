@@ -1,11 +1,10 @@
 //! Bridge from measured archive records to the bounded KK3 package parsers.
 
-use gulikit_archive::{FirmwareMemberKind, ReleaseRecord};
+use gulikit_archive::{AuthorizedArchive, FirmwareMemberKind, ReleaseRecord};
 use gulikit_core::package::{
     ArchiveParserKind, ArchiveSelection, ArchiveSelectionData, Component, PackageInfo,
     VerifiedPackage,
 };
-use std::path::Path;
 
 /// Result of inspecting a downloaded archive record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,24 +58,27 @@ pub fn selection_for_record(
     .map_err(|error| error.to_string())
 }
 
-/// Verify downloaded bytes against their measured record, then parse supported KK3 formats.
+/// Verify a download admitted by the archive client, then parse supported KK3 formats.
 ///
 /// # Errors
 /// Returns an error for unreadable files, archive/record mismatches, parser failures,
 /// or malformed KK3 selection metadata.
-pub fn inspect_download(
-    path: &Path,
-    revision: &str,
-    record: &ReleaseRecord,
-) -> Result<DownloadInspection, String> {
-    let bytes =
-        gulikit_archive::read_verified_archive(path, record).map_err(|error| error.to_string())?;
-    let Some(selection) = selection_for_record(revision, record)? else {
+pub fn inspect_download(archive: &AuthorizedArchive) -> Result<DownloadInspection, String> {
+    let bytes = gulikit_archive::read_verified_archive(archive.path(), archive.record())
+        .map_err(|error| error.to_string())?;
+    let Some(selection) = selection_for_record(archive.revision(), archive.record())? else {
         return Ok(DownloadInspection::ArchivedOnly);
     };
+    inspect_selected(&bytes, &selection)
+}
+
+fn inspect_selected(
+    bytes: &[u8],
+    selection: &ArchiveSelection,
+) -> Result<DownloadInspection, String> {
     let package =
-        VerifiedPackage::inspect_selected(&bytes, &selection).map_err(|error| error.to_string())?;
-    if !package.info().matches_archive_selection(&selection) {
+        VerifiedPackage::inspect_selected(bytes, selection).map_err(|error| error.to_string())?;
+    if !package.info().matches_archive_selection(selection) {
         return Err("parsed package does not match the selected archive record".into());
     }
     Ok(DownloadInspection::Supported(package.info().clone()))
@@ -86,10 +88,11 @@ pub fn inspect_download(
 mod tests {
     use super::*;
 
-    /// Run the same archive-to-parser bridge against the externally supplied pinned firmware corpus.
+    /// Check format parsing against an externally supplied pinned firmware corpus.
+    /// Catalog authentication is exercised separately by the archive client tests.
     #[test]
     #[ignore = "requires the pinned firmware index and all original archives in the ignored cache"]
-    fn pinned_firmware_corpus_admits_only_parser_supported_kk3_formats() {
+    fn pinned_firmware_corpus_parses_only_supported_kk3_formats() {
         let directory = std::env::var_os("GULIKIT_ARCHIVE_TEST_DIR")
             .map(std::path::PathBuf::from)
             .expect("set GULIKIT_ARCHIVE_TEST_DIR");
@@ -127,7 +130,12 @@ mod tests {
             );
             let path = directory.join(filename);
             assert!(path.is_file(), "missing pinned archive {}", path.display());
-            let inspected = inspect_download(&path, &revision, record)
+            let bytes = gulikit_archive::read_verified_archive(&path, record)
+                .unwrap_or_else(|error| panic!("{}: {error}", record.path()));
+            let selection = selection_for_record(&revision, record)
+                .unwrap_or_else(|error| panic!("{}: {error}", record.path()))
+                .expect("eligible KK3 release has a parser selection");
+            let inspected = inspect_selected(&bytes, &selection)
                 .unwrap_or_else(|error| panic!("{}: {error}", record.path()));
             kk3 += 1;
             let DownloadInspection::Supported(info) = inspected else {

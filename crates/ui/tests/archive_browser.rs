@@ -269,15 +269,14 @@ fn published_compiled_releases_download_and_inspect_through_ui_bridge() {
             .iter()
             .find(|record| record.sha256() == release.archive_sha256)
             .expect("compiled release is present in published archive");
-        let path = client
+        let archive = client
             .download(&snapshot, record.path(), &cancelled)
             .unwrap();
-        let DownloadInspection::Supported(info) =
-            inspect_download(&path, snapshot.revision(), record).unwrap()
-        else {
+        let DownloadInspection::Supported(info) = inspect_download(&archive).unwrap() else {
             panic!("compiled release should be supported");
         };
-        let bytes = gulikit_archive::read_verified_archive(&path, record).unwrap();
+        let bytes =
+            gulikit_archive::read_verified_archive(archive.path(), archive.record()).unwrap();
         let parsed = VerifiedPackage::inspect_selected(
             &bytes,
             info.archive_selection.as_ref().expect("archive recipe"),

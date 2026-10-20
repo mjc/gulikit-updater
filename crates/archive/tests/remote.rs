@@ -13,7 +13,7 @@ use std::{
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
 
-const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+const REV: &str = "9e23e8fba1d3597953d7d44072092f8ac5a4d373";
 
 #[derive(Clone)]
 struct Fake {
@@ -98,34 +98,74 @@ fn client(
     )
 }
 
+fn verified_commit_response() -> Vec<u8> {
+    // The fetcher mocks GitHub transport, including the immutable index response.
+    // Keep signature/payload/revision metadata coherent with the real commit.
+    include_bytes!("fixtures/verified-commit.json").to_vec()
+}
+
 #[test]
-fn refresh_pins_manifest_and_download_to_one_revision() {
+fn refresh_verifies_commit_and_cached_index_before_download() {
     let dir = tempfile::tempdir().unwrap();
     let (zip, index, path) = fixture();
-    let (refresh_client, urls) = client(
+    let (refresh_client, refresh_urls) = client(
         dir.path(),
         vec![
             format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
-            index,
+            verified_commit_response(),
+            index.clone(),
+            zip.clone(),
         ],
     );
     let snapshot = refresh_client.refresh(&AtomicBool::new(false)).unwrap();
-    let seen = urls.lock().unwrap();
-    assert!(seen[0].contains("api.github.com/repos/mjc/gulikit-updater/branches/firmware"));
-    assert!(seen[1].contains(&format!("/{REV}/firmware.json")));
     assert_eq!(snapshot.revision(), REV);
-    assert_eq!(
-        refresh_client.load_cached().unwrap().unwrap().revision(),
-        REV
-    );
-    let (download_client, urls) = client(dir.path(), vec![zip]);
-    let saved = download_client
+    let seen = refresh_urls.lock().unwrap();
+    assert!(seen[0].contains("api.github.com/repos/mjc/gulikit-updater/branches/firmware"));
+    assert!(seen[1].contains(&format!("/git/commits/{REV}")));
+    assert!(seen[2].contains(&format!("/{REV}/firmware.json")));
+    assert_eq!(seen.len(), 3);
+    drop(seen);
+
+    let fresh = refresh_client
         .download(&snapshot, &path, &AtomicBool::new(false))
         .unwrap();
-    assert_eq!(fs::read(saved).unwrap(), fixture().0);
-    assert!(
-        urls.lock().unwrap()[0].contains(&format!("/{REV}/kk3-max/base/v5.9/release%201%25.zip"))
+    assert_eq!(fresh.revision(), REV);
+    assert_eq!(fs::read(fresh.path()).unwrap(), zip);
+    let seen = refresh_urls.lock().unwrap();
+    assert_eq!(seen.len(), 4, "freshly admitted snapshots reuse provenance");
+    assert!(seen[3].contains(&format!("/{REV}/kk3-max/base/v5.9/release%201%25.zip")));
+    drop(seen);
+
+    let cached = refresh_client.load_cached().unwrap().unwrap();
+    let (download_client, download_urls) =
+        client(dir.path(), vec![verified_commit_response(), index]);
+    let authorized = download_client
+        .download(&cached, &path, &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(fs::read(authorized.path()).unwrap(), zip);
+    assert_eq!(authorized.revision(), REV);
+    assert_eq!(authorized.record().path(), path);
+    let seen = download_urls.lock().unwrap();
+    assert!(seen[0].contains(&format!("/git/commits/{REV}")));
+    assert!(seen[1].contains(&format!("/{REV}/firmware.json")));
+    assert_eq!(seen.len(), 2, "verified ZIP cache hit skips archive fetch");
+}
+
+#[test]
+fn refresh_rejects_unverified_commit_before_fetching_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (client, urls) = client(
+        dir.path(),
+        vec![
+            format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
+            b"{}".to_vec(),
+        ],
     );
+    assert!(client.refresh(&AtomicBool::new(false)).is_err());
+    let seen = urls.lock().unwrap();
+    assert_eq!(seen.len(), 2, "unverified commits must not fetch the index");
+    assert!(seen[1].contains(&format!("/git/commits/{REV}")));
+    assert!(client.load_cached().unwrap().is_none());
 }
 
 #[test]
@@ -144,73 +184,92 @@ fn cached_manifest_size_limit_is_enforced() {
 }
 
 #[test]
-fn failed_refresh_preserves_cache_and_cached_zip_is_reverified() {
+fn failed_refresh_preserves_the_cached_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    let (zip, index, path) = fixture();
-    let (first, _) = client(
-        dir.path(),
-        vec![
-            format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
-            index,
-        ],
-    );
-    let snapshot = first.refresh(&AtomicBool::new(false)).unwrap();
     let snapshot_path = dir.path().join("snapshot");
-    let old = fs::read(&snapshot_path).unwrap();
-    let (bad_manifest, _) = client(
-        dir.path(),
-        vec![
-            format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
-            b"{}".to_vec(),
-        ],
-    );
-    assert!(bad_manifest.refresh(&AtomicBool::new(false)).is_err());
-    assert_eq!(fs::read(&snapshot_path).unwrap(), old);
+    let old = format!("{REV}\n{{}}\n").into_bytes();
+    fs::write(&snapshot_path, &old).unwrap();
     let (failed, _) = client(dir.path(), vec![b"bad branch".to_vec()]);
     assert!(failed.refresh(&AtomicBool::new(false)).is_err());
     assert_eq!(fs::read(snapshot_path).unwrap(), old);
-
-    let (downloader, _) = client(dir.path(), vec![zip.clone()]);
-    let path_on_disk = downloader
-        .download(&snapshot, &path, &AtomicBool::new(false))
-        .unwrap();
-    fs::write(&path_on_disk, b"corrupt").unwrap();
-    let (repair, _) = client(dir.path(), vec![zip.clone()]);
-    assert_eq!(
-        fs::read(
-            repair
-                .download(&snapshot, &path, &AtomicBool::new(false))
-                .unwrap()
-        )
-        .unwrap(),
-        zip
-    );
 }
 
 #[test]
-fn valid_archive_cache_reuse_does_not_contact_transport() {
+fn untrusted_snapshot_must_be_admitted_before_a_zip_cache_hit() {
     let dir = tempfile::tempdir().unwrap();
     let (zip, index, path) = fixture();
     let snapshot = ArchiveSnapshot::from_parts(REV, &index).unwrap();
-    let (first, _) = client(dir.path(), vec![zip]);
-    let downloaded = first
+    let record = snapshot.index().find(&path).unwrap();
+    let cache_path = dir
+        .path()
+        .join("archives")
+        .join(record.sha256())
+        .join(record.filename());
+    fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+    fs::write(&cache_path, &zip).unwrap();
+    let (client, urls) = client(dir.path(), vec![verified_commit_response(), index]);
+    let authorized = client
         .download(&snapshot, &path, &AtomicBool::new(false))
         .unwrap();
-    assert_eq!(downloaded.file_name().unwrap(), "release 1%.zip");
-    let no_network = ArchiveClient::with_fetcher(
-        dir.path().to_path_buf(),
-        Box::new(Fake {
-            responses: Arc::new(Mutex::new(VecDeque::new())),
-            urls: Arc::new(Mutex::new(Vec::new())),
-            cancel_after: None,
-        }),
+    assert_eq!(authorized.path(), cache_path);
+    let seen = urls.lock().unwrap();
+    assert_eq!(seen.len(), 2, "verified cache hit skips the ZIP fetch");
+    assert!(seen[0].contains(&format!("/git/commits/{REV}")));
+    assert!(seen[1].contains(&format!("/{REV}/firmware.json")));
+    drop(seen);
+    assert_eq!(fs::read(cache_path).unwrap(), zip);
+}
+
+#[test]
+fn changed_cached_index_is_rejected_before_archive_cache_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let (zip, cached_index, path) = fixture();
+    let snapshot = ArchiveSnapshot::from_parts(REV, &cached_index).unwrap();
+    let record = snapshot.index().find(&path).unwrap();
+    let cache_path = dir
+        .path()
+        .join("archives")
+        .join(record.sha256())
+        .join(record.filename());
+    fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+    fs::write(&cache_path, &zip).unwrap();
+
+    let mut changed: serde_json::Value = serde_json::from_slice(&cached_index).unwrap();
+    changed["releases"][0]["changelog"] = serde_json::json!("changed after caching");
+    let signed_index = serde_json::to_vec(&changed).unwrap();
+    let (client, urls) = client(dir.path(), vec![verified_commit_response(), signed_index]);
+    assert!(matches!(
+        client.download(&snapshot, &path, &AtomicBool::new(false)),
+        Err(RemoteError::UntrustedSnapshot)
+    ));
+    assert_eq!(urls.lock().unwrap().len(), 2);
+    assert_eq!(fs::read(cache_path).unwrap(), zip);
+}
+
+#[test]
+fn authenticated_download_repairs_a_corrupted_zip_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let (zip, index, path) = fixture();
+    let (refresh_client, _) = client(
+        dir.path(),
+        vec![
+            format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
+            verified_commit_response(),
+            index,
+        ],
     );
-    assert_eq!(
-        no_network
-            .download(&snapshot, &path, &AtomicBool::new(false))
-            .unwrap(),
-        downloaded
-    );
+    let snapshot = refresh_client.refresh(&AtomicBool::new(false)).unwrap();
+    let (transport, _) = client(dir.path(), vec![zip.clone()]);
+    let downloaded = transport
+        .download(&snapshot, &path, &AtomicBool::new(false))
+        .unwrap();
+    fs::write(downloaded.path(), b"corrupt").unwrap();
+
+    let (repair, _) = client(dir.path(), vec![zip.clone()]);
+    let repaired = repair
+        .download(&snapshot, &path, &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(fs::read(repaired.path()).unwrap(), zip);
 }
 
 #[test]
@@ -279,9 +338,12 @@ fn cancellation_and_wrong_digest_preserve_existing_files() {
         Err(RemoteError::Cancelled)
     ));
 
-    let (client, _) = client(dir.path(), vec![b"not the zip".to_vec()]);
+    let (wrong_archive, _) = client(
+        dir.path(),
+        vec![verified_commit_response(), index, b"not the zip".to_vec()],
+    );
     assert!(matches!(
-        client.download(&snapshot, &path, &AtomicBool::new(false)),
+        wrong_archive.download(&snapshot, &path, &AtomicBool::new(false)),
         Err(RemoteError::InvalidArchive)
     ));
     assert!(
@@ -291,7 +353,7 @@ fn cancellation_and_wrong_digest_preserve_existing_files() {
 
     let cancel_on_return = Arc::new(AtomicBool::new(false));
     let fetcher = Fake {
-        responses: Arc::new(Mutex::new(VecDeque::from([fixture().0]))),
+        responses: Arc::new(Mutex::new(VecDeque::from([b"{}".to_vec()]))),
         urls: Arc::new(Mutex::new(Vec::new())),
         cancel_after: Some(cancel_on_return.clone()),
     };
