@@ -1,7 +1,5 @@
-use gulikit_archive::{
-    ArchiveClient, ArchiveFetcher, ArchiveSnapshot, Component, FirmwareIndex, FirmwareMemberKind,
-    ReleaseMetadata, ReleaseRecord, RemoteError,
-};
+use super::*;
+use crate::FirmwareIndex;
 use std::{
     collections::VecDeque,
     fs,
@@ -13,7 +11,8 @@ use std::{
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
 
-const REV: &str = "9e23e8fba1d3597953d7d44072092f8ac5a4d373";
+const CATALOG: &str = include_str!("../../tests/fixtures/signed-test-catalog.json");
+const REV: &str = "d05c2b88e912bed36f8bbed31553879119f78579";
 
 #[derive(Clone)]
 struct Fake {
@@ -49,37 +48,13 @@ impl ArchiveFetcher for Fake {
 }
 
 fn fixture() -> (Vec<u8>, Vec<u8>, String) {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    writer
-        .start_file("firmware.bin", SimpleFileOptions::default())
-        .unwrap();
-    writer.write_all(b"firmware bytes").unwrap();
-    let zip = writer.finish().unwrap().into_inner();
-    let record = ReleaseRecord::measure(
-        ReleaseMetadata {
-            product: "kk3-max".into(),
-            member_kind: FirmwareMemberKind::Kk3,
-            component: Component::Base,
-            version: "5.9".into(),
-            filename: "release 1%.zip".into(),
-            source_url: "https://example.com/release".into(),
-            released_at: None,
-            retrieved_at: None,
-            retrieved_from: None,
-            changelog: None,
-            changelog_source_url: None,
-            firmware_member: "firmware.bin".into(),
-            published_hashes: vec![],
-        },
-        &zip,
-        b"firmware bytes",
-        b"firmware bytes",
-    )
-    .unwrap();
-    let path = record.path().to_owned();
-    let mut index = FirmwareIndex::empty();
-    index.add(record).unwrap();
-    (zip, index.to_json().unwrap(), path)
+    let catalog: serde_json::Value = serde_json::from_str(CATALOG).unwrap();
+    let zip_hex = catalog["zip"].as_str().unwrap();
+    let zip = hex::decode(zip_hex).unwrap();
+    let index = catalog["index"].as_str().unwrap().as_bytes().to_vec();
+    let parsed = FirmwareIndex::parse(&index).unwrap();
+    let path = parsed.releases().first().unwrap().path().to_owned();
+    (zip, index, path)
 }
 
 fn client(
@@ -93,15 +68,29 @@ fn client(
         cancel_after: None,
     };
     (
-        ArchiveClient::with_fetcher(dir.to_path_buf(), Box::new(fetcher)),
+        ArchiveClient::with_test_fetcher(dir.to_path_buf(), Box::new(fetcher)),
         urls,
     )
 }
 
-fn verified_commit_response() -> Vec<u8> {
-    // The fetcher mocks GitHub transport, including the immutable index response.
-    // Keep signature/payload/revision metadata coherent with the real commit.
-    include_bytes!("fixtures/verified-commit.json").to_vec()
+fn catalog_value() -> serde_json::Value {
+    serde_json::from_str(CATALOG).unwrap()
+}
+
+fn commit_response() -> Vec<u8> {
+    serde_json::to_vec(&catalog_value()["commit"]).unwrap()
+}
+
+fn tree_response() -> Vec<u8> {
+    serde_json::to_vec(&catalog_value()["tree"]).unwrap()
+}
+
+fn admission_responses(index: Vec<u8>) -> Vec<Vec<u8>> {
+    vec![commit_response(), tree_response(), index]
+}
+
+fn branch_response() -> Vec<u8> {
+    format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes()
 }
 
 #[test]
@@ -110,20 +99,21 @@ fn refresh_verifies_commit_and_cached_index_before_download() {
     let (zip, index, path) = fixture();
     let (refresh_client, refresh_urls) = client(
         dir.path(),
-        vec![
-            format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
-            verified_commit_response(),
-            index.clone(),
-            zip.clone(),
-        ],
+        [
+            vec![branch_response()],
+            admission_responses(index),
+            vec![zip.clone()],
+        ]
+        .concat(),
     );
     let snapshot = refresh_client.refresh(&AtomicBool::new(false)).unwrap();
     assert_eq!(snapshot.revision(), REV);
     let seen = refresh_urls.lock().unwrap();
     assert!(seen[0].contains("api.github.com/repos/mjc/gulikit-updater/branches/firmware"));
     assert!(seen[1].contains(&format!("/git/commits/{REV}")));
-    assert!(seen[2].contains(&format!("/{REV}/firmware.json")));
-    assert_eq!(seen.len(), 3);
+    assert!(seen[2].contains("/git/trees/"));
+    assert!(seen[3].contains(&format!("/{REV}/firmware.json")));
+    assert_eq!(seen.len(), 4);
     drop(seen);
 
     let fresh = refresh_client
@@ -132,13 +122,12 @@ fn refresh_verifies_commit_and_cached_index_before_download() {
     assert_eq!(fresh.revision(), REV);
     assert_eq!(fs::read(fresh.path()).unwrap(), zip);
     let seen = refresh_urls.lock().unwrap();
-    assert_eq!(seen.len(), 4, "freshly admitted snapshots reuse provenance");
-    assert!(seen[3].contains(&format!("/{REV}/kk3-max/base/v5.9/release%201%25.zip")));
+    assert_eq!(seen.len(), 5, "freshly admitted snapshots reuse provenance");
+    assert!(seen[4].contains(&format!("/{REV}/kk3-max/base/v5.9/release%201%25.zip")));
     drop(seen);
 
     let cached = refresh_client.load_cached().unwrap().unwrap();
-    let (download_client, download_urls) =
-        client(dir.path(), vec![verified_commit_response(), index]);
+    let (download_client, download_urls) = client(dir.path(), vec![]);
     let authorized = download_client
         .download(&cached, &path, &AtomicBool::new(false))
         .unwrap();
@@ -146,24 +135,23 @@ fn refresh_verifies_commit_and_cached_index_before_download() {
     assert_eq!(authorized.revision(), REV);
     assert_eq!(authorized.record().path(), path);
     let seen = download_urls.lock().unwrap();
-    assert!(seen[0].contains(&format!("/git/commits/{REV}")));
-    assert!(seen[1].contains(&format!("/{REV}/firmware.json")));
-    assert_eq!(seen.len(), 2, "verified ZIP cache hit skips archive fetch");
+    assert!(
+        seen.is_empty(),
+        "verified snapshot and ZIP caches work offline"
+    );
 }
 
 #[test]
 fn refresh_rejects_unverified_commit_before_fetching_manifest() {
     let dir = tempfile::tempdir().unwrap();
-    let (client, urls) = client(
-        dir.path(),
-        vec![
-            format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
-            b"{}".to_vec(),
-        ],
-    );
+    let (client, urls) = client(dir.path(), vec![branch_response(), b"{}".to_vec()]);
     assert!(client.refresh(&AtomicBool::new(false)).is_err());
     let seen = urls.lock().unwrap();
-    assert_eq!(seen.len(), 2, "unverified commits must not fetch the index");
+    assert_eq!(
+        seen.len(),
+        2,
+        "unverified commits must not fetch the tree or index"
+    );
     assert!(seen[1].contains(&format!("/git/commits/{REV}")));
     assert!(client.load_cached().unwrap().is_none());
 }
@@ -176,7 +164,7 @@ fn validated_parts_reject_bad_revision_and_manifest() {
 
 #[test]
 fn cached_manifest_size_limit_is_enforced() {
-    let oversized = vec![b' '; gulikit_archive::manifest::MAX_INDEX_BYTES + 1];
+    let oversized = vec![b' '; crate::manifest::MAX_INDEX_BYTES + 1];
     assert!(matches!(
         ArchiveSnapshot::from_parts(REV, &oversized),
         Err(RemoteError::TooLarge)
@@ -207,23 +195,60 @@ fn untrusted_snapshot_must_be_admitted_before_a_zip_cache_hit() {
         .join(record.filename());
     fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
     fs::write(&cache_path, &zip).unwrap();
-    let (client, urls) = client(dir.path(), vec![verified_commit_response(), index]);
+    let (client, urls) = client(dir.path(), admission_responses(index));
     let authorized = client
         .download(&snapshot, &path, &AtomicBool::new(false))
         .unwrap();
     assert_eq!(authorized.path(), cache_path);
     let seen = urls.lock().unwrap();
-    assert_eq!(seen.len(), 2, "verified cache hit skips the ZIP fetch");
+    assert_eq!(seen.len(), 3, "admission proof precedes ZIP cache reuse");
     assert!(seen[0].contains(&format!("/git/commits/{REV}")));
-    assert!(seen[1].contains(&format!("/{REV}/firmware.json")));
+    assert!(seen[1].contains("/git/trees/"));
+    assert!(seen[2].contains(&format!("/{REV}/firmware.json")));
     drop(seen);
     assert_eq!(fs::read(cache_path).unwrap(), zip);
 }
 
 #[test]
+fn legacy_snapshot_requires_network_admission_then_becomes_offline_proof_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let (zip, index, path) = fixture();
+    fs::write(
+        dir.path().join("snapshot"),
+        [REV.as_bytes(), b"\n", index.as_slice()].concat(),
+    )
+    .unwrap();
+    let snapshot = client(dir.path(), vec![]).0.load_cached().unwrap().unwrap();
+    let record = snapshot.index().find(&path).unwrap();
+    let cache_path = dir
+        .path()
+        .join("archives")
+        .join(record.sha256())
+        .join(record.filename());
+    fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+    fs::write(&cache_path, &zip).unwrap();
+
+    let (admitting, urls) = client(dir.path(), admission_responses(index));
+    admitting
+        .download(&snapshot, &path, &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(urls.lock().unwrap().len(), 3);
+
+    let (offline, offline_urls) = client(dir.path(), vec![]);
+    let restored = offline.load_cached().unwrap().unwrap();
+    offline
+        .download(&restored, &path, &AtomicBool::new(false))
+        .unwrap();
+    assert!(offline_urls.lock().unwrap().is_empty());
+}
+
+#[test]
 fn changed_cached_index_is_rejected_before_archive_cache_lookup() {
     let dir = tempfile::tempdir().unwrap();
-    let (zip, cached_index, path) = fixture();
+    let (zip, signed_index, path) = fixture();
+    let mut changed: serde_json::Value = serde_json::from_slice(&signed_index).unwrap();
+    changed["releases"][0]["changelog"] = serde_json::json!("changed after caching");
+    let cached_index = serde_json::to_vec(&changed).unwrap();
     let snapshot = ArchiveSnapshot::from_parts(REV, &cached_index).unwrap();
     let record = snapshot.index().find(&path).unwrap();
     let cache_path = dir
@@ -234,15 +259,12 @@ fn changed_cached_index_is_rejected_before_archive_cache_lookup() {
     fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
     fs::write(&cache_path, &zip).unwrap();
 
-    let mut changed: serde_json::Value = serde_json::from_slice(&cached_index).unwrap();
-    changed["releases"][0]["changelog"] = serde_json::json!("changed after caching");
-    let signed_index = serde_json::to_vec(&changed).unwrap();
-    let (client, urls) = client(dir.path(), vec![verified_commit_response(), signed_index]);
+    let (client, urls) = client(dir.path(), admission_responses(signed_index));
     assert!(matches!(
         client.download(&snapshot, &path, &AtomicBool::new(false)),
         Err(RemoteError::UntrustedSnapshot)
     ));
-    assert_eq!(urls.lock().unwrap().len(), 2);
+    assert_eq!(urls.lock().unwrap().len(), 3);
     assert_eq!(fs::read(cache_path).unwrap(), zip);
 }
 
@@ -252,11 +274,7 @@ fn authenticated_download_repairs_a_corrupted_zip_cache() {
     let (zip, index, path) = fixture();
     let (refresh_client, _) = client(
         dir.path(),
-        vec![
-            format!(r#"{{"commit":{{"sha":"{REV}"}}}}"#).into_bytes(),
-            verified_commit_response(),
-            index,
-        ],
+        [vec![branch_response()], admission_responses(index)].concat(),
     );
     let snapshot = refresh_client.refresh(&AtomicBool::new(false)).unwrap();
     let (transport, _) = client(dir.path(), vec![zip.clone()]);
@@ -314,16 +332,16 @@ fn verified_archive_reader_rejects_symlinks_and_fifos_without_blocking() {
     fs::write(&target, zip).unwrap();
     let link = dir.path().join("link.zip");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    assert!(gulikit_archive::read_verified_archive(&link, record).is_err());
+    assert!(crate::read_verified_archive(&link, record).is_err());
     let fifo = dir.path().join("pipe.zip");
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
-    assert!(gulikit_archive::read_verified_archive(&fifo, record).is_err());
+    assert!(crate::read_verified_archive(&fifo, record).is_err());
     let oversized = dir.path().join("oversized.zip");
     fs::File::create(&oversized)
         .unwrap()
-        .set_len(u64::try_from(gulikit_archive::manifest::MAX_ARCHIVE_BYTES).unwrap() + 1)
+        .set_len(u64::try_from(crate::manifest::MAX_ARCHIVE_BYTES).unwrap() + 1)
         .unwrap();
-    assert!(gulikit_archive::read_verified_archive(&oversized, record).is_err());
+    assert!(crate::read_verified_archive(&oversized, record).is_err());
 }
 
 #[test]
@@ -340,7 +358,7 @@ fn cancellation_and_wrong_digest_preserve_existing_files() {
 
     let (wrong_archive, _) = client(
         dir.path(),
-        vec![verified_commit_response(), index, b"not the zip".to_vec()],
+        [admission_responses(index), vec![b"not the zip".to_vec()]].concat(),
     );
     assert!(matches!(
         wrong_archive.download(&snapshot, &path, &AtomicBool::new(false)),
@@ -357,9 +375,56 @@ fn cancellation_and_wrong_digest_preserve_existing_files() {
         urls: Arc::new(Mutex::new(Vec::new())),
         cancel_after: Some(cancel_on_return.clone()),
     };
-    let cancelled = ArchiveClient::with_fetcher(dir.path().to_path_buf(), Box::new(fetcher));
+    let cancelled = ArchiveClient::with_test_fetcher(dir.path().to_path_buf(), Box::new(fetcher));
     assert!(matches!(
         cancelled.download(&snapshot, &path, &cancel_on_return),
         Err(RemoteError::Cancelled)
     ));
+}
+
+#[test]
+fn cancellation_before_publication_preserves_the_previous_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("snapshot");
+    fs::write(&destination, b"previous snapshot").unwrap();
+    let cancelled = AtomicBool::new(true);
+
+    assert!(matches!(
+        atomic_write(&destination, b"new snapshot", &cancelled),
+        Err(RemoteError::Cancelled)
+    ));
+    assert_eq!(fs::read(destination).unwrap(), b"previous snapshot");
+}
+
+#[test]
+fn tampered_proof_cache_is_rejected_locally_before_any_network_or_zip_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (zip, index, path) = fixture();
+    let (online, _) = client(
+        dir.path(),
+        [
+            vec![branch_response()],
+            admission_responses(index),
+            vec![zip],
+        ]
+        .concat(),
+    );
+    let snapshot = online.refresh(&AtomicBool::new(false)).unwrap();
+    online
+        .download(&snapshot, &path, &AtomicBool::new(false))
+        .unwrap();
+    let cached_path = dir.path().join("snapshot");
+    let mut cached: serde_json::Value =
+        serde_json::from_slice(&fs::read(&cached_path).unwrap()).unwrap();
+    let mut index: serde_json::Value =
+        serde_json::from_str(cached["index"].as_str().unwrap()).unwrap();
+    index["releases"][0]["changelog"] = serde_json::json!("tampered cached metadata");
+    cached["index"] = serde_json::json!(serde_json::to_string(&index).unwrap());
+    fs::write(&cached_path, serde_json::to_vec(&cached).unwrap()).unwrap();
+    let (offline, urls) = client(dir.path(), vec![]);
+    assert!(matches!(
+        offline.load_cached(),
+        Err(RemoteError::Admission(_))
+    ));
+    assert!(urls.lock().unwrap().is_empty());
 }

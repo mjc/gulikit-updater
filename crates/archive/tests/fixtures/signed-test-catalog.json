@@ -1,0 +1,34 @@
+{
+  "revision": "d05c2b88e912bed36f8bbed31553879119f78579",
+  "fingerprint": "f00141112ad4c330ffc2664e9e95d98fcb4da50e",
+  "public_key": "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQENBGrXqs4BCADh//MhRMBhrVE3fkI5AcwTx31oDAiWIEm1+K/EhyS2yD8PnHOy\n4cKre2JiRAOeplLZkS9bhPB4k9rXVHwSH98Z+DcrENNy1y3pbbVcmjIluvsQE7Rf\n8rfx+XoHkzvAdCCE8Ojclh2pXu2zzg4kACiBoZEHaQdX6f2a2Ti8UC3lL0G+Ms68\nlmMzMVJULy/k6zOHZ/uYZCBIfr68bpHqbTSFT9SswLRU1bx4cd3gRNtXCH2n1tM6\nHne6a+mDcfrODJHQkC78KGJLqt9BDdLmyb1VyrMmv1SlICf11/rnz1Aqj/+hL2Ou\nYzylkMkBALANd7mUZeMWzozu4oQg+yy/DTeVABEBAAG0NUFyY2hpdmUgYWRtaXNz\naW9uIHRlc3QgPGFyY2hpdmUtdGVzdEBleGFtcGxlLmludmFsaWQ+iQFOBBMBCgA4\nFiEE8AFBESrUwzD/wmZOnpXZj8tNpQ4FAmrXqs4CGwMFCwkIBwIGFQoJCAsCBBYC\nAwECHgECF4AACgkQnpXZj8tNpQ5N1gf9FQBXQMnFEBHmA/v9xP6slmLNxYliEExU\nx4XcFny1s0yWCK/MxxecNhRNWrtc5yn3Oz/JzUx/fPX6VnOsHhyx4u+dRJnnz6br\n19CTEYyxdC1JYOUycy5b47f6W+AmT/clVQL6aZwdpj+kfmAU8vFGuk7RFBJYvBKt\n7Un8tdGLFbwbTv1IkBtwqRPpclpUFczocc2Ux6BRJhYJsX2sY84qCuonxl1i6K15\nkuNOYMzXTW7b7JxOBo2xLKpsJTHl5u9HJJtY2UF0PH4+zIGh+3ZSv85BunQygHIG\ngy17QuF29Wr3nxqmUSkRDHX22IHUTaughPBiWENptX5St6UKIkASYQ==\n=SNY1\n-----END PGP PUBLIC KEY BLOCK-----\n",
+  "commit": {
+    "sha": "d05c2b88e912bed36f8bbed31553879119f78579",
+    "verification": {
+      "verified": true,
+      "reason": "valid",
+      "signature": "-----BEGIN PGP SIGNATURE-----\n\niQEzBAABCgAdFiEE8AFBESrUwzD/wmZOnpXZj8tNpQ4FAmrXqs8ACgkQnpXZj8tN\npQ7HowgArLE5rh2uDDDS3oCNt7UyxMRfJ40hzfyHrhvH02Yxz2wSDqprKvK+xe15\nXMoArY7o3EBbF/CfsFTz6gDveATgQ3/V1e6sNR1dsADz1X+PVA9KjtVCv7mbsoyF\nqG52HVoW77nD/GLZX3ajENY56TWy5+LSiEDAUE3ZNiwI92opGBAZweusaPiJn46c\nvQ9aykrhr1SK7UCBVBemrkdbBXc8pImhlijgSODY790UjrHS3G57sL+qh/KyNcwB\nO///adTD9T+02Gw3aA1FlHHWby6X/kBej2TUU4SHef3VbUouIjQHTRZOXhFLKHvs\nFnxmWHtdhhYbXVKENsBXigAbEiCVxw==\n=cyoE\n-----END PGP SIGNATURE-----",
+      "payload": "tree 953957745bd491edfdcd9e2c15eb96c76b4d7909\nauthor Archive admission test <archive-test@example.invalid> 1792518863 -0600\ncommitter Archive admission test <archive-test@example.invalid> 1792518863 -0600\n\nAdd kk3-max base firmware 5.9\n"
+    }
+  },
+  "tree": {
+    "sha": "953957745bd491edfdcd9e2c15eb96c76b4d7909",
+    "truncated": false,
+    "tree": [
+      {
+        "path": "firmware.json",
+        "mode": "100644",
+        "type": "blob",
+        "sha": "774d8a0b45f34051c96cb3857d41d65daed20d56"
+      },
+      {
+        "path": "kk3-max",
+        "mode": "040000",
+        "type": "tree",
+        "sha": "99ce32b4cc6344ca91420bbc7945620d6183b0d2"
+      }
+    ]
+  },
+  "index": "{\n  \"schema_version\": 1,\n  \"releases\": [\n    {\n      \"component\": \"base\",\n      \"version\": \"5.9\",\n      \"filename\": \"release 1%.zip\",\n      \"source_url\": \"https://example.com/release\",\n      \"released_at\": null,\n      \"retrieved_at\": null,\n      \"retrieved_from\": null,\n      \"changelog\": null,\n      \"changelog_source_url\": null,\n      \"firmware_member\": \"firmware.bin\",\n      \"published_hashes\": [],\n      \"path\": \"/kk3-max/base/v5.9/release 1%.zip\",\n      \"size\": 138,\n      \"sha256\": \"b90d535f18b531109814f13f5dc103ca48f4828fc100185203ad787778deda21\",\n      \"firmware_file\": {\n        \"size\": 14,\n        \"sha256\": \"dbf1bce8c5e41be6f0c17880b1ed3033714b384b2c2232b1c7b4f3fda822b6ce\"\n      },\n      \"payload\": {\n        \"size\": 14,\n        \"sha256\": \"dbf1bce8c5e41be6f0c17880b1ed3033714b384b2c2232b1c7b4f3fda822b6ce\"\n      }\n    }\n  ]\n}",
+  "zip": "504b030414000000080000002100f6e69267100000000e0000000c0000006669726d776172652e62696e4bcb2cca2d4f2c4a5548aa2c492d0600504b0102140314000000080000002100f6e69267100000000e0000000c00000000000000000000008001000000006669726d776172652e62696e504b050600000000010001003a0000003a0000000000"
+}

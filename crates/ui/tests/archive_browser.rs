@@ -257,6 +257,19 @@ fn event_channel_disconnect_ends_refreshing_state() {
 #[test]
 #[ignore = "downloads the published firmware branch and four original vendor ZIPs"]
 fn published_compiled_releases_download_and_inspect_through_ui_bridge() {
+    struct Offline;
+    impl gulikit_archive::ArchiveFetcher for Offline {
+        fn fetch(
+            &self,
+            _url: &str,
+            _limit: usize,
+            _cancelled: &AtomicBool,
+        ) -> Result<Vec<u8>, gulikit_archive::RemoteError> {
+            Err(gulikit_archive::RemoteError::Request(
+                "unexpected network access during offline cache reuse".into(),
+            ))
+        }
+    }
     let cache = tempfile::tempdir().unwrap();
     let client = gulikit_archive::ArchiveClient::new(cache.path().to_owned());
     let cancelled = AtomicBool::new(false);
@@ -284,6 +297,26 @@ fn published_compiled_releases_download_and_inspect_through_ui_bridge() {
         .unwrap();
         assert_eq!(info, *parsed.info());
         assert_eq!(info.version, release.version);
+        assert_eq!(info.archive_sha256, release.archive_sha256);
+    }
+
+    let offline =
+        gulikit_archive::ArchiveClient::with_fetcher(cache.path().to_owned(), Box::new(Offline));
+    let cached = offline.load_cached().unwrap().unwrap();
+    assert_eq!(cached.revision(), snapshot.revision());
+    for release in catalog() {
+        let record = cached
+            .index()
+            .releases()
+            .iter()
+            .find(|record| record.sha256() == release.archive_sha256)
+            .unwrap();
+        let archive = offline
+            .download(&cached, record.path(), &cancelled)
+            .unwrap();
+        let DownloadInspection::Supported(info) = inspect_download(&archive).unwrap() else {
+            panic!("cached compiled release should remain supported offline");
+        };
         assert_eq!(info.archive_sha256, release.archive_sha256);
     }
 }
