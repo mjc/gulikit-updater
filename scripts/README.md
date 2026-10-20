@@ -95,3 +95,20 @@ remove quarantine or disable platform protections to make that check pass.
 Apple's [notarization requirements](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 and [custom workflow guide](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
 describe the distribution checks used here.
+
+## Catalog signing key maintenance
+
+The firmware catalog uses the existing archive Git signing key. Its currently
+embedded primary key and signing subkey expire on 2027-09-10 at 18:49:59 UTC.
+Before expiry, extend the key using its existing OpenPGP owner workflow and
+publish the refreshed public key to GitHub so newly signed archive commits
+continue to receive a valid verification verdict. Refresh the embedded public
+key in the updater as part of the corresponding application release.
+
+For a signing-subkey rotation, first ship the new public subkey and its exact
+fingerprint in the catalog admission allowlist, keeping the old subkey during
+the transition. Only then switch archive commits to the new signing subkey.
+Clients that lack the new key need an application update to refresh the catalog;
+previously authenticated cache entries remain usable offline. Never accept a
+replacement trust key from the remote catalog or cache. This does not change
+manufacturer firmware files or add manufacturer signatures.

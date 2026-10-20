@@ -12,20 +12,24 @@ use thiserror::Error;
 
 pub(crate) const MAX_PROOF_BYTES: usize = 1024 * 1024;
 const MAX_COMMIT_BYTES: usize = 128 * 1024;
-const MAINTAINER_FINGERPRINT: &str = "53e071b497f9f6ef73f6c356d7415e8b2e80d893";
+// Ship replacement signing subkeys in the application before rotating the archive.
+const MAINTAINER_FINGERPRINTS: &[&str] = &["53e071b497f9f6ef73f6c356d7415e8b2e80d893"];
 const PUBLIC_KEY: &str = include_str!("keys/maintainer.asc");
 
 /// Trust roots are constructed by the application, never deserialized from a cache.
 #[derive(Clone, Debug)]
 pub(crate) struct CatalogKey {
     public_key: String,
-    fingerprint: String,
+    fingerprints: Vec<String>,
 }
 impl CatalogKey {
     pub(crate) fn maintainer() -> Self {
         Self {
             public_key: PUBLIC_KEY.to_owned(),
-            fingerprint: MAINTAINER_FINGERPRINT.to_owned(),
+            fingerprints: MAINTAINER_FINGERPRINTS
+                .iter()
+                .map(|fingerprint| (*fingerprint).to_owned())
+                .collect(),
         }
     }
     #[cfg(test)]
@@ -35,7 +39,7 @@ impl CatalogKey {
                 .unwrap();
         Self {
             public_key: fixture["public_key"].as_str().unwrap().to_owned(),
-            fingerprint: fixture["fingerprint"].as_str().unwrap().to_owned(),
+            fingerprints: vec![fixture["fingerprint"].as_str().unwrap().to_owned()],
         }
     }
 }
@@ -46,9 +50,13 @@ pub enum AdmissionError {
     Response(#[from] serde_json::Error),
     #[error("commit-verification response identifies a different revision")]
     Revision,
-    #[error("GitHub did not verify the archive commit signature")]
+    #[error(
+        "GitHub did not verify the archive commit signature; a newer app version may be required"
+    )]
     Unverified,
-    #[error("archive commit signature does not verify against the trusted archive key")]
+    #[error(
+        "archive commit signature does not verify against a trusted archive key; a newer app version may be required"
+    )]
     Signature,
     #[error("catalog Git-object proof does not match its signed commit")]
     Object,
@@ -119,19 +127,22 @@ impl SignedCommit {
             .map_err(|_| AdmissionError::Signature)?;
         let (public, _) =
             SignedPublicKey::from_string(&key.public_key).map_err(|_| AdmissionError::Signature)?;
-        let verified = if hex::encode(public.primary_key.fingerprint().as_bytes())
-            == key.fingerprint
-        {
-            signature.verify(&public.primary_key, self.payload.as_bytes())
-        } else {
-            let subkey = public
-                .public_subkeys
-                .iter()
-                .find(|subkey| hex::encode(subkey.key.fingerprint().as_bytes()) == key.fingerprint)
-                .ok_or(AdmissionError::Signature)?;
-            signature.verify(&subkey.key, self.payload.as_bytes())
-        };
-        verified.map_err(|_| AdmissionError::Signature)?;
+        let verified = (key
+            .fingerprints
+            .contains(&hex::encode(public.primary_key.fingerprint().as_bytes()))
+            && signature
+                .verify(&public.primary_key, self.payload.as_bytes())
+                .is_ok())
+            || public.public_subkeys.iter().any(|subkey| {
+                key.fingerprints
+                    .contains(&hex::encode(subkey.key.fingerprint().as_bytes()))
+                    && signature
+                        .verify(&subkey.key, self.payload.as_bytes())
+                        .is_ok()
+            });
+        if !verified {
+            return Err(AdmissionError::Signature);
+        }
         // Git stores the detached signature as a folded header before the separator.
         let split = self.payload.find("\n\n").ok_or(AdmissionError::Object)? + 1;
         let signed = format!(
@@ -287,6 +298,17 @@ mod tests {
     #[test]
     fn accepts_existing_archive_commit_signed_by_pinned_key() {
         verify_commit(REVISION, VERIFIED).unwrap();
+    }
+
+    #[test]
+    fn accepts_only_explicitly_allowed_signing_keys_during_rotation() {
+        let mut key = CatalogKey::maintainer();
+        key.fingerprints
+            .insert(0, "ef8586ebfb8cbf8c8f53651e0de33d9681fafad9".into());
+        SignedCommit::from_response(REVISION, VERIFIED, &key).unwrap();
+        // Trusting a primary key must not implicitly trust every signing subkey.
+        key.fingerprints.pop();
+        assert!(SignedCommit::from_response(REVISION, VERIFIED, &key).is_err());
     }
 
     #[test]
