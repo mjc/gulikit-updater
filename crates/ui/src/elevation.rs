@@ -12,7 +12,11 @@ const AUTHORIZATION_SCRIPT: &str = r#"
 on run argv
     set toolPath to item 1 of argv
     set loginUID to item 2 of argv
-    set commandText to "/bin/launchctl asuser " & (quoted form of loginUID) & " " & (quoted form of toolPath) & " " & (quoted form of "--authorized-invoking-uid") & " " & (quoted form of loginUID)
+    set codeHash to item 3 of argv
+    set machineArchitecture to item 4 of argv
+    set bundled to item 5 of argv
+    set shellBody to item 6 of argv
+    set commandText to "/bin/sh -c " & (quoted form of shellBody) & " gulikit-authorized-launch " & (quoted form of toolPath) & " " & (quoted form of loginUID) & " " & (quoted form of codeHash) & " " & (quoted form of machineArchitecture) & " " & (quoted form of bundled)
     try
         do shell script commandText with administrator privileges with prompt "GuliKit Updater needs administrator access to open its USB update interface. No controller command runs until you choose an action in the app."
     on error errorMessage number errorNumber
@@ -24,6 +28,42 @@ on run argv
     return "GULIKIT_ELEVATED_APP_EXITED"
 end run
 "#;
+
+// Only this root-owned snapshot is executed after authorization. The original
+// user-writable path may change while the system dialog is open.
+const AUTHORIZED_LAUNCH_SHELL: &str = r#"
+set -eu
+umask 077
+ulimit -f 2097152
+source_path=$1
+login_uid=$2
+code_hash=$3
+architecture=$4
+bundled=$5
+stage=$(/usr/bin/mktemp -d /private/var/root/gulikit-updater.XXXXXXXX)
+trap '/bin/rm -rf "$stage"' EXIT
+if [ "$bundled" = true ]; then
+    target="$stage/GuliKit Updater.app"
+    /bin/cp -RP "$source_path" "$target"
+    test ! -L "$target"
+    executable="$target/Contents/MacOS/gulikit-ui"
+else
+    target="$stage/gulikit-ui"
+    /bin/cp -RP "$source_path" "$target"
+    executable="$target"
+fi
+links=$(/usr/bin/find "$target" -type l -print)
+test -z "$links"
+test -f "$executable"
+/usr/bin/codesign --verify --strict --architecture "$architecture" --test-requirement "=cdhash H\"$code_hash\"" "$target"
+/bin/chmod 700 "$executable"
+/bin/launchctl asuser "$login_uid" "$executable" --authorized-invoking-uid "$login_uid"
+"#;
+const EXECUTABLE_ARCHITECTURE: &str = if cfg!(target_arch = "aarch64") {
+    "arm64"
+} else {
+    "x86_64"
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupDisposition {
@@ -117,30 +157,56 @@ fn request_authorized_launch(
     if !home.is_absolute() {
         return Err("Administrator home directory is not absolute".into());
     }
-    let output = authorized_command(executable, real_uid, &home)
+    let code_hash = gulikit_platform::macos::running_executable_cdhash()?;
+    let output = authorized_command(executable, real_uid, &code_hash, &home)
         .output()
         .map_err(|error| format!("Could not request administrator authorization: {error}"))?;
 
     authorization_outcome(&output)
 }
 
-fn authorized_command(executable: &Path, real_uid: u32, home: &Path) -> Command {
+fn authorized_command(executable: &Path, real_uid: u32, code_hash: &str, home: &Path) -> Command {
     let mut command = Command::new(OSASCRIPT);
     // launchctl adopts the user's UI session, not their environment. The root
     // GUI needs its account's home to locate the firmware cache.
     command
-        .args(osascript_arguments(executable, real_uid))
+        .args(osascript_arguments(executable, real_uid, code_hash))
         .env_clear()
         .env("HOME", home);
     command
 }
 
-fn osascript_arguments(executable: &Path, real_uid: u32) -> [OsString; 4] {
+fn launch_source(executable: &Path) -> (&Path, bool) {
+    let bundle = executable
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "MacOS"))
+        .and_then(Path::parent)
+        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))
+        .and_then(Path::parent)
+        .filter(|path| path.extension().is_some_and(|extension| extension == "app"));
+    match bundle {
+        Some(bundle)
+            if executable
+                .file_name()
+                .is_some_and(|name| name == "gulikit-ui") =>
+        {
+            (bundle, true)
+        }
+        _ => (executable, false),
+    }
+}
+
+fn osascript_arguments(executable: &Path, real_uid: u32, code_hash: &str) -> [OsString; 8] {
+    let (source, bundled) = launch_source(executable);
     [
         OsString::from("-e"),
         OsString::from(AUTHORIZATION_SCRIPT),
-        executable.as_os_str().to_owned(),
+        source.as_os_str().to_owned(),
         OsString::from(real_uid.to_string()),
+        OsString::from(code_hash),
+        OsString::from(EXECUTABLE_ARCHITECTURE),
+        OsString::from(bundled.to_string()),
+        OsString::from(AUTHORIZED_LAUNCH_SHELL),
     ]
 }
 
@@ -247,14 +313,18 @@ mod tests {
     fn script_is_static_and_path_and_uid_are_separate_arguments() {
         let executable =
             PathBuf::from("/tmp/Guli Kit/'quoted' $folder/é.app/Contents/MacOS/gulikit-ui");
-        let args = osascript_arguments(&executable, 501);
+        let args =
+            osascript_arguments(&executable, 501, "0123456789abcdef0123456789abcdef01234567");
 
-        assert_eq!(args.len(), 4);
+        assert_eq!(args.len(), 8);
         assert_eq!(args[0], "-e");
         assert_eq!(args[1], AUTHORIZATION_SCRIPT);
-        assert_eq!(args[2], executable.as_os_str());
+        assert_eq!(args[2], super::launch_source(&executable).0.as_os_str());
         assert_eq!(args[3], "501");
-        assert!(AUTHORIZATION_SCRIPT.contains("--authorized-invoking-uid"));
+        assert_eq!(args[4], "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(args[5], super::EXECUTABLE_ARCHITECTURE);
+        assert_eq!(args[6], "true");
+        assert_eq!(args[7], super::AUTHORIZED_LAUNCH_SHELL);
     }
 
     #[test]
@@ -262,11 +332,16 @@ mod tests {
         let executable =
             PathBuf::from("/Applications/GuliKit Updater.app/Contents/MacOS/gulikit-ui");
         let home = PathBuf::from("/var/root");
-        let command = super::authorized_command(&executable, 501, &home);
+        let command = super::authorized_command(
+            &executable,
+            501,
+            "0123456789abcdef0123456789abcdef01234567",
+            &home,
+        );
         assert_eq!(command.get_program(), super::OSASCRIPT);
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            osascript_arguments(&executable, 501)
+            osascript_arguments(&executable, 501, "0123456789abcdef0123456789abcdef01234567")
         );
         let environment = command.get_envs().collect::<Vec<_>>();
         assert_eq!(
@@ -289,20 +364,113 @@ mod tests {
     }
 
     #[test]
-    fn elevated_launcher_data_contains_only_the_executable_and_real_uid() {
+    fn elevated_launcher_data_pins_the_bundle_code_identity_and_real_uid() {
         let executable =
             PathBuf::from("/Applications/GuliKit Updater.app/Contents/MacOS/gulikit-ui");
-        let args = osascript_arguments(&executable, 501);
+        let args =
+            osascript_arguments(&executable, 501, "0123456789abcdef0123456789abcdef01234567");
 
         assert_eq!(
             args,
             [
                 OsString::from("-e"),
                 OsString::from(AUTHORIZATION_SCRIPT),
-                executable.into_os_string(),
+                super::launch_source(&executable).0.as_os_str().to_owned(),
                 OsString::from("501"),
+                OsString::from("0123456789abcdef0123456789abcdef01234567"),
+                OsString::from(super::EXECUTABLE_ARCHITECTURE),
+                OsString::from("true"),
+                OsString::from(super::AUTHORIZED_LAUNCH_SHELL),
             ]
         );
+    }
+
+    #[test]
+    fn authorized_snapshot_executes_only_matching_code_and_removes_its_private_copy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let code_hash = gulikit_platform::macos::running_executable_cdhash().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("user-writable-source.app");
+        std::fs::copy(std::env::current_exe().unwrap(), &source).unwrap();
+        let observed = temporary.path().join("observed");
+        let launcher = temporary.path().join("launchctl");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$3\" > \"$GULIKIT_TEST_OBSERVED\"\ntest -f \"$3\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let script = super::AUTHORIZED_LAUNCH_SHELL
+            .replace("/private/var/root", temporary.path().to_str().unwrap())
+            .replace("/bin/launchctl", launcher.to_str().unwrap());
+        let run = |pinned_hash: &str, bundled: &str| {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", &script, "gulikit-authorized-launch"])
+                .arg(&source)
+                .args(["501", pinned_hash, super::EXECUTABLE_ARCHITECTURE, bundled])
+                .env("GULIKIT_TEST_OBSERVED", &observed)
+                .output()
+                .unwrap()
+        };
+        let accepted = run(&code_hash, "false");
+        assert!(accepted.status.success(), "{accepted:?}");
+        let copied = std::fs::read_to_string(&observed).unwrap();
+        let copied = std::path::Path::new(copied.trim());
+        assert_ne!(copied, source);
+        assert!(!copied.exists(), "private copy survived launcher exit");
+        std::fs::remove_file(&observed).unwrap();
+
+        // Replace the original after capturing the running code identity.
+        std::fs::copy("/usr/bin/true", &source).unwrap();
+        let rejected = run(&code_hash, "false");
+        assert!(!rejected.status.success());
+        assert!(
+            !observed.exists(),
+            "replacement executable reached launchctl"
+        );
+
+        // A signed bundle must retain its Info.plist and resource seal.
+        std::fs::remove_file(&source).unwrap();
+        let contents = source.join("Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::copy(
+            std::env::current_exe().unwrap(),
+            contents.join("MacOS/gulikit-ui"),
+        )
+        .unwrap();
+        std::fs::write(contents.join("Info.plist"), r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>gulikit-ui</string><key>CFBundleIdentifier</key><string>invalid.example.launcher-test</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#).unwrap();
+        let signed = std::process::Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(signed.status.success(), "{signed:?}");
+        let displayed = std::process::Command::new("/usr/bin/codesign")
+            .args([
+                "--display",
+                "--verbose=4",
+                "--architecture",
+                super::EXECUTABLE_ARCHITECTURE,
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(displayed.status.success(), "{displayed:?}");
+        let displayed = String::from_utf8(displayed.stderr).unwrap();
+        let bundle_hash = displayed
+            .lines()
+            .find_map(|line| line.strip_prefix("CDHash="))
+            .unwrap_or_else(|| panic!("codesign omitted the code hash: {displayed}"));
+        let accepted = run(bundle_hash, "true");
+        assert!(accepted.status.success(), "{accepted:?}");
+        let copied = std::fs::read_to_string(&observed).unwrap();
+        assert!(!std::path::Path::new(copied.trim()).exists());
+        std::fs::remove_file(&observed).unwrap();
+
+        std::os::unix::fs::symlink(temporary.path(), contents.join("untrusted-link")).unwrap();
+        assert!(!run(bundle_hash, "true").status.success());
+        assert!(!observed.exists());
     }
 
     #[test]

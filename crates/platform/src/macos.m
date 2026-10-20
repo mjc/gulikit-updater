@@ -5,7 +5,11 @@
 #import <IOKit/IOKitLib.h>
 #import <IOKit/usb/USB.h>
 #import <IOUSBHost/IOUSBHost.h>
+#import <Security/Security.h>
 #include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 // The pinned build SDK predates this public method. Match the current Apple
@@ -301,6 +305,68 @@ char *gu_snapshot(uint64_t bound_id) {
   }
 }
 void gu_free(void *value) { free(value); }
+
+char *gu_running_executable_cdhash(void) {
+  @autoreleasepool {
+    SecCodeRef self = NULL;
+    SecStaticCodeRef static_self = NULL;
+    CFDictionaryRef information = NULL;
+    SecRequirementRef requirement = NULL;
+    char *result = NULL;
+
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &self) != errSecSuccess || !self)
+      goto cleanup;
+    // SecCodeCheckValidity on the dynamic code object is protected against
+    // changes to its filesystem source. Repeat after static-info extraction,
+    // whose path translation alone does not provide that guarantee.
+    if (SecCodeCheckValidity(self, kSecCSDefaultFlags, NULL) != errSecSuccess)
+      goto cleanup;
+    static_self = (SecStaticCodeRef)self;
+    if (SecCodeCopySigningInformation(static_self, kSecCSDefaultFlags,
+                                      &information) != errSecSuccess ||
+        !information)
+      goto cleanup;
+    CFDataRef unique =
+        (CFDataRef)CFDictionaryGetValue(information, kSecCodeInfoUnique);
+    if (!unique || CFGetTypeID(unique) != CFDataGetTypeID() ||
+        CFDataGetLength(unique) != 20)
+      goto cleanup;
+
+    const UInt8 *bytes = CFDataGetBytePtr(unique);
+    char hash[41];
+    for (size_t index = 0; index < 20; index++)
+      snprintf(hash + index * 2, 3, "%02x", bytes[index]);
+    hash[40] = '\0';
+
+    char requirement_text[64];
+    snprintf(requirement_text, sizeof(requirement_text), "cdhash H\"%s\"",
+             hash);
+    CFStringRef requirement_string = CFStringCreateWithCString(
+        kCFAllocatorDefault, requirement_text, kCFStringEncodingASCII);
+    if (!requirement_string)
+      goto cleanup;
+    OSStatus status = SecRequirementCreateWithString(
+        requirement_string, kSecCSDefaultFlags, &requirement);
+    CFRelease(requirement_string);
+    if (status != errSecSuccess || !requirement ||
+        SecCodeCheckValidity(self, kSecCSDefaultFlags, requirement) !=
+            errSecSuccess)
+      goto cleanup;
+
+    result = malloc(sizeof(hash));
+    if (result)
+      memcpy(result, hash, sizeof(hash));
+
+  cleanup:
+    if (requirement)
+      CFRelease(requirement);
+    if (information)
+      CFRelease(information);
+    if (self)
+      CFRelease(self);
+    return result;
+  }
+}
 
 typedef struct {
   IONotificationPortRef port;

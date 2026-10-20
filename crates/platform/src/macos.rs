@@ -41,6 +41,7 @@ unsafe extern "C" {
         bound: u64,
     ) -> i32;
     fn gu_free(value: *mut c_void);
+    fn gu_running_executable_cdhash() -> *mut c_char;
     fn gu_watch_open() -> *mut c_void;
     fn gu_watch_epoch(value: *mut c_void) -> u64;
     fn gu_watch_state(value: *mut c_void, epoch: *mut u64, arrivals: *mut u64);
@@ -74,6 +75,30 @@ unsafe extern "C" {
         capacity: usize,
     ) -> i32;
     fn gu_usb_description(value: *mut c_void) -> *mut c_char;
+}
+
+/// Return the code-directory hash of this running macOS executable.
+///
+/// The native bridge validates the dynamic `SecCode` before and after reading
+/// its static signing information, then checks the extracted hash against that
+/// same running code object.
+///
+/// # Errors
+///
+/// Returns an error if macOS cannot establish a valid running code identity.
+pub fn running_executable_cdhash() -> Result<String, String> {
+    // SAFETY: the bridge returns a malloc-owned NUL-terminated string or null;
+    // gu_free is the matching deallocator.
+    unsafe {
+        let ptr = NonNull::new(gu_running_executable_cdhash())
+            .ok_or("Could not identify the running executable's code signature")?;
+        let bytes = CStr::from_ptr(ptr.as_ptr()).to_bytes();
+        let result = std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|error| format!("Invalid code hash from macOS: {error}"));
+        gu_free(ptr.as_ptr().cast());
+        result
+    }
 }
 
 ///
