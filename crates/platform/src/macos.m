@@ -454,9 +454,9 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
       if ([error.domain isEqualToString:@"IOUSBHostErrorDomain"] &&
           error.code == kIOReturnNotPrivileged)
         error_text(message, capacity,
-                   @"USB capture denied (kIOReturnNotPrivileged). This build "
-                    "requires an administrator-authenticated launch; the "
-                    "desktop authorization flow is not implemented.");
+                   @"USB capture denied (kIOReturnNotPrivileged). Relaunch the "
+                    "desktop updater and approve the administrator prompt, "
+                    "or run the CLI with administrator privileges.");
       else
         error_text(message, capacity, error.description);
       return NULL;

@@ -83,20 +83,35 @@ inspection and the --demo UI are available. See the project's desktop README.
                 throw "Packaged help failed: $exe (exit $($process.ExitCode)): $(Get-Content $stderr -Raw)"
             }
         }
+        $demoStdout = Join-Path $temporary 'demo.stdout'
+        $demoStderr = Join-Path $temporary 'demo.stderr'
         $demo = Start-Process (Join-Path $consumer 'gulikit-ui.exe') `
-            -ArgumentList '--demo' -WorkingDirectory $consumer -PassThru
+            -ArgumentList '--demo' -WorkingDirectory $consumer `
+            -RedirectStandardOutput $demoStdout -RedirectStandardError $demoStderr -PassThru
         try {
+            $null = $demo.Handle
             $deadline = [DateTime]::UtcNow.AddSeconds(30)
             while (!$demo.HasExited -and $demo.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline) {
                 Start-Sleep -Milliseconds 500
                 $demo.Refresh()
             }
             if ($demo.HasExited -or $demo.MainWindowHandle -eq 0) {
-                throw 'Packaged demo did not open a window'
+                throw "Packaged demo did not open a window: $(Get-Content $demoStderr -Raw)"
             }
-            $null = $demo.CloseMainWindow()
-            if (!$demo.WaitForExit(30000) -or $demo.ExitCode -ne 0) {
-                throw 'Packaged demo did not close cleanly'
+            # A window handle can appear before the UI message loop is ready.
+            if (!$demo.WaitForInputIdle(30000)) {
+                throw 'Packaged demo did not become ready for window input'
+            }
+            $demo.Refresh()
+            if (!$demo.CloseMainWindow()) {
+                throw "Packaged demo rejected the close request (window $($demo.MainWindowHandle))"
+            }
+            if (!$demo.WaitForExit(30000)) {
+                $demo.Refresh()
+                throw "Packaged demo close timed out (window $($demo.MainWindowHandle), responding $($demo.Responding)): $(Get-Content $demoStderr -Raw)"
+            }
+            if ($demo.ExitCode -ne 0) {
+                throw "Packaged demo exited with code $($demo.ExitCode): $(Get-Content $demoStderr -Raw)"
             }
         } finally {
             if (!$demo.HasExited) {
