@@ -104,7 +104,9 @@ mod tests {
     fn rejects_valid_signature_from_foreign_key() {
         const FOREIGN_KEY: &str = include_str!("../tests/fixtures/foreign-key.asc");
         const FOREIGN_SIGNATURE: &str = include_str!("../tests/fixtures/foreign-signature.asc");
-        const FOREIGN_PAYLOAD: &str = include_str!("../tests/fixtures/foreign-payload.txt");
+        // Keep signed binary data independent of Git checkout line endings.
+        const FOREIGN_PAYLOAD: &str =
+            "Foreign signer regression payload for Gulikit archive admission.\n";
 
         let (signature, _) = DetachedSignature::from_string(FOREIGN_SIGNATURE).unwrap();
         let (key, _) = SignedPublicKey::from_string(FOREIGN_KEY).unwrap();
