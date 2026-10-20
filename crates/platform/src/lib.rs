@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "macos")]
+pub mod macos_helper;
 
 pub mod acquisition;
 #[cfg(any(target_os = "macos", test))]

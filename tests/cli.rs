@@ -1,6 +1,23 @@
 use assert_cmd::Command;
 use serde_json::Value;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn helper_rejects_extra_arguments_before_service_startup() {
+    let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))
+        .args([
+            gulikit_platform::macos_helper::HELPER_ARGUMENT,
+            "unexpected-argument",
+        ])
+        .assert()
+        .code(2);
+    assert_eq!(result.get_output().stdout, [] as [u8; 0]);
+    assert!(
+        String::from_utf8_lossy(&result.get_output().stderr)
+            .contains("accepts no additional arguments")
+    );
+}
+
 #[test]
 fn lists_reviewed_firmware_without_touching_devices() {
     let result = Command::new(assert_cmd::cargo::cargo_bin!("gulikit-updater"))

@@ -280,6 +280,24 @@ mod native;
 
 fn main() -> ExitCode {
     #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(
+            gulikit_platform::macos_helper::HELPER_ARGUMENT,
+        ))
+    {
+        if std::env::args_os().count() != 2 {
+            eprintln!("The privileged helper accepts no additional arguments.");
+            return ExitCode::from(2);
+        }
+        return match gulikit_platform::macos_helper::serve(std::time::Duration::from_secs(30)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(4)
+            }
+        };
+    }
+    #[cfg(target_os = "macos")]
     if let Some(code) = std::env::args_os()
         .nth(1)
         .as_deref()

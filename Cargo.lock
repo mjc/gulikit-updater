@@ -2337,6 +2337,7 @@ name = "gulikit-dist"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "gulikit-platform",
  "hex",
  "serde_json",
  "sha2 0.11.1",

@@ -52,6 +52,19 @@ tests. For a signed local release, run `devenv tasks run dist:macos:release` wit
 `xcrun notarytool store-credentials`. The bundled CLI is at
 `GuliKit Updater.app/Contents/Helpers/gulikit-updater`.
 
+The macOS bundle requires macOS 13 or later. It includes an SMAppService
+LaunchDaemon plist for the bundled CLI's private helper entry point. The job
+starts on a Mach service request, has no login or boot launch trigger, and exits
+after its last client disconnects and the idle interval expires. Packaging and
+help checks do not register the service.
+
+The helper currently provides an authenticated Ping channel. Registration and
+unregistration are explicit API calls; a registered service may still require
+approval in System Settings. The client and helper require the expected code
+identifiers and the same Apple-issued signing Team ID, so ad-hoc packaging tests
+cannot establish helper acceptance. Firmware operations still use the existing
+elevated GUI until the transaction bridge is connected to this helper.
+
 The release task also accepts an existing App Store Connect API key,
 including one materialized as a temporary file by SecretSpec. Supply
 `--notary-key PATH --notary-key-id ID` and, for a team key, `--notary-issuer ID`

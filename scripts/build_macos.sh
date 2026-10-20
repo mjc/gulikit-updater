@@ -4,7 +4,7 @@
 set -euo pipefail
 export DEVELOPER_DIR="${DEVELOPER_DIR_OVERRIDE:-/Applications/Xcode.app/Contents/Developer}"
 export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
-export MACOSX_DEPLOYMENT_TARGET=12.0
+export MACOSX_DEPLOYMENT_TARGET=13.0
 export CC=/usr/bin/clang
 export CXX=/usr/bin/clang++
 export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/usr/bin/clang

@@ -117,7 +117,7 @@ fn signed_archive_extracts_and_executes_with_valid_metadata() {
     .unwrap();
     let info: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(info["CFBundleShortVersionString"], "0.1.0");
-    assert_eq!(info["LSMinimumSystemVersion"], "12.0");
+    assert_eq!(info["LSMinimumSystemVersion"], "13.0");
     assert_eq!(info["LSUIElement"], true);
     assert!(
         consumer
@@ -125,6 +125,60 @@ fn signed_archive_extracts_and_executes_with_valid_metadata() {
             .join(info["CFBundleExecutable"].as_str().unwrap())
             .is_file()
     );
+    let daemon_plist = consumer
+        .join("Contents/Library/LaunchDaemons")
+        .join(PLIST_NAME);
+    let json = run(
+        &Native,
+        "/usr/bin/plutil",
+        &[
+            "-convert".into(),
+            "json".into(),
+            "-o".into(),
+            "-".into(),
+            daemon_plist.into(),
+        ],
+    )
+    .unwrap();
+    let daemon: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(daemon["Label"], MACH_SERVICE);
+    assert_eq!(daemon["BundleProgram"], "Contents/Helpers/gulikit-updater");
+    assert_eq!(
+        daemon["ProgramArguments"],
+        serde_json::json!(["Contents/Helpers/gulikit-updater", HELPER_ARGUMENT])
+    );
+    assert_eq!(
+        daemon["MachServices"],
+        serde_json::json!({MACH_SERVICE: true})
+    );
+    assert_eq!(daemon["UserName"], "root");
+    assert!(daemon.get("RunAtLoad").is_none());
+    assert!(daemon.get("KeepAlive").is_none());
+    assert!(
+        consumer
+            .join(daemon["BundleProgram"].as_str().unwrap())
+            .is_file()
+    );
+    for (target, identifier) in [
+        (
+            consumer.join("Contents/Helpers/gulikit-updater"),
+            HELPER_IDENTIFIER,
+        ),
+        (consumer.clone(), APP_IDENTIFIER),
+    ] {
+        let output = Native
+            .execute(
+                "/usr/bin/codesign",
+                &["--display".into(), "--verbose=4".into(), target.into()],
+            )
+            .unwrap();
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .any(|line| line == format!("Identifier={identifier}"))
+        );
+    }
 }
 
 #[test]

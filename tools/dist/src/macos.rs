@@ -1,4 +1,7 @@
 use clap::{Parser, ValueEnum};
+use gulikit_platform::macos_helper::{
+    APP_IDENTIFIER, HELPER_ARGUMENT, HELPER_IDENTIFIER, MACH_SERVICE, PLIST_NAME,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -171,15 +174,32 @@ fn stage(
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>gulikit-ui</string>
-<key>CFBundleIdentifier</key><string>lol.mjc.gulikit-updater</string>
+<key>CFBundleIdentifier</key><string>{APP_IDENTIFIER}</string>
 <key>CFBundleName</key><string>GuliKit Updater</string>
 <key>CFBundleDisplayName</key><string>GuliKit Updater</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>{version}</string>
 <key>CFBundleVersion</key><string>{version}</string>
-<key>LSMinimumSystemVersion</key><string>12.0</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSUIElement</key><true/>
+</dict></plist>
+"#
+        ),
+    )?;
+    let daemons = app.join("Contents/Library/LaunchDaemons");
+    fs::create_dir_all(&daemons)?;
+    fs::write(
+        daemons.join(PLIST_NAME),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{MACH_SERVICE}</string>
+<key>BundleProgram</key><string>Contents/Helpers/gulikit-updater</string>
+<key>ProgramArguments</key><array><string>Contents/Helpers/gulikit-updater</string><string>{HELPER_ARGUMENT}</string></array>
+<key>MachServices</key><dict><key>{MACH_SERVICE}</key><true/></dict>
+<key>UserName</key><string>root</string>
 </dict></plist>
 "#
         ),
@@ -208,8 +228,15 @@ fn sign(runner: &impl Runner, app: &Path, identity: &str, keychain: Option<&Path
         options.extend(["--keychain".into(), keychain.into()]);
     }
     // Sign inside out. --deep is reserved for verification.
-    for target in [app.join("Contents/Helpers/gulikit-updater"), app.to_owned()] {
+    for (target, identifier) in [
+        (
+            app.join("Contents/Helpers/gulikit-updater"),
+            HELPER_IDENTIFIER,
+        ),
+        (app.to_owned(), APP_IDENTIFIER),
+    ] {
         let mut arguments = options.clone();
+        arguments.extend(["--identifier".into(), identifier.into()]);
         arguments.push(target.into());
         run(runner, "/usr/bin/codesign", &arguments)?;
     }
