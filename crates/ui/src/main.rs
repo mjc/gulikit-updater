@@ -12,6 +12,7 @@ use slint::ComponentHandle;
 slint::include_modules!();
 
 fn main() -> Result<(), slint::PlatformError> {
+    #[cfg(target_os = "macos")]
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     #[cfg(target_os = "macos")]
     if let Some(code) = arguments
@@ -31,7 +32,10 @@ fn main() -> Result<(), slint::PlatformError> {
         (arguments, owner)
     };
 
+    #[cfg(target_os = "macos")]
     let mut args = arguments.into_iter();
+    #[cfg(not(target_os = "macos"))]
+    let mut args = std::env::args_os().skip(1);
     let argument = args.next();
     let extra = args.next().is_some();
     if !extra

@@ -1057,7 +1057,11 @@ mod ownership_tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         assert_eq!(nix::unistd::geteuid().as_raw(), 0);
-        let owner_uid = nix::unistd::getuid().as_raw();
+        let owner_uid = std::env::var("SUDO_UID")
+            .ok()
+            .and_then(|uid| uid.parse::<u32>().ok())
+            .filter(|uid| *uid != 0 && *uid != u32::MAX)
+            .unwrap_or_else(|| nix::unistd::getuid().as_raw());
         assert_ne!(owner_uid, 0);
 
         let temporary = tempfile::tempdir().unwrap();
