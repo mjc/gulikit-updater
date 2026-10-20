@@ -4,7 +4,7 @@ use gulikit_ui::{
     Page as ModelPage,
     archive::{ArchiveBrowser, ArchiveEvent, ArchiveView, cache_directory},
     archive_package::DownloadInspection,
-    backend::NATIVE_UPDATE_UNAVAILABLE,
+    backend::{NATIVE_UPDATE_SUPPORTED, NATIVE_UPDATE_UNAVAILABLE},
     live::{Event, LiveApp, Work},
 };
 use slint::ComponentHandle;
@@ -97,9 +97,8 @@ impl Driver {
 
 fn present(ui: &AppWindow, app: &LiveApp, archive: &ArchiveBrowser) {
     let v = app.view();
-    ui.set_model_confirmed(v.confirmed);
     ui.set_same_controller(v.same_controller);
-    let can_update = v.can_update && ui.get_demo_mode();
+    let can_update = v.can_update && (ui.get_demo_mode() || NATIVE_UPDATE_SUPPORTED);
     ui.set_primary_enabled(
         v.can_primary && !archive.is_busy() && (v.page != ModelPage::Ready || can_update),
     );
@@ -150,6 +149,8 @@ fn present(ui: &AppWindow, app: &LiveApp, archive: &ArchiveBrowser) {
         v.progress.total
     );
     state.can_update = can_update;
+    state.is_downgrade = v.is_downgrade;
+    state.can_allow_downgrade = v.can_allow_downgrade && !archive.is_busy();
     state.can_choose_package = v.can_choose_package && !archive.is_busy();
     state.can_open_attempt =
         v.can_open_attempt && (ui.get_demo_mode() || cfg!(target_os = "macos"));
@@ -159,13 +160,14 @@ fn present(ui: &AppWindow, app: &LiveApp, archive: &ArchiveBrowser) {
     state.connected = v.connected;
     state.identity_known = v.confirmed && v.connected;
     state.warning = !can_update && v.page != ModelPage::Verified;
-    let notice = if v.can_update && !ui.get_demo_mode() {
+    let notice = if v.can_update && !ui.get_demo_mode() && !NATIVE_UPDATE_SUPPORTED {
         NATIVE_UPDATE_UNAVAILABLE
     } else {
         v.notice
     };
     update_text(&mut state.notice, notice);
     state.error = state.notice.clone();
+    ui.set_allow_downgrade(v.allow_downgrade);
     update_text(&mut state.status, status);
     update_log(&mut state.log, v.log);
     present_archive(&mut state, &archive.view());
@@ -260,15 +262,6 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
     bind_demo_actions(ui, driver, demo);
     {
         let (weak, driver) = (ui.as_weak(), driver.clone());
-        ui.on_confirm_model(move |confirmed| {
-            act(&weak, &driver, |app| {
-                app.confirm_model(confirmed);
-                None
-            });
-        });
-    }
-    {
-        let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_confirm_same(move |confirmed| {
             act(&weak, &driver, |app| {
                 app.confirm_same_controller(confirmed);
@@ -278,9 +271,19 @@ fn bind_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>, demo: bool) {
     }
     {
         let (weak, driver) = (ui.as_weak(), driver.clone());
+        ui.on_set_allow_downgrade(move |allow| {
+            let mut driver = driver.borrow_mut();
+            driver.app.set_allow_downgrade(allow);
+            if let Some(ui) = weak.upgrade() {
+                present(&ui, &driver.app, &driver.archive);
+            }
+        });
+    }
+    {
+        let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_primary_action(move || {
             act(&weak, &driver, |app| {
-                if !demo && app.can_update() {
+                if !demo && !NATIVE_UPDATE_SUPPORTED && app.can_update() {
                     return None;
                 }
                 app.primary()
@@ -359,7 +362,13 @@ fn bind_archive_actions(ui: &AppWindow, driver: &Rc<RefCell<Driver>>) {
         let (weak, driver) = (ui.as_weak(), driver.clone());
         ui.on_archive_download(move || {
             let mut driver = driver.borrow_mut();
-            driver.archive.download();
+            if driver.app.view().can_choose_package
+                && !driver.archive.is_busy()
+                && driver.archive.selected_record().is_some()
+            {
+                driver.app.clear_selected_package();
+                driver.archive.download();
+            }
             if let Some(ui) = weak.upgrade() {
                 present(&ui, &driver.app, &driver.archive);
             }

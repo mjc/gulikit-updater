@@ -411,21 +411,18 @@ fn archive_worker(
             }
             Request::Download { snapshot, path } => {
                 let result = (|| {
-                    let record = snapshot.index().find(&path).cloned().ok_or_else(|| {
-                        "Selected release is not in the selected archive snapshot.".to_owned()
-                    })?;
-                    let cache_path = client
+                    let archive = client
                         .download(&snapshot, &path, cancelled)
                         .map_err(|error| error.to_string())?;
-                    let inspection = crate::archive_package::inspect_download(&cache_path, &record);
-                    Ok((cache_path, record, inspection))
+                    let inspection = crate::archive_package::inspect_download(&archive);
+                    Ok((archive, inspection))
                 })();
                 match result {
-                    Ok((path, record, inspection)) => {
+                    Ok((archive, inspection)) => {
                         if events
                             .send(ArchiveEvent::Downloaded {
-                                path,
-                                record: Box::new(record),
+                                path: archive.path().to_owned(),
+                                record: Box::new(archive.record().clone()),
                                 inspection,
                             })
                             .is_err()

@@ -9,7 +9,13 @@ fn main() {
             .flag("-Wextra")
             .flag("-Werror")
             .compile("gulikit_macos");
-        for framework in ["Foundation", "IOKit", "IOUSBHost", "DiskArbitration"] {
+        for framework in [
+            "Foundation",
+            "IOKit",
+            "IOUSBHost",
+            "DiskArbitration",
+            "Security",
+        ] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
     }

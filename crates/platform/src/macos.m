@@ -5,7 +5,11 @@
 #import <IOKit/IOKitLib.h>
 #import <IOKit/usb/USB.h>
 #import <IOUSBHost/IOUSBHost.h>
+#import <Security/Security.h>
 #include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 // The pinned build SDK predates this public method. Match the current Apple
@@ -199,6 +203,9 @@ char *gu_snapshot(uint64_t bound_id) {
           [errors addObject:@"USB attachment ID unavailable"];
         else {
           NSMutableDictionary *c = candidate(id);
+          if (p[@"idVendor"] && p[@"idProduct"])
+            c[@"usb"] =
+                @{@"vendor" : p[@"idVendor"], @"product" : p[@"idProduct"]};
           c[@"observed_profile"] = (observed || cached) ? @YES : @NO;
           c[@"storage_identities"] = storage;
           c[@"bluetooth_transport_candidate"] =
@@ -299,6 +306,68 @@ char *gu_snapshot(uint64_t bound_id) {
 }
 void gu_free(void *value) { free(value); }
 
+char *gu_running_executable_cdhash(void) {
+  @autoreleasepool {
+    SecCodeRef self = NULL;
+    SecStaticCodeRef static_self = NULL;
+    CFDictionaryRef information = NULL;
+    SecRequirementRef requirement = NULL;
+    char *result = NULL;
+
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &self) != errSecSuccess || !self)
+      goto cleanup;
+    // SecCodeCheckValidity on the dynamic code object is protected against
+    // changes to its filesystem source. Repeat after static-info extraction,
+    // whose path translation alone does not provide that guarantee.
+    if (SecCodeCheckValidity(self, kSecCSDefaultFlags, NULL) != errSecSuccess)
+      goto cleanup;
+    static_self = (SecStaticCodeRef)self;
+    if (SecCodeCopySigningInformation(static_self, kSecCSDefaultFlags,
+                                      &information) != errSecSuccess ||
+        !information)
+      goto cleanup;
+    CFDataRef unique =
+        (CFDataRef)CFDictionaryGetValue(information, kSecCodeInfoUnique);
+    if (!unique || CFGetTypeID(unique) != CFDataGetTypeID() ||
+        CFDataGetLength(unique) != 20)
+      goto cleanup;
+
+    const UInt8 *bytes = CFDataGetBytePtr(unique);
+    char hash[41];
+    for (size_t index = 0; index < 20; index++)
+      snprintf(hash + index * 2, 3, "%02x", bytes[index]);
+    hash[40] = '\0';
+
+    char requirement_text[64];
+    snprintf(requirement_text, sizeof(requirement_text), "cdhash H\"%s\"",
+             hash);
+    CFStringRef requirement_string = CFStringCreateWithCString(
+        kCFAllocatorDefault, requirement_text, kCFStringEncodingASCII);
+    if (!requirement_string)
+      goto cleanup;
+    OSStatus status = SecRequirementCreateWithString(
+        requirement_string, kSecCSDefaultFlags, &requirement);
+    CFRelease(requirement_string);
+    if (status != errSecSuccess || !requirement ||
+        SecCodeCheckValidity(self, kSecCSDefaultFlags, requirement) !=
+            errSecSuccess)
+      goto cleanup;
+
+    result = malloc(sizeof(hash));
+    if (result)
+      memcpy(result, hash, sizeof(hash));
+
+  cleanup:
+    if (requirement)
+      CFRelease(requirement);
+    if (information)
+      CFRelease(information);
+    if (self)
+      CFRelease(self);
+    return result;
+  }
+}
+
 typedef struct {
   IONotificationPortRef port;
   dispatch_queue_t queue;
@@ -389,6 +458,11 @@ void gu_watch_close(void *context) {
 @end
 @implementation GuTransport
 @end
+static void surrender_transport(GuTransport *transport) {
+  [transport.interface destroy];
+  // DeviceSurrender is bit0 in the public Apple SDK; ordinary destroy resets.
+  [transport.device destroyWithOptions:1U];
+}
 static void error_text(char *buffer, size_t size, NSString *text) {
   if (size)
     snprintf(buffer, size, "%s", text.UTF8String ?: "unknown IOUSBHost error");
@@ -433,9 +507,8 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
     if (transport.trace)
       fprintf(stderr, "USB_CAPTURE_BEGIN mono=%.6f ancestor=%llu\n",
               trace_time(), (unsigned long long)id);
-    // Modern Capture includes MSC interfaces. Ordinary destroy
-    // resets/rematches; Rust selects explicit DeviceSurrender after any
-    // possible firmware submission.
+    // Modern Capture includes MSC interfaces. DeviceSurrender releases capture
+    // without resetting update mode, including when acquisition fails.
     transport.device = [[IOUSBHostDevice alloc]
         initWithIOService:service
                   options:IOUSBHostObjectInitOptionsDeviceCapture
@@ -444,7 +517,14 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
           interestHandler:trace_interest("device")];
     if (!transport.device) {
       IOObjectRelease(service);
-      error_text(message, capacity, error.description);
+      if ([error.domain isEqualToString:@"IOUSBHostErrorDomain"] &&
+          error.code == kIOReturnNotPrivileged)
+        error_text(message, capacity,
+                   @"USB capture denied (kIOReturnNotPrivileged). Relaunch the "
+                    "desktop updater and approve the administrator prompt, "
+                    "or run the CLI with administrator privileges.");
+      else
+        error_text(message, capacity, error.description);
       return NULL;
     }
     mach_timespec_t deadline = {5, 0};
@@ -455,7 +535,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
           message, capacity,
           [NSString stringWithFormat:@"Capture did not reach quiet state: 0x%x",
                                      quiet]);
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     io_iterator_t children = 0;
@@ -464,7 +544,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
     IOObjectRelease(service);
     if (kr) {
       error_text(message, capacity, @"Interface enumeration failed");
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     io_service_t child;
@@ -491,8 +571,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
     if (matches != 1 || !transport.interface) {
       error_text(message, capacity,
                  error.description ?: @"Expected one BOT interface");
-      [transport.interface destroy];
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     const IOUSBInterfaceDescriptor *interface =
@@ -501,8 +580,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
         transport.interface.configurationDescriptor;
     if (!interface || !config) {
       error_text(message, capacity, @"Descriptors unavailable after capture");
-      [transport.interface destroy];
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     const uint8_t *bytes = (const uint8_t *)config;
@@ -542,8 +620,7 @@ void *gu_usb_open(uint64_t id, char *message, size_t capacity) {
         ![transport.input respondsToSelector:@selector(clearStallWithError:)]) {
       error_text(message, capacity,
                  error.description ?: @"Invalid bulk endpoint descriptors");
-      [transport.interface destroy];
-      [transport.device destroy];
+      surrender_transport(transport);
       return NULL;
     }
     transport.inputAddress = input;
@@ -616,18 +693,14 @@ int gu_usb_clear_stall(void *context, char *message, size_t capacity) {
     return result ? 0 : -1;
   }
 }
-void gu_usb_close(void *context, int surrender) {
+void gu_usb_surrender(void *context) {
   @autoreleasepool {
     GuTransport *transport = CFBridgingRelease(context);
     if (transport.trace)
-      fprintf(stderr, "USB_CLOSE_BEGIN mono=%.6f surrender=%d\n", trace_time(),
-              surrender);
-    [transport.interface destroy];
-    // DeviceSurrender is bit0 in the current public Apple SDK.
-    [transport.device destroyWithOptions:surrender ? 1U : 0U];
+      fprintf(stderr, "USB_CLOSE_BEGIN mono=%.6f surrender=1\n", trace_time());
+    surrender_transport(transport);
     if (transport.trace)
-      fprintf(stderr, "USB_CLOSE_END mono=%.6f surrender=%d\n", trace_time(),
-              surrender);
+      fprintf(stderr, "USB_CLOSE_END mono=%.6f surrender=1\n", trace_time());
   }
 }
 int gu_max_lun_result(int succeeded, size_t actual, int32_t code) {

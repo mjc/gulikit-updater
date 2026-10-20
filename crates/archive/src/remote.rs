@@ -1,11 +1,12 @@
-//! Bounded access to the public firmware orphan branch. Remote bytes remain
-//! descriptive archive data and do not authorize a controller write.
+//! Bounded access to the public firmware orphan branch. Cached records remain
+//! descriptive until authenticated against the immutable signed catalog commit.
 
 use crate::{
     FirmwareIndex, ReleaseRecord,
+    admission::{AdmissionError, AdmissionProof, CatalogKey, SignedCommit},
     manifest::{Error as ManifestError, MAX_ARCHIVE_BYTES, MAX_INDEX_BYTES},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
@@ -21,6 +22,16 @@ const REPOSITORY: &str = "gulikit-updater";
 const BRANCH: &str = "firmware";
 const HEADER_LIMIT: usize = 16 * 1024;
 const CHUNK_SIZE: usize = 64 * 1024;
+const MAX_CACHED_SNAPSHOT_BYTES: usize =
+    2 * MAX_INDEX_BYTES + 2 * crate::admission::MAX_PROOF_BYTES + 1024;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CachedSnapshot {
+    revision: String,
+    index: String,
+    proof: AdmissionProof,
+}
 
 #[derive(Deserialize)]
 struct BranchResponse {
@@ -46,6 +57,10 @@ pub enum RemoteError {
     Compressed,
     #[error("remote firmware branch returned an invalid revision")]
     InvalidRevision,
+    #[error("remote firmware commit was not admitted: {0}")]
+    Admission(#[from] AdmissionError),
+    #[error("cached firmware index does not match its authenticated commit")]
+    UntrustedSnapshot,
     #[error("requested archive path is not present in the selected snapshot")]
     ReleaseNotFound,
     #[error("remote operation was cancelled")]
@@ -64,6 +79,7 @@ pub struct ArchiveSnapshot {
     revision: String,
     index: FirmwareIndex,
     index_bytes: Vec<u8>,
+    admission_proof: Option<AdmissionProof>,
 }
 
 impl ArchiveSnapshot {
@@ -83,6 +99,7 @@ impl ArchiveSnapshot {
             revision: revision.to_ascii_lowercase(),
             index,
             index_bytes: index_bytes.to_vec(),
+            admission_proof: None,
         })
     }
 
@@ -97,10 +114,36 @@ impl ArchiveSnapshot {
     }
 }
 
+/// A package archive admitted against a verified immutable firmware commit.
+#[derive(Clone, Debug)]
+pub struct AuthorizedArchive {
+    path: PathBuf,
+    revision: String,
+    record: ReleaseRecord,
+}
+
+impl AuthorizedArchive {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    #[must_use]
+    pub fn record(&self) -> &ReleaseRecord {
+        &self.record
+    }
+}
+
 /// Client for the fixed public firmware branch, with an offline cache.
 pub struct ArchiveClient {
     cache_dir: PathBuf,
     fetcher: Box<dyn ArchiveFetcher>,
+    key: CatalogKey,
 }
 
 impl std::fmt::Debug for ArchiveClient {
@@ -129,13 +172,27 @@ impl ArchiveClient {
         Self {
             cache_dir,
             fetcher: Box::new(HttpsFetcher),
+            key: CatalogKey::maintainer(),
         }
     }
 
     #[doc(hidden)]
     #[must_use]
     pub fn with_fetcher(cache_dir: PathBuf, fetcher: Box<dyn ArchiveFetcher>) -> Self {
-        Self { cache_dir, fetcher }
+        Self {
+            cache_dir,
+            fetcher,
+            key: CatalogKey::maintainer(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_fetcher(cache_dir: PathBuf, fetcher: Box<dyn ArchiveFetcher>) -> Self {
+        Self {
+            cache_dir,
+            fetcher,
+            key: CatalogKey::fixture(),
+        }
     }
 
     /// Load the last successfully validated cached firmware index, if present.
@@ -143,11 +200,23 @@ impl ArchiveClient {
     /// # Errors
     /// Returns an error for unreadable, oversized, or invalid cached data.
     pub fn load_cached(&self) -> Result<Option<ArchiveSnapshot>, RemoteError> {
-        let bytes = match read_bounded(&self.cache_dir.join("snapshot"), MAX_INDEX_BYTES + 41) {
+        let bytes = match read_bounded(&self.cache_dir.join("snapshot"), MAX_CACHED_SNAPSHOT_BYTES)
+        {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        if bytes.first() == Some(&b'{') {
+            let cached: CachedSnapshot = serde_json::from_slice(&bytes)
+                .map_err(|error| RemoteError::Request(error.to_string()))?;
+            let index_bytes = cached.index.into_bytes();
+            cached
+                .proof
+                .verify(&cached.revision, &index_bytes, &self.key)?;
+            let mut snapshot = ArchiveSnapshot::from_parts(&cached.revision, &index_bytes)?;
+            snapshot.admission_proof = Some(cached.proof);
+            return Ok(Some(snapshot));
+        }
         let separator = bytes
             .iter()
             .position(|byte| *byte == b'\n')
@@ -160,7 +229,7 @@ impl ArchiveClient {
     }
 
     /// Resolve the current branch commit and fetch its manifest at that commit.
-    /// The cache changes only after both responses and manifest validation succeed.
+    /// The cache changes only after commit authentication and manifest validation succeed.
     ///
     /// # Errors
     /// Returns an error for cancellation, network failures, invalid revisions or
@@ -178,17 +247,10 @@ impl ArchiveClient {
         if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(RemoteError::InvalidRevision);
         }
-        let index_url = raw_url(&revision, "firmware.json")?;
-        let index_bytes = self
-            .fetcher
-            .fetch(index_url.as_str(), MAX_INDEX_BYTES, cancelled)?;
-        let snapshot = ArchiveSnapshot::from_parts(&revision, &index_bytes)?;
+        let snapshot = self.fetch_authenticated_snapshot(&revision, cancelled)?;
         check_cancelled(cancelled)?;
         fs::create_dir_all(&self.cache_dir)?;
-        let mut cache_bytes = snapshot.revision.as_bytes().to_vec();
-        cache_bytes.push(b'\n');
-        cache_bytes.extend_from_slice(&snapshot.index_bytes);
-        atomic_write(&self.cache_dir.join("snapshot"), &cache_bytes, cancelled)?;
+        self.cache_snapshot(&snapshot, cancelled)?;
         Ok(snapshot)
     }
 
@@ -203,21 +265,37 @@ impl ArchiveClient {
         snapshot: &ArchiveSnapshot,
         archive_path: &str,
         cancelled: &AtomicBool,
-    ) -> Result<PathBuf, RemoteError> {
+    ) -> Result<AuthorizedArchive, RemoteError> {
         check_cancelled(cancelled)?;
-        let record = snapshot
+        let admitted_snapshot = if let Some(proof) = &snapshot.admission_proof {
+            proof.verify(&snapshot.revision, &snapshot.index_bytes, &self.key)?;
+            snapshot.clone()
+        } else {
+            let admitted = self.fetch_authenticated_snapshot(&snapshot.revision, cancelled)?;
+            if admitted.index_bytes != snapshot.index_bytes {
+                return Err(RemoteError::UntrustedSnapshot);
+            }
+            self.cache_snapshot(&admitted, cancelled)?;
+            admitted
+        };
+        let record = admitted_snapshot
             .index
             .find(archive_path)
+            .cloned()
             .ok_or(RemoteError::ReleaseNotFound)?;
         let cache_path = self
             .cache_dir
             .join("archives")
             .join(record.sha256())
             .join(record.filename());
-        match read_verified_archive(&cache_path, record) {
+        match read_verified_archive(&cache_path, &record) {
             Ok(_) => {
                 check_cancelled(cancelled)?;
-                return Ok(cache_path);
+                return Ok(AuthorizedArchive {
+                    path: cache_path,
+                    revision: admitted_snapshot.revision,
+                    record,
+                });
             }
             Err(RemoteError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
@@ -228,7 +306,7 @@ impl ArchiveClient {
             .path()
             .strip_prefix('/')
             .ok_or(RemoteError::ReleaseNotFound)?;
-        let url = raw_url(&snapshot.revision, relative)?;
+        let url = raw_url(&admitted_snapshot.revision, relative)?;
         let bytes = self.fetcher.fetch(
             url.as_str(),
             usize::try_from(record.size()).unwrap_or(MAX_ARCHIVE_BYTES),
@@ -245,7 +323,70 @@ impl ArchiveClient {
         fs::create_dir_all(cache_parent)?;
         check_cancelled(cancelled)?;
         atomic_write(&cache_path, &bytes, cancelled)?;
-        Ok(cache_path)
+        Ok(AuthorizedArchive {
+            path: cache_path,
+            revision: admitted_snapshot.revision,
+            record,
+        })
+    }
+
+    fn fetch_authenticated_snapshot(
+        &self,
+        revision: &str,
+        cancelled: &AtomicBool,
+    ) -> Result<ArchiveSnapshot, RemoteError> {
+        check_cancelled(cancelled)?;
+        let api = Url::parse(&format!(
+            "https://api.github.com/repos/{OWNER}/{REPOSITORY}/git/commits/{revision}"
+        ))
+        .map_err(|error| RemoteError::Request(error.to_string()))?;
+        let commit = self.fetcher.fetch(api.as_str(), 128 * 1024, cancelled)?;
+        check_cancelled(cancelled)?;
+        let signed_commit = SignedCommit::from_response(revision, &commit, &self.key)?;
+        let root_tree = signed_commit.root_tree()?.to_owned();
+        let tree_api = Url::parse(&format!(
+            "https://api.github.com/repos/{OWNER}/{REPOSITORY}/git/trees/{root_tree}"
+        ))
+        .map_err(|error| RemoteError::Request(error.to_string()))?;
+        let tree = self
+            .fetcher
+            .fetch(tree_api.as_str(), 1024 * 1024, cancelled)?;
+        check_cancelled(cancelled)?;
+        let proof = AdmissionProof::from_tree_response(signed_commit, &tree)?;
+        let index_url = raw_url(revision, "firmware.json")?;
+        let index_bytes = self
+            .fetcher
+            .fetch(index_url.as_str(), MAX_INDEX_BYTES, cancelled)?;
+        check_cancelled(cancelled)?;
+        proof.verify(revision, &index_bytes, &self.key)?;
+        let mut snapshot = ArchiveSnapshot::from_parts(revision, &index_bytes)?;
+        snapshot.admission_proof = Some(proof);
+        Ok(snapshot)
+    }
+
+    fn cache_snapshot(
+        &self,
+        snapshot: &ArchiveSnapshot,
+        cancelled: &AtomicBool,
+    ) -> Result<(), RemoteError> {
+        let index = String::from_utf8(snapshot.index_bytes.clone())
+            .map_err(|error| RemoteError::Request(error.to_string()))?;
+        let proof = snapshot
+            .admission_proof
+            .clone()
+            .ok_or_else(|| RemoteError::Request("missing snapshot admission proof".into()))?;
+        let cache = CachedSnapshot {
+            revision: snapshot.revision.clone(),
+            index,
+            proof,
+        };
+        let cache_bytes =
+            serde_json::to_vec(&cache).map_err(|error| RemoteError::Request(error.to_string()))?;
+        if cache_bytes.len() > MAX_CACHED_SNAPSHOT_BYTES {
+            return Err(RemoteError::TooLarge);
+        }
+        atomic_write(&self.cache_dir.join("snapshot"), &cache_bytes, cancelled)?;
+        Ok(())
     }
 }
 
@@ -434,20 +575,4 @@ impl ArchiveFetcher for HttpsFetcher {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cancellation_before_publication_preserves_the_previous_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("snapshot");
-        fs::write(&destination, b"previous snapshot").unwrap();
-        let cancelled = AtomicBool::new(true);
-
-        assert!(matches!(
-            atomic_write(&destination, b"new snapshot", &cancelled),
-            Err(RemoteError::Cancelled)
-        ));
-        assert_eq!(fs::read(destination).unwrap(), b"previous snapshot");
-    }
-}
+mod tests;

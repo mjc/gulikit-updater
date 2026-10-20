@@ -1,193 +1,155 @@
-//! Bridge from measured archive records to the updater's existing compiled admission.
-//!
-//! Historical records may be inspected and downloaded, but this bridge never
-//! turns them into write authorization.
+//! Bridge from measured archive records to the bounded KK3 package parsers.
 
-use gulikit_archive::{FirmwareMemberKind, ReleaseRecord};
-use gulikit_core::package::{Component, Model, PackageInfo, Release, VerifiedPackage};
-use std::path::Path;
+use gulikit_archive::{AuthorizedArchive, FirmwareMemberKind, ReleaseRecord};
+use gulikit_core::package::{
+    ArchiveParserKind, ArchiveSelection, ArchiveSelectionData, Component, PackageInfo,
+    VerifiedPackage,
+};
 
 /// Result of inspecting a downloaded archive record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DownloadInspection {
-    /// The record exactly identifies an already admitted compiled release, and
-    /// the existing package parser verified its member and payload.
+    /// The exact selected record and archive bytes passed the KK3 format parser.
     Supported(PackageInfo),
-    /// The archive record and bytes are valid, but no compiled release admits it.
+    /// The record is valid and cached, but its product or format has no KK3 parser.
     ArchivedOnly,
 }
 
-/// Find an exact compiled release matching the descriptive archive record.
+/// Convert an eligible KK3 record from one immutable revision into a checked selection.
 ///
-/// This only determines UI eligibility. The archive bytes still go through the
-/// updater's compiled release verifier before becoming a `VerifiedPackage`.
-#[must_use]
-pub fn supported_release(record: &ReleaseRecord) -> Option<&'static Release> {
+/// # Errors
+/// Rejects malformed metadata that cannot form a safe, bounded parser selection.
+pub fn selection_for_record(
+    revision: &str,
+    record: &ReleaseRecord,
+) -> Result<Option<ArchiveSelection>, String> {
     let metadata = record.metadata();
     if metadata.product != "kk3-max" || metadata.member_kind != FirmwareMemberKind::Kk3 {
-        return None;
+        return Ok(None);
     }
-
     let component = match record.component() {
         gulikit_archive::Component::Base => Component::Main,
         gulikit_archive::Component::Bluetooth => Component::Bluetooth,
     };
-
-    gulikit_core::package::catalog().iter().find(|release| {
-        release.model == Model::Kk3Max
-            && release.component == component
-            && release.version == record.version()
-            && release.archive == record.filename()
-            && u64::try_from(release.archive_size).ok() == Some(record.size())
-            && release.archive_sha256 == record.sha256()
-            && release.member == metadata.firmware_member
-            && u64::try_from(release.member_size()).ok() == Some(record.firmware_file().size)
-            && release.member_sha256() == record.firmware_file().sha256
-            && record.payload().is_some_and(|payload| {
-                u64::try_from(release.payload_size()).ok() == Some(payload.size)
-                    && release.payload_sha256() == payload.sha256
-            })
+    let Some(payload) = record.payload() else {
+        return Err("KK3 archive record has no measured payload metadata".into());
+    };
+    let parser = match component {
+        Component::Main => ArchiveParserKind::MainBinV1,
+        Component::Bluetooth => ArchiveParserKind::BluetoothPeV1,
+    };
+    ArchiveSelection::try_from(ArchiveSelectionData {
+        archive_revision: revision.to_owned(),
+        path: record.path().to_owned(),
+        component,
+        version: record.version().to_owned(),
+        archive: record.filename().to_owned(),
+        archive_size: record.size(),
+        archive_sha256: record.sha256().to_owned(),
+        firmware_member: metadata.firmware_member.clone(),
+        member_size: record.firmware_file().size,
+        member_sha256: record.firmware_file().sha256.clone(),
+        payload_size: payload.size,
+        payload_sha256: payload.sha256.clone(),
+        source_url: metadata.source_url.clone(),
+        parser,
     })
+    .map(Some)
+    .map_err(|error| error.to_string())
 }
 
-/// Verify a downloaded archive record and, when it matches the compiled
-/// catalog, run the existing KK3 parser and compiled archive admission again.
+/// Verify a download admitted by the archive client, then parse supported KK3 formats.
 ///
 /// # Errors
-/// Returns an error for unreadable files, archive/record mismatches, parser
-/// failures, or disagreement between parsed package metadata and the selected
-/// compiled record.
-pub fn inspect_download(path: &Path, record: &ReleaseRecord) -> Result<DownloadInspection, String> {
-    let bytes =
-        gulikit_archive::read_verified_archive(path, record).map_err(|error| error.to_string())?;
-
-    let Some(release) = supported_release(record) else {
+/// Returns an error for unreadable files, archive/record mismatches, parser failures,
+/// or malformed KK3 selection metadata.
+pub fn inspect_download(archive: &AuthorizedArchive) -> Result<DownloadInspection, String> {
+    let bytes = gulikit_archive::read_verified_archive(archive.path(), archive.record())
+        .map_err(|error| error.to_string())?;
+    let Some(selection) = selection_for_record(archive.revision(), archive.record())? else {
         return Ok(DownloadInspection::ArchivedOnly);
     };
+    inspect_selected(&bytes, &selection)
+}
 
-    let component = release.component;
-    let package = VerifiedPackage::inspect(&bytes, Model::Kk3Max, component)
-        .map_err(|error| error.to_string())?;
-    let info = package.info();
-    if info.model != release.model
-        || info.component != release.component
-        || info.version != release.version
-        || info.archive_sha256 != release.archive_sha256
-        || info.payload_size != release.payload_size()
-        || info.payload_sha256 != release.payload_sha256()
-        || info.member != release.member
-        || info.source_url != release.source_url
-    {
-        return Err("parsed package does not match the selected compiled release".into());
+fn inspect_selected(
+    bytes: &[u8],
+    selection: &ArchiveSelection,
+) -> Result<DownloadInspection, String> {
+    let package =
+        VerifiedPackage::inspect_selected(bytes, selection).map_err(|error| error.to_string())?;
+    if !package.info().matches_archive_selection(selection) {
+        return Err("parsed package does not match the selected archive record".into());
     }
-    Ok(DownloadInspection::Supported(info.clone()))
+    Ok(DownloadInspection::Supported(package.info().clone()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn known_record(component: &str) -> serde_json::Value {
-        let (
-            version,
-            filename,
-            archive_size,
-            archive_hash,
-            member,
-            member_size,
-            member_hash,
-            payload_size,
-            payload_hash,
-        ) = match component {
-            "base" => (
-                "5.9",
-                "KK3_NS38_NS39_V5.9.zip",
-                107_606,
-                "b4d3c74bc2b0f6570523f121d7d8feb8842f239bdfc5e87bffd7af6aee520b67",
-                "NS39_KK3_MAX_V5.9.bin",
-                51500,
-                "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4",
-                51500,
-                "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4",
-            ),
-            "bluetooth" => (
-                "3.23",
-                "NS39_BT_V3.23.zip",
-                1_163_454,
-                "39d678170e8d86488d65eb815873c708ff31b096d69d93714a0177086d5db938",
-                "NS39_BT_V3.23.exe",
-                2_245_632,
-                "825cca9b36fa9078d8198f31ab4bf0ecebb4a6a8bd100303801ba1d1363c4dd6",
-                361_472,
-                "783d206c08253c1e2291a8b0bc99b04f95fc4054c2215447a30933f623cf9dfe",
-            ),
-            _ => unreachable!(),
-        };
-        serde_json::json!({
-            "schema_version": 1,
-            "releases": [{
-                "component": component,
-                "version": version,
-                "filename": filename,
-                "source_url": "https://www.gulikit.com/newsinfo/887152.html",
-                "firmware_member": member,
-                "path": format!("/kk3-max/{component}/v{version}/{filename}"),
-                "size": archive_size,
-                "sha256": archive_hash,
-                "firmware_file": {"size": member_size, "sha256": member_hash},
-                "payload": {"size": payload_size, "sha256": payload_hash}
-            }]
-        })
-    }
-
-    fn parse_record(value: &serde_json::Value) -> ReleaseRecord {
-        gulikit_archive::FirmwareIndex::parse(&serde_json::to_vec(value).unwrap())
-            .unwrap()
-            .releases()[0]
-            .clone()
-    }
-
+    /// Check format parsing against an externally supplied pinned firmware corpus.
+    /// Catalog authentication is exercised separately by the archive client tests.
     #[test]
-    fn exact_compiled_base_and_bluetooth_records_are_eligible() {
-        let base = parse_record(&known_record("base"));
-        let bluetooth = parse_record(&known_record("bluetooth"));
+    #[ignore = "requires the pinned firmware index and all original archives in the ignored cache"]
+    fn pinned_firmware_corpus_parses_only_supported_kk3_formats() {
+        let directory = std::env::var_os("GULIKIT_ARCHIVE_TEST_DIR")
+            .map(std::path::PathBuf::from)
+            .expect("set GULIKIT_ARCHIVE_TEST_DIR");
+        let index_path = std::env::var_os("GULIKIT_ARCHIVE_TEST_INDEX")
+            .map(std::path::PathBuf::from)
+            .expect("set GULIKIT_ARCHIVE_TEST_INDEX");
+        let revision = std::env::var("GULIKIT_ARCHIVE_TEST_REVISION")
+            .expect("set GULIKIT_ARCHIVE_TEST_REVISION to the pinned archive commit");
+        let index = gulikit_archive::FirmwareIndex::parse(
+            &std::fs::read(index_path).expect("read pinned firmware index"),
+        )
+        .expect("parse pinned firmware index");
+        let mut kk3 = 0;
+        let mut other_formats = 0;
 
-        assert_eq!(
-            supported_release(&base).map(|release| release.version),
-            Some("5.9")
-        );
-        assert_eq!(
-            supported_release(&bluetooth).map(|release| release.version),
-            Some("3.23")
-        );
-    }
-
-    #[test]
-    fn wrong_product_component_kind_or_hash_does_not_gain_eligibility() {
-        let mut wrong_product = known_record("base");
-        wrong_product["releases"][0]["product"] = "other-product".into();
-        wrong_product["releases"][0]["member_kind"] = "raw_binary".into();
-        wrong_product["releases"][0]["path"] =
-            "/other-product/base/v5.9/KK3_NS38_NS39_V5.9.zip".into();
-
-        let mut wrong_component = known_record("base");
-        wrong_component["releases"][0]["component"] = "bluetooth".into();
-        wrong_component["releases"][0]["firmware_member"] = "NS39_BT_V5.9.exe".into();
-        wrong_component["releases"][0]["path"] =
-            "/kk3-max/bluetooth/v5.9/KK3_NS38_NS39_V5.9.zip".into();
-
-        let mut wrong_kind = known_record("base");
-        wrong_kind["releases"][0]["member_kind"] = "raw_binary".into();
-        assert!(
-            gulikit_archive::FirmwareIndex::parse(&serde_json::to_vec(&wrong_kind).unwrap())
-                .is_err()
-        );
-
-        let mut wrong_hash = known_record("base");
-        wrong_hash["releases"][0]["sha256"] = "0".repeat(64).into();
-
-        for value in [wrong_product, wrong_component, wrong_hash] {
-            assert!(supported_release(&parse_record(&value)).is_none());
+        for record in index.releases() {
+            let eligible = record.metadata().product == "kk3-max"
+                && record.metadata().member_kind == FirmwareMemberKind::Kk3;
+            if !eligible {
+                other_formats += 1;
+                assert!(
+                    selection_for_record(&revision, record)
+                        .expect("classify unsupported format")
+                        .is_none(),
+                    "unsupported record was admitted: {}",
+                    record.path()
+                );
+                continue;
+            }
+            let filename = format!(
+                "{}-{}-{}",
+                record.component(),
+                record.version(),
+                record.filename()
+            );
+            let path = directory.join(filename);
+            assert!(path.is_file(), "missing pinned archive {}", path.display());
+            let bytes = gulikit_archive::read_verified_archive(&path, record)
+                .unwrap_or_else(|error| panic!("{}: {error}", record.path()));
+            let selection = selection_for_record(&revision, record)
+                .unwrap_or_else(|error| panic!("{}: {error}", record.path()))
+                .expect("eligible KK3 release has a parser selection");
+            let inspected = inspect_selected(&bytes, &selection)
+                .unwrap_or_else(|error| panic!("{}: {error}", record.path()));
+            kk3 += 1;
+            let DownloadInspection::Supported(info) = inspected else {
+                panic!("KK3 record was not admitted: {}", record.path());
+            };
+            let selection = info.archive_selection.as_ref().expect("selection recipe");
+            assert_eq!(selection.data().archive_revision, revision);
+            assert_eq!(selection.data().path, record.path());
+            assert!(info.matches_archive_selection(selection));
         }
+        assert_eq!(kk3, 45, "expected every pinned KK3 release to be parsed");
+        assert_eq!(
+            other_formats, 29,
+            "unsupported product records remain unadmitted"
+        );
     }
 }

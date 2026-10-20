@@ -113,7 +113,7 @@ pub fn verify_restart(previous: Outcome, observation: &Verification) -> Outcome 
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CommandRecord {
     pub index: usize,
     pub opcode: u8,
@@ -122,7 +122,7 @@ pub struct CommandRecord {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TransferRecord {
     pub outcome: Outcome,
     pub version_policy: VersionPolicy,
@@ -249,6 +249,8 @@ pub trait BluetoothPort {
     fn command(&mut self, opcode: u8, data: &[u8]) -> Result<Vec<u8>, SubmissionError>;
     /// Observe only the selected device's removal, with complete discovery and
     /// no intervening USB arrival or additional recognized update candidate.
+    /// Allow bounded host-notification delay after the controller's normal
+    /// final-block reboot. This observation must not send device commands.
     ///
     /// # Errors
     ///
@@ -266,7 +268,7 @@ pub trait BluetoothPort {
     fn finish(&mut self) -> Result<(), String>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub submitted: usize,
     pub confirmed: usize,
@@ -414,9 +416,11 @@ fn stream_bluetooth_payload(
                 && error.completion == SubmissionCompletion::DataSentStatusMissing
                 && !error.audit_failure
             {
-                // Hardware can restart after accepting the last DATA OUT,
-                // before returning its CSW. Preserve that command's error
-                // and unconfirmed block; only a fresh F1 can prove install.
+                // A KK3 normally reboots after accepting the last DATA OUT,
+                // before returning its CSW. This is the expected completion
+                // path, not a reason to retry the block or send another F2.
+                // The adapter waits for host removal notifications to converge.
+                // Preserve the missing CSW; fresh F1 still proves installation.
                 if port.completion_detached()? {
                     record.outcome = Outcome::TransferSubmittedPendingCompletion;
                     return Ok(());
@@ -538,13 +542,13 @@ pub trait MainPort {
     ///
     /// Refuses stale ownership, changed topology or a replaced device/volume.
     fn check_session(&mut self) -> Result<(), String>;
-    /// Exclusively create the controller's firmware destination.
+    /// Exclusively create the selected package member's firmware destination.
     ///
     /// # Errors
     ///
     /// Reports creation or audit failure while retaining whether the destination
     /// was actually created, even when no payload bytes were written.
-    fn create_destination(&mut self) -> Result<(), DestinationCreationError>;
+    fn create_destination(&mut self, member: &str) -> Result<(), DestinationCreationError>;
     /// Write a payload slice and report the actual accepted byte count.
     ///
     /// # Errors
@@ -612,7 +616,18 @@ pub fn update_main_with_progress(
         }
         return record;
     }
-    run_main_transaction(port, package.payload(), policy, cancelled, progress)
+    run_main_transaction(
+        port,
+        package.payload(),
+        MainTarget {
+            version: &package.info().version,
+            payload_size: package.info().payload_size,
+            member: &package.info().member,
+        },
+        policy,
+        cancelled,
+        progress,
+    )
 }
 
 #[cfg(test)]
@@ -622,11 +637,31 @@ fn main_transfer(
     policy: VersionPolicy,
     cancelled: impl FnMut() -> bool,
 ) -> TransferRecord {
-    run_main_transaction(port, payload, policy, cancelled, |_| {})
+    run_main_transaction(
+        port,
+        payload,
+        MainTarget {
+            version: "5.9",
+            payload_size: 51_500,
+            member: "NS39_KK3_MAX_V5.9.bin",
+        },
+        policy,
+        cancelled,
+        |_| {},
+    )
 }
+
+#[derive(Clone, Copy)]
+struct MainTarget<'a> {
+    version: &'a str,
+    payload_size: usize,
+    member: &'a str,
+}
+
 fn run_main_transaction(
     port: &mut impl MainPort,
     payload: &[u8],
+    target: MainTarget<'_>,
     policy: VersionPolicy,
     mut cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(Progress),
@@ -644,7 +679,14 @@ fn run_main_transaction(
         let raw = port.read_version()?;
         let version = crate::version::MainVersion::parse(&raw).map_err(|e| e.to_string())?;
         record.prewrite_version = Some(version.to_string());
-        match version.decision_with_policy(policy) {
+        match crate::version::release_decision(
+            Component::Main,
+            &version.to_string(),
+            target.version,
+            policy,
+        )
+        .map_err(|error| error.to_string())?
+        {
             VersionDecision::AlreadyCurrent => {
                 record.outcome = Outcome::AlreadyCurrent;
                 return Ok(());
@@ -655,7 +697,7 @@ fn run_main_transaction(
             }
             VersionDecision::Eligible => {}
         }
-        if payload.len() != 51500 {
+        if payload.len() != target.payload_size {
             return Err("Incorrect Main payload size".into());
         }
         port.prepare_write()?;
@@ -664,7 +706,7 @@ fn run_main_transaction(
             record.outcome = Outcome::CancelledBeforeWrite;
             return Ok(());
         }
-        if let Err(error) = port.create_destination() {
+        if let Err(error) = port.create_destination(target.member) {
             record.main_destination_created = error.created;
             return Err(error.error);
         }
@@ -761,6 +803,7 @@ mod tests {
     struct MainFake {
         events: Vec<&'static str>,
         written: Vec<u8>,
+        destination_name: Option<String>,
         version: &'static [u8],
         refuse_write: bool,
         fail: Option<&'static str>,
@@ -779,7 +822,8 @@ mod tests {
         fn check_session(&mut self) -> Result<(), String> {
             Ok(())
         }
-        fn create_destination(&mut self) -> Result<(), DestinationCreationError> {
+        fn create_destination(&mut self, name: &str) -> Result<(), DestinationCreationError> {
+            self.destination_name = Some(name.to_owned());
             if self.fail == Some("creation_audit") {
                 self.events.push("create");
                 return Err(DestinationCreationError {
@@ -847,6 +891,7 @@ mod tests {
         MainFake {
             events: vec![],
             written: vec![],
+            destination_name: None,
             version: b"www.gulikit.com\nversion 5.8",
             refuse_write: false,
             fail: None,
@@ -880,12 +925,66 @@ mod tests {
     }
 
     #[test]
+    fn selected_main_target_drives_downgrade_policy_and_expected_transfer_size() {
+        let mut port = main_port();
+        let payload = vec![0x6d; 1536];
+        let record = run_main_transaction(
+            &mut port,
+            &payload,
+            MainTarget {
+                version: "3.1",
+                payload_size: payload.len(),
+                member: "NS39_KK3_MAX_V3.1.bin",
+            },
+            VersionPolicy::AllowDowngrade,
+            || false,
+            |_| {},
+        );
+
+        assert_eq!(
+            record.outcome,
+            Outcome::TransferCompletedAwaitingVerification
+        );
+        assert_eq!(port.written, payload);
+        assert_eq!(
+            port.destination_name.as_deref(),
+            Some("NS39_KK3_MAX_V3.1.bin")
+        );
+    }
+
+    #[test]
+    fn selected_main_target_rejects_a_payload_length_mismatch_before_creation() {
+        let mut port = main_port();
+        let record = run_main_transaction(
+            &mut port,
+            &[0x6d; 512],
+            MainTarget {
+                version: "3.1",
+                payload_size: 1024,
+                member: "NS39_KK3_MAX_V3.1.bin",
+            },
+            VersionPolicy::AllowDowngrade,
+            || false,
+            |_| {},
+        );
+
+        assert_eq!(record.outcome, Outcome::Refused);
+        assert_eq!(port.events, ["finish"]);
+        assert_eq!(record.bytes_submitted, 0);
+    }
+
+    #[test]
     fn progress_reports_confirmed_short_writes_and_never_guesses_completion() {
         let mut port = main_port();
         let mut progress = Vec::new();
         let result = run_main_transaction(
             &mut port,
             &vec![0; 51500],
+            MainTarget {
+                version: "5.9",
+                payload_size: 51_500,
+                member: "NS39_KK3_MAX_V5.9.bin",
+            },
             VersionPolicy::UpgradeOnly,
             || false,
             |p| progress.push(p),
@@ -1175,6 +1274,31 @@ mod tests {
         assert_eq!(record.outcome, Outcome::OutcomeUnknown);
         assert_eq!(record.bytes_submitted, 361_472);
         assert_eq!(record.bytes_confirmed, 360_960);
+    }
+
+    #[test]
+    fn kk3_normal_last_block_reboot_waits_for_readback_without_retrying_firmware() {
+        let mut port = Fake {
+            version: 323,
+            missing_status: Some(708),
+            ..Fake::default()
+        };
+        let record = bluetooth_release(
+            &mut port,
+            &vec![0x5a; 361_472],
+            324,
+            VersionPolicy::UpgradeOnly,
+            || false,
+        );
+        assert_eq!(record.outcome, Outcome::TransferSubmittedPendingCompletion);
+        assert_eq!(record.bytes_submitted, 361_472);
+        assert_eq!(record.bytes_confirmed, 360_960);
+        assert_eq!(port.calls.len(), 708);
+        assert_eq!(port.calls.last(), Some(&0xf0));
+        assert_eq!(port.calls[2], 0xf2);
+        assert!(record.commands.last().unwrap().error.is_some());
+        assert!(record.error.is_none());
+        assert!(port.cleanup);
     }
 
     #[test]

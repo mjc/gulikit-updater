@@ -1,6 +1,6 @@
 //! One serialized worker for native dialogs, bounded package I/O and updater operations.
 use crate::live::{Event, Work};
-use gulikit_core::package::{Component, Model};
+use gulikit_core::package::{Component, Model, PackageInfo, VerifiedPackage};
 use gulikit_updater::updater::{self, ReceiptIdentity, Reply, Request};
 use std::{
     ops::ControlFlow,
@@ -14,7 +14,7 @@ use std::{
 };
 
 /// Native and demo devices execute requests on the same serialized worker.
-pub trait Device: Send {
+pub trait Device {
     /// Execute one request and emit observations before its terminal event.
     ///
     /// # Errors
@@ -28,9 +28,26 @@ pub trait Device: Send {
     ) -> Result<Event, String>;
 }
 
-pub struct NativeDevice;
-pub const NATIVE_UPDATE_UNAVAILABLE: &str =
-    "Desktop updates are not available yet. You can still inspect firmware packages.";
+#[derive(Default)]
+pub struct NativeDevice {
+    application: updater::InteractiveUpdater,
+    record_directory: Option<PathBuf>,
+}
+impl NativeDevice {
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn with_receipt_owner(
+        owner: Option<gulikit_platform::journal::ReceiptOwner>,
+        record_directory: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            application: updater::InteractiveUpdater::with_receipt_owner(owner),
+            record_directory,
+        }
+    }
+}
+pub const NATIVE_UPDATE_SUPPORTED: bool = cfg!(target_os = "macos");
+pub const NATIVE_UPDATE_UNAVAILABLE: &str = "Native device updates currently support macOS only.";
 impl Device for NativeDevice {
     fn run(
         &mut self,
@@ -38,7 +55,19 @@ impl Device for NativeDevice {
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
-        run_native(work, cancelled, emit)
+        run_native(
+            work,
+            cancelled,
+            emit,
+            self.record_directory.as_deref(),
+            &mut |request, cancelled, emit| {
+                self.application.execute(
+                    request,
+                    &mut || cancelled.load(Ordering::Acquire),
+                    &mut |progress| emit(Event::Progress(progress)),
+                )
+            },
+        )
     }
 }
 
@@ -48,12 +77,19 @@ pub struct Worker {
     handle: Option<JoinHandle<()>>,
 }
 impl Worker {
-    pub fn spawn(device: impl Device + 'static) -> (Self, Receiver<Event>) {
+    pub fn spawn(device: impl Device + Send + 'static) -> (Self, Receiver<Event>) {
+        Self::spawn_with(move || device)
+    }
+
+    /// Construct thread-bound native resources on the worker that owns them.
+    pub fn spawn_with<D: Device + 'static>(
+        factory: impl FnOnce() -> D + Send + 'static,
+    ) -> (Self, Receiver<Event>) {
         let (requests, work) = mpsc::channel();
         let (events, replies) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
-        let handle = thread::spawn(move || serve_requests(device, work, &events, &flag));
+        let handle = thread::spawn(move || serve_requests(factory(), work, &events, &flag));
         (
             Self {
                 requests,
@@ -126,18 +162,23 @@ pub fn inspect_selected_package(path: &Path, component: Component) -> Result<Eve
     })
 }
 
-fn record_path() -> Option<PathBuf> {
-    rfd::FileDialog::new()
+fn record_path(initial_directory: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
         .set_title("Save a new host operation record")
         .add_filter("Operation record", &["jsonl"])
-        .set_file_name("gulikit-attempt.jsonl")
-        .save_file()
+        .set_file_name("gulikit-attempt.jsonl");
+    if let Some(directory) = initial_directory {
+        dialog = dialog.set_directory(directory);
+    }
+    dialog.save_file()
 }
 
 fn run_native(
     work: Work,
     cancelled: &AtomicBool,
     emit: &mut dyn FnMut(Event),
+    record_directory: Option<&Path>,
+    perform: &mut impl FnMut(Request, &AtomicBool, &mut dyn FnMut(Event)) -> Result<Reply, String>,
 ) -> Result<Event, String> {
     if cancelled.load(Ordering::Acquire) {
         return Ok(Event::Cancelled);
@@ -147,11 +188,11 @@ fn run_native(
         Work::OpenAttempt => open_attempt(),
         Work::Inspect {
             component,
-            confirmed,
-        } => match execute(
+            confirmed: _,
+        } => match perform(
             Request::Probe {
                 component,
-                confirm_ns39: confirmed,
+                confirm_ns39: false,
             },
             cancelled,
             emit,
@@ -159,24 +200,123 @@ fn run_native(
             Reply::Inspection(inspection) => Ok(Event::Inspected(inspection)),
             _ => Err("Unexpected inspection result".into()),
         },
-        Work::Update { .. } => Err(NATIVE_UPDATE_UNAVAILABLE.into()),
+        Work::Update {
+            path,
+            component,
+            attachment,
+            confirmed,
+            expected_package,
+            policy,
+        } => {
+            if !NATIVE_UPDATE_SUPPORTED {
+                return Err(NATIVE_UPDATE_UNAVAILABLE.into());
+            }
+            if expected_package.component != component {
+                return Err("Package component changed since selection.".into());
+            }
+            update_selected(
+                SelectedUpdate {
+                    path,
+                    expected: expected_package,
+                    attachment,
+                    confirmed,
+                    policy,
+                },
+                cancelled,
+                emit,
+                || record_path(record_directory),
+                perform,
+            )
+        }
         Work::Verify {
             attempt,
-            confirmed,
+            confirmed: _,
             same_controller,
             expected_receipt,
         } => verify(
             attempt,
-            confirmed,
             same_controller,
             expected_receipt,
             cancelled,
             emit,
+            record_directory,
+            perform,
         ),
         Work::ConfigureDemo(_) | Work::ChooseSample { .. } => {
             Err("Simulated device operations are unavailable in native mode.".into())
         }
         Work::Shutdown => Ok(Event::Cancelled),
+    }
+}
+
+struct SelectedUpdate {
+    path: PathBuf,
+    expected: PackageInfo,
+    attachment: updater::Attachment,
+    confirmed: bool,
+    policy: gulikit_core::version::VersionPolicy,
+}
+
+fn prepare_selected_update(selection: &SelectedUpdate) -> Result<VerifiedPackage, String> {
+    if !selection.confirmed {
+        return Err("Inspect the controller before updating.".into());
+    }
+    let package = match selection.expected.archive_selection.as_ref() {
+        Some(archive_selection) => {
+            gulikit_platform::inspect_archive_package(&selection.path, archive_selection)
+        }
+        None => gulikit_platform::inspect_package(
+            &selection.path,
+            Model::Kk3Max,
+            selection.expected.component,
+        ),
+    }
+    .map_err(|error| error.to_string())?;
+    if package.info() != &selection.expected {
+        return Err("Firmware package changed since selection. Select and review it again.".into());
+    }
+    Ok(package)
+}
+
+fn update_selected(
+    selection: SelectedUpdate,
+    cancelled: &AtomicBool,
+    emit: &mut dyn FnMut(Event),
+    choose_record: impl FnOnce() -> Option<PathBuf>,
+    perform: impl FnOnce(Request, &AtomicBool, &mut dyn FnMut(Event)) -> Result<Reply, String>,
+) -> Result<Event, String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(Event::Cancelled);
+    }
+    let package = prepare_selected_update(&selection)?;
+    let Some(record) = choose_record() else {
+        return Ok(Event::Cancelled);
+    };
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(Event::Cancelled);
+    }
+    let reply = perform(
+        Request::Update {
+            archive: selection.path,
+            package,
+            confirm_ns39: false,
+            record: record.clone(),
+            expected_attachment: Some(selection.attachment),
+            policy: selection.policy,
+        },
+        cancelled,
+        emit,
+    )?;
+    match reply {
+        Reply::Attempt(result) => Ok(Event::Transferred { record, result }),
+        Reply::Uncertain { record, reason } => Ok(Event::WorkerFailed(format!(
+            "{reason}\nRecord: {}\nKeep USB connected and leave the controller unchanged.",
+            record.display()
+        ))),
+        _ => Ok(Event::WorkerFailed(format!(
+            "Unexpected update result. Inspect the record: {}",
+            record.display()
+        ))),
     }
 }
 
@@ -219,23 +359,24 @@ fn open_attempt() -> Result<Event, String> {
 
 fn verify(
     attempt: PathBuf,
-    confirmed: bool,
     same_controller: bool,
     expected_receipt: ReceiptIdentity,
     cancelled: &AtomicBool,
     emit: &mut dyn FnMut(Event),
+    record_directory: Option<&Path>,
+    perform: &mut impl FnMut(Request, &AtomicBool, &mut dyn FnMut(Event)) -> Result<Reply, String>,
 ) -> Result<Event, String> {
-    let Some(record) = record_path() else {
+    let Some(record) = record_path(record_directory) else {
         return Ok(Event::Cancelled);
     };
     if cancelled.load(Ordering::Acquire) {
         return Ok(Event::Cancelled);
     }
-    match execute(
+    match perform(
         Request::Verify {
             attempt,
             record,
-            confirm_ns39: confirmed,
+            confirm_ns39: false,
             confirm_same_controller: same_controller,
             expected_receipt: Some(expected_receipt),
         },
@@ -247,14 +388,183 @@ fn verify(
     }
 }
 
-fn execute(
-    request: Request,
-    cancelled: &AtomicBool,
-    emit: &mut dyn FnMut(Event),
-) -> Result<Reply, String> {
-    updater::execute(
-        request,
-        &mut || cancelled.load(Ordering::Acquire),
-        &mut |progress| emit(Event::Progress(progress)),
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selection() -> SelectedUpdate {
+        let release = gulikit_core::package::catalog()
+            .iter()
+            .find(|release| release.component == Component::Main)
+            .unwrap();
+        SelectedUpdate {
+            path: "missing.zip".into(),
+            expected: PackageInfo {
+                model: Model::Kk3Max,
+                component: Component::Main,
+                version: release.version.into(),
+                payload_size: release.payload_size(),
+                payload_sha256: release.payload_sha256().into(),
+                archive_sha256: release.archive_sha256.into(),
+                source_url: release.source_url.into(),
+                member: release.member.into(),
+                archive_selection: None,
+            },
+            attachment: updater::Attachment {
+                ancestor: 42,
+                generation: 7,
+            },
+            confirmed: true,
+            policy: gulikit_core::version::VersionPolicy::UpgradeOnly,
+        }
+    }
+
+    #[test]
+    fn cancelled_or_unconfirmed_native_updates_never_open_the_picker_or_device() {
+        let mut selected = selection();
+        let event = update_selected(
+            selected,
+            &AtomicBool::new(true),
+            &mut |_| panic!("no progress"),
+            || panic!("no picker"),
+            |_, _, _| panic!("no device"),
+        )
+        .unwrap();
+        assert!(matches!(event, Event::Cancelled));
+        selected = selection();
+        selected.confirmed = false;
+        let error = update_selected(
+            selected,
+            &AtomicBool::new(false),
+            &mut |_| panic!("no progress"),
+            || panic!("no picker"),
+            |_, _, _| panic!("no device"),
+        )
+        .unwrap_err();
+        assert!(error.contains("Inspect the controller"), "{error}");
+    }
+
+    fn original(component: Component) -> SelectedUpdate {
+        let directory = std::env::var_os("GULIKIT_VENDOR_DIR").map_or_else(
+            || {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../artifacts/vendor/kk3/packages")
+            },
+            PathBuf::from,
+        );
+        let archive = match component {
+            Component::Main => "KK3_NS38_NS39_V5.9.zip",
+            Component::Bluetooth => "NS38_NS39_BT_V3.24.zip",
+        };
+        let path = directory.join(archive);
+        let package = gulikit_platform::inspect_package(&path, Model::Kk3Max, component)
+            .expect("supply original archives with GULIKIT_VENDOR_DIR");
+        SelectedUpdate {
+            path,
+            expected: package.info().clone(),
+            ..selection()
+        }
+    }
+
+    #[test]
+    #[ignore = "requires original vendor archives in ignored cache"]
+    fn native_selection_dispatches_both_components_with_bound_package_and_attachment() {
+        for component in [Component::Main, Component::Bluetooth] {
+            let selected = original(component);
+            let expected = selected.expected.clone();
+            let archive = selected.path.clone();
+            let host = tempfile::tempdir().unwrap();
+            let record = host.path().join("attempt.jsonl");
+            let mut observed = Vec::new();
+            let event = update_selected(
+                selected,
+                &AtomicBool::new(false),
+                &mut |value| observed.push(value),
+                || Some(record.clone()),
+                |request, _, emit| {
+                    let Request::Update {
+                        archive: actual_archive,
+                        package,
+                        record: actual_record,
+                        expected_attachment,
+                        confirm_ns39,
+                        policy,
+                    } = request
+                    else {
+                        panic!("update request");
+                    };
+                    assert_eq!(actual_archive, archive);
+                    assert_eq!(package.info(), &expected);
+                    assert_eq!(actual_record, record);
+                    assert_eq!(
+                        expected_attachment,
+                        Some(updater::Attachment {
+                            ancestor: 42,
+                            generation: 7
+                        })
+                    );
+                    assert!(!confirm_ns39, "native requests require USB identification");
+                    assert_eq!(policy, gulikit_core::version::VersionPolicy::UpgradeOnly);
+                    emit(Event::Progress(gulikit_core::update::Progress {
+                        submitted: 512,
+                        confirmed: 512,
+                        total: expected.payload_size,
+                    }));
+                    Ok(Reply::Uncertain {
+                        record: actual_record,
+                        reason: "injected reporting failure".into(),
+                    })
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(observed.as_slice(), [Event::Progress(value)] if value.confirmed == 512)
+            );
+            assert!(
+                matches!(event, Event::WorkerFailed(error) if error.contains("injected reporting failure") && error.contains("attempt.jsonl"))
+            );
+            assert!(
+                !record.exists(),
+                "the fake executor must never create a device record"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires original vendor archives in ignored cache"]
+    fn changed_selection_and_picker_cancellation_never_dispatch_a_native_update() {
+        let mut selected = original(Component::Bluetooth);
+        selected.expected.version = "3.23".into();
+        let error = update_selected(
+            selected,
+            &AtomicBool::new(false),
+            &mut |_| panic!("no progress"),
+            || panic!("changed package must not open picker"),
+            |_, _, _| panic!("no device"),
+        )
+        .unwrap_err();
+        assert!(error.contains("changed since selection"));
+        let event = update_selected(
+            original(Component::Main),
+            &AtomicBool::new(false),
+            &mut |_| panic!("no progress"),
+            || None,
+            |_, _, _| panic!("no device"),
+        )
+        .unwrap();
+        assert!(matches!(event, Event::Cancelled));
+        let cancelled = AtomicBool::new(false);
+        let event = update_selected(
+            original(Component::Main),
+            &cancelled,
+            &mut |_| panic!("no progress"),
+            || {
+                cancelled.store(true, Ordering::Release);
+                Some("unused.jsonl".into())
+            },
+            |_, _, _| panic!("no device"),
+        )
+        .unwrap();
+        assert!(matches!(event, Event::Cancelled));
+    }
 }

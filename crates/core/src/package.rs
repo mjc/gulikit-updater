@@ -1,13 +1,15 @@
 //! Offline inspection of reviewed official firmware packages.
 
 use object::read::pe::PeFile32;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 use std::{fmt, str::FromStr};
 
 /// Upper bound checked before reading a package from an untrusted file.
-pub const MAX_ARCHIVE_SIZE: usize = 1_163_538;
+pub const MAX_ARCHIVE_SIZE: usize = 64 * 1024 * 1024;
+const MAX_ARCHIVE_MEMBER_SIZE: usize = 4 * 1024 * 1024;
+const MAX_BLUETOOTH_PAYLOAD_SIZE: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,10 +18,80 @@ pub enum Component {
     Bluetooth,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Model {
     Kk3Max,
+}
+
+/// Fixed byte format understood by the KK3 Max package inspector.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveParserKind {
+    /// A bounded raw NS39 Main firmware BIN; the selected member is the payload.
+    MainBinV1,
+    /// The reviewed KK3 Bluetooth PE32 layout with embedded signature/version/length.
+    BluetoothPeV1,
+}
+
+/// Descriptive snapshot supplied by the pinned archive-record loader.
+///
+/// Construct this from the exact record resolved at `archive_revision` and `path`.
+/// Core validates its format and byte claims, but does not establish Git membership
+/// or vendor authenticity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveSelectionData {
+    pub archive_revision: String,
+    pub path: String,
+    pub component: Component,
+    pub version: String,
+    pub archive: String,
+    pub archive_size: u64,
+    pub archive_sha256: String,
+    pub firmware_member: String,
+    pub member_size: u64,
+    pub member_sha256: String,
+    pub payload_size: u64,
+    pub payload_sha256: String,
+    pub source_url: String,
+    pub parser: ArchiveParserKind,
+}
+
+/// Structurally validated snapshot of one selected archive record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ArchiveSelection {
+    data: Box<ArchiveSelectionData>,
+}
+
+impl ArchiveSelection {
+    /// The checked, immutable record snapshot.
+    #[must_use]
+    pub fn data(&self) -> &ArchiveSelectionData {
+        &self.data
+    }
+}
+
+impl<'de> Deserialize<'de> for ArchiveSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data = ArchiveSelectionData::deserialize(deserializer)?;
+        Self::try_from(data).map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<ArchiveSelectionData> for ArchiveSelection {
+    type Error = PackageError;
+
+    fn try_from(data: ArchiveSelectionData) -> Result<Self, Self::Error> {
+        validate_archive_selection(&data)?;
+        Ok(Self {
+            data: Box::new(data),
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,9 +167,11 @@ pub enum PackageError {
     EmbeddedRange,
     #[error("embedded firmware metadata does not match the reviewed release")]
     EmbeddedMetadata,
+    #[error("archive selection is unsupported or malformed: {0}")]
+    InvalidArchiveSelection(&'static str),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageInfo {
     pub model: Model,
     pub component: Component,
@@ -105,8 +179,39 @@ pub struct PackageInfo {
     pub payload_size: usize,
     pub payload_sha256: String,
     pub archive_sha256: String,
-    pub source_url: &'static str,
-    pub member: &'static str,
+    pub source_url: String,
+    pub member: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_selection: Option<ArchiveSelection>,
+}
+
+impl PackageInfo {
+    /// Apply version-direction policy using this package's selected target.
+    ///
+    /// # Errors
+    /// Rejects malformed component-specific version text.
+    pub fn decision_for_installed(
+        &self,
+        installed: &str,
+        policy: crate::version::VersionPolicy,
+    ) -> Result<crate::version::VersionDecision, crate::version::UnknownVersion> {
+        crate::version::release_decision(self.component, installed, &self.version, policy)
+    }
+
+    /// Check that display/receipt metadata still describes this selected record.
+    #[must_use]
+    pub fn matches_archive_selection(&self, selection: &ArchiveSelection) -> bool {
+        let data = selection.data();
+        self.model == Model::Kk3Max
+            && self.component == data.component
+            && self.version == data.version
+            && self.payload_size == usize::try_from(data.payload_size).unwrap_or(usize::MAX)
+            && self.payload_sha256 == data.payload_sha256
+            && self.archive_sha256 == data.archive_sha256
+            && self.source_url == data.source_url
+            && self.member == data.firmware_member
+            && self.archive_selection.as_ref() == Some(selection)
+    }
 }
 
 #[derive(Debug)]
@@ -151,11 +256,64 @@ impl VerifiedPackage {
                 payload_size: payload.len(),
                 payload_sha256: release.payload_sha256.into(),
                 archive_sha256: release.archive_sha256.into(),
-                source_url: release.source_url,
-                member: release.member,
+                source_url: release.source_url.into(),
+                member: release.member.into(),
+                archive_selection: None,
             },
             payload,
             bluetooth_version: release.bluetooth_version,
+        })
+    }
+
+    /// Inspect an archive using a structurally validated KK3 format selection.
+    ///
+    /// The caller must obtain the selection from the exact archive record resolved
+    /// at its immutable revision. This verifies the selected archive/member/payload
+    /// bytes and parser identity; it does not establish repository membership.
+    ///
+    /// # Errors
+    /// Rejects mismatched archive/member/payload size or digest, unsupported PE
+    /// metadata, and malformed selected package contents.
+    pub fn inspect_selected(
+        bytes: &[u8],
+        selection: &ArchiveSelection,
+    ) -> Result<Self, PackageError> {
+        let data = selection.data();
+        let archive_size = usize::try_from(data.archive_size)
+            .map_err(|_| PackageError::InvalidArchiveSelection("archive_size"))?;
+        verify_bytes(bytes, archive_size, &data.archive_sha256, "archive")?;
+        let member_size = usize::try_from(data.member_size)
+            .map_err(|_| PackageError::InvalidArchiveSelection("member_size"))?;
+        let member = read_member(bytes, &data.firmware_member, member_size)?;
+        verify_bytes(&member, member_size, &data.member_sha256, "member")?;
+        let (payload, bluetooth_version) = match data.parser {
+            ArchiveParserKind::MainBinV1 => (member, None),
+            ArchiveParserKind::BluetoothPeV1 => {
+                let expected_payload_size = usize::try_from(data.payload_size)
+                    .map_err(|_| PackageError::InvalidArchiveSelection("payload_size"))?;
+                let version = parse_bluetooth_version(&data.version)?;
+                let payload =
+                    extract_bluetooth_payload_for(&member, version, expected_payload_size)?;
+                (payload, Some(version))
+            }
+        };
+        let payload_size = usize::try_from(data.payload_size)
+            .map_err(|_| PackageError::InvalidArchiveSelection("payload_size"))?;
+        verify_bytes(&payload, payload_size, &data.payload_sha256, "payload")?;
+        Ok(Self {
+            info: PackageInfo {
+                model: Model::Kk3Max,
+                component: data.component,
+                version: data.version.clone(),
+                payload_size: payload.len(),
+                payload_sha256: data.payload_sha256.clone(),
+                archive_sha256: data.archive_sha256.clone(),
+                source_url: data.source_url.clone(),
+                member: data.firmware_member.clone(),
+                archive_selection: Some(selection.clone()),
+            },
+            payload,
+            bluetooth_version,
         })
     }
 
@@ -173,8 +331,10 @@ impl VerifiedPackage {
     }
 }
 
-/// Reviewed source data is compiled into the application, never loaded from a
-/// user-editable inventory. An unknown archive cannot authorize a new payload.
+/// Built-in release admitted by the compiled package catalog.
+///
+/// Archive-backed releases use [`ArchiveSelection`] with the same fixed parsers
+/// and byte checks, supplied from an immutable archive-record snapshot.
 #[derive(Debug, Serialize)]
 pub struct Release {
     pub model: Model,
@@ -334,6 +494,143 @@ fn digest_matches(actual: &[u8], expected_hex: &str) -> bool {
     hex::decode_to_slice(expected_hex, &mut expected).is_ok() && actual == expected
 }
 
+fn validate_archive_selection(data: &ArchiveSelectionData) -> Result<(), PackageError> {
+    let invalid = PackageError::InvalidArchiveSelection;
+    if data.archive_revision.len() != 40
+        || !data
+            .archive_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(invalid("archive_revision"));
+    }
+    parse_canonical_version(data.component, &data.version)?;
+    let component_path = match data.component {
+        Component::Main => "base",
+        Component::Bluetooth => "bluetooth",
+    };
+    let expected_path = format!(
+        "/kk3-max/{component_path}/v{}/{}",
+        data.version, data.archive
+    );
+    if data.archive_size == 0
+        || data.archive_size > MAX_ARCHIVE_SIZE as u64
+        || data.member_size == 0
+        || data.member_size > MAX_ARCHIVE_MEMBER_SIZE as u64
+        || data.payload_size == 0
+        || data.payload_size > MAX_ARCHIVE_MEMBER_SIZE as u64
+        || !valid_sha256(&data.archive_sha256)
+        || !valid_sha256(&data.member_sha256)
+        || !valid_sha256(&data.payload_sha256)
+        || data.source_url.len() > 2048
+        || !data.source_url.starts_with("https://")
+        || data.source_url.bytes().any(|byte| byte.is_ascii_control())
+        || !is_archive_filename(data.component, &data.version, &data.archive)
+        || !is_firmware_member(data.component, &data.version, &data.firmware_member)
+        || data.path != expected_path
+    {
+        return Err(invalid("record fields"));
+    }
+    match (data.component, data.parser) {
+        (Component::Main, ArchiveParserKind::MainBinV1)
+            if data.member_size == data.payload_size
+                && data.member_sha256 == data.payload_sha256 => {}
+        (Component::Bluetooth, ArchiveParserKind::BluetoothPeV1)
+            if data.payload_size <= MAX_BLUETOOTH_PAYLOAD_SIZE as u64
+                && data.payload_size.is_multiple_of(512) => {}
+        _ => return Err(invalid("component/parser or payload bounds")),
+    }
+    Ok(())
+}
+
+fn parse_canonical_version(
+    component: Component,
+    version: &str,
+) -> Result<(u16, u16), PackageError> {
+    let invalid = || PackageError::InvalidArchiveSelection("version");
+    let (major, minor) = version.split_once('.').ok_or_else(invalid)?;
+    if version.bytes().filter(|byte| *byte == b'.').count() != 1
+        || !canonical_integer(major)
+        || match component {
+            Component::Main => !canonical_integer(minor),
+            Component::Bluetooth => {
+                minor.len() != 2 || !minor.bytes().all(|byte| byte.is_ascii_digit())
+            }
+        }
+    {
+        return Err(invalid());
+    }
+    let major = major.parse::<u16>().map_err(|_| invalid())?;
+    let minor = minor.parse::<u16>().map_err(|_| invalid())?;
+    if component == Component::Bluetooth
+        && (minor > 99
+            || major
+                .checked_mul(100)
+                .and_then(|v| v.checked_add(minor))
+                .is_none())
+    {
+        return Err(invalid());
+    }
+    Ok((major, minor))
+}
+
+fn canonical_integer(text: &str) -> bool {
+    !text.is_empty()
+        && text.bytes().all(|byte| byte.is_ascii_digit())
+        && (text == "0" || !text.starts_with('0'))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_archive_filename(component: Component, version: &str, value: &str) -> bool {
+    let stem = value.strip_suffix(".zip").unwrap_or_default();
+    let accepted = match component {
+        Component::Main => [
+            format!("GuliKit_NS39_V{version}"),
+            format!("GuliKit_NS39_V{version}a"),
+            format!("KK3_NS38_NS39_V{version}"),
+            format!("KK3_NS38_NS39_V{version}FIX"),
+        ]
+        .iter()
+        .any(|candidate| stem == candidate),
+        Component::Bluetooth => [
+            format!("NS39_BT_V{version}"),
+            format!("NS38_NS39_BT_V{version}"),
+            format!("GuliKit_NS38_NS39_BT_V{version}"),
+            format!("GuliKit_NS38_NS39_NS59_BT_V{version}"),
+        ]
+        .iter()
+        .any(|candidate| stem == candidate),
+    };
+    accepted
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn is_firmware_member(component: Component, version: &str, value: &str) -> bool {
+    let name = match component {
+        Component::Main => {
+            value == format!("GuliKit_NS39_V{version}.bin")
+                || value == format!("NS39_KK3_MAX_V{version}.bin")
+        }
+        Component::Bluetooth => [
+            format!("NS39_BT_V{version}.exe"),
+            format!("GuliKit_NS38_NS39_BT_V{version}.exe"),
+            format!("GuliKit_NS38_NS39_NS59_BT_V{version}.exe"),
+        ]
+        .iter()
+        .any(|candidate| value == candidate),
+    };
+    name && value.len() <= 255 && !value.contains('/') && !value.contains('\\')
+}
+
 fn verify_bytes(
     bytes: &[u8],
     size: usize,
@@ -399,17 +696,30 @@ fn pe_bytes<'a>(
 }
 
 fn extract_bluetooth_payload(exe: &[u8], release: &Release) -> Result<Vec<u8>, PackageError> {
+    let target = release
+        .bluetooth_version
+        .ok_or(PackageError::EmbeddedMetadata)?;
+    extract_bluetooth_payload_for(exe, target, release.payload_size)
+}
+
+fn extract_bluetooth_payload_for(
+    exe: &[u8],
+    target: u16,
+    payload_size: usize,
+) -> Result<Vec<u8>, PackageError> {
+    if payload_size == 0
+        || payload_size > MAX_BLUETOOTH_PAYLOAD_SIZE
+        || !payload_size.is_multiple_of(512)
+    {
+        return Err(PackageError::EmbeddedMetadata);
+    }
     let image = PeFile32::parse(exe)?;
     let identity = pe_bytes(&image, exe, 0x17_32d0, 16)?;
     let version = pe_bytes(&image, exe, 0x17_32e0, 2)?;
     let length = pe_bytes(&image, exe, 0x17_32e4, 4)?;
     // The reviewed 3.23, 3.24 and 5.07 programs share this layout and identical
     // transport code. Version and payload size belong to the selected archive.
-    let target = release
-        .bluetooth_version
-        .ok_or(PackageError::EmbeddedMetadata)?;
-    let size: u32 = release
-        .payload_size
+    let size: u32 = payload_size
         .try_into()
         .map_err(|_| PackageError::EmbeddedRange)?;
     if identity != crate::version::BT_SIGNATURE
@@ -418,7 +728,15 @@ fn extract_bluetooth_payload(exe: &[u8], release: &Release) -> Result<Vec<u8>, P
     {
         return Err(PackageError::EmbeddedMetadata);
     }
-    Ok(pe_bytes(&image, exe, 0x17_32f0, release.payload_size)?.to_vec())
+    Ok(pe_bytes(&image, exe, 0x17_32f0, payload_size)?.to_vec())
+}
+
+fn parse_bluetooth_version(version: &str) -> Result<u16, PackageError> {
+    let (major, minor) = parse_canonical_version(Component::Bluetooth, version)?;
+    major
+        .checked_mul(100)
+        .and_then(|value| value.checked_add(minor))
+        .ok_or(PackageError::InvalidArchiveSelection("version"))
 }
 
 #[cfg(test)]
@@ -426,6 +744,244 @@ mod tests {
     use super::*;
     use std::io::Write;
     use zip::{ZipWriter, write::SimpleFileOptions};
+
+    fn main_selection(archive: &[u8], member: &[u8]) -> ArchiveSelection {
+        ArchiveSelection::try_from(ArchiveSelectionData {
+            archive_revision: "0123456789012345678901234567890123456789".into(),
+            path: "/kk3-max/base/v3.1/GuliKit_NS39_V3.1.zip".into(),
+            component: Component::Main,
+            version: "3.1".into(),
+            archive: "GuliKit_NS39_V3.1.zip".into(),
+            archive_size: archive.len() as u64,
+            archive_sha256: hex::encode(Sha256::digest(archive)),
+            firmware_member: "GuliKit_NS39_V3.1.bin".into(),
+            member_size: member.len() as u64,
+            member_sha256: hex::encode(Sha256::digest(member)),
+            payload_size: member.len() as u64,
+            payload_sha256: hex::encode(Sha256::digest(member)),
+            source_url: "https://www.gulikit.com/newsinfo/887152.html".into(),
+            parser: ArchiveParserKind::MainBinV1,
+        })
+        .unwrap()
+    }
+
+    fn bluetooth_selection(archive: &[u8], member: &[u8], payload: &[u8]) -> ArchiveSelection {
+        ArchiveSelection::try_from(ArchiveSelectionData {
+            archive_revision: "0123456789012345678901234567890123456789".into(),
+            path: "/kk3-max/bluetooth/v3.24/NS38_NS39_BT_V3.24.zip".into(),
+            component: Component::Bluetooth,
+            version: "3.24".into(),
+            archive: "NS38_NS39_BT_V3.24.zip".into(),
+            archive_size: archive.len() as u64,
+            archive_sha256: hex::encode(Sha256::digest(archive)),
+            firmware_member: "GuliKit_NS38_NS39_BT_V3.24.exe".into(),
+            member_size: member.len() as u64,
+            member_sha256: hex::encode(Sha256::digest(member)),
+            payload_size: payload.len() as u64,
+            payload_sha256: hex::encode(Sha256::digest(payload)),
+            source_url: "https://www.gulikit.com/newsinfo/887152.html".into(),
+            parser: ArchiveParserKind::BluetoothPeV1,
+        })
+        .unwrap()
+    }
+
+    fn zip_member(name: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(name, SimpleFileOptions::default()).unwrap();
+        zip.write_all(bytes).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn synthetic_bt_pe(version: u16, size: usize) -> Vec<u8> {
+        let mut bytes = vec![0; 0x800];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes[0x84..0x86].copy_from_slice(&0x14c_u16.to_le_bytes());
+        bytes[0x86..0x88].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[0x94..0x96].copy_from_slice(&224_u16.to_le_bytes());
+        bytes[0x98..0x9a].copy_from_slice(&0x10b_u16.to_le_bytes());
+        let section = 0x178;
+        bytes[section..section + 5].copy_from_slice(b".data");
+        bytes[section + 8..section + 12].copy_from_slice(&0x600_u32.to_le_bytes());
+        bytes[section + 12..section + 16].copy_from_slice(&0x17_3000_u32.to_le_bytes());
+        bytes[section + 16..section + 20].copy_from_slice(&0x600_u32.to_le_bytes());
+        bytes[section + 20..section + 24].copy_from_slice(&0x200_u32.to_le_bytes());
+        bytes[0x4d0..0x4e0].copy_from_slice(&crate::version::BT_SIGNATURE);
+        bytes[0x4e0..0x4e2].copy_from_slice(&version.to_le_bytes());
+        bytes[0x4e4..0x4e8].copy_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+        bytes[0x4f0..0x4f0 + size].fill(0xa5);
+        bytes
+    }
+
+    #[test]
+    fn archive_selection_rejects_unbounded_or_noncanonical_metadata() {
+        let member = b"arbitrary reviewed raw BIN";
+        let archive = zip_member("GuliKit_NS39_V3.1.bin", member);
+        let valid = main_selection(&archive, member).data().clone();
+
+        let mut malformed = valid.clone();
+        malformed.archive_revision = "bad".into();
+        assert!(ArchiveSelection::try_from(malformed).is_err());
+        let mut malformed = valid.clone();
+        malformed.path = "/kk3-max/base/v03.1/GuliKit_NS39_V3.1.zip".into();
+        assert!(ArchiveSelection::try_from(malformed).is_err());
+        let mut malformed = valid.clone();
+        malformed.component = Component::Bluetooth;
+        assert!(ArchiveSelection::try_from(malformed).is_err());
+        let mut malformed = valid.clone();
+        malformed.parser = ArchiveParserKind::BluetoothPeV1;
+        assert!(ArchiveSelection::try_from(malformed).is_err());
+        let mut malformed = valid.clone();
+        malformed.firmware_member = "NS38.bin".into();
+        assert!(ArchiveSelection::try_from(malformed).is_err());
+        let mut malformed = valid.clone();
+        malformed.archive_sha256 = "A".repeat(64);
+        assert!(ArchiveSelection::try_from(malformed).is_err());
+        let mut malformed = valid;
+        malformed.payload_size += 1;
+        assert!(ArchiveSelection::try_from(malformed).is_err());
+    }
+
+    #[test]
+    fn archive_selection_accepts_reviewed_ns39_member_name_families() {
+        let archive = b"zip";
+        let digest = hex::encode(Sha256::digest(archive));
+        for (component, version, filename, member, parser, member_size, payload_size) in [
+            (
+                Component::Main,
+                "3.6",
+                "GuliKit_NS39_V3.6a.zip",
+                "GuliKit_NS39_V3.6.bin",
+                ArchiveParserKind::MainBinV1,
+                3,
+                3,
+            ),
+            (
+                Component::Main,
+                "5.9",
+                "KK3_NS38_NS39_V5.9.zip",
+                "NS39_KK3_MAX_V5.9.bin",
+                ArchiveParserKind::MainBinV1,
+                3,
+                3,
+            ),
+            (
+                Component::Bluetooth,
+                "3.23",
+                "NS39_BT_V3.23.zip",
+                "NS39_BT_V3.23.exe",
+                ArchiveParserKind::BluetoothPeV1,
+                3,
+                512,
+            ),
+            (
+                Component::Bluetooth,
+                "3.24",
+                "NS38_NS39_BT_V3.24.zip",
+                "GuliKit_NS38_NS39_BT_V3.24.exe",
+                ArchiveParserKind::BluetoothPeV1,
+                3,
+                512,
+            ),
+            (
+                Component::Bluetooth,
+                "5.07",
+                "GuliKit_NS38_NS39_NS59_BT_V5.07.zip",
+                "GuliKit_NS38_NS39_NS59_BT_V5.07.exe",
+                ArchiveParserKind::BluetoothPeV1,
+                3,
+                512,
+            ),
+        ] {
+            let component_path = if component == Component::Main {
+                "base"
+            } else {
+                "bluetooth"
+            };
+            let data = ArchiveSelectionData {
+                archive_revision: "0123456789012345678901234567890123456789".into(),
+                path: format!("/kk3-max/{component_path}/v{version}/{filename}"),
+                component,
+                version: version.into(),
+                archive: filename.into(),
+                archive_size: archive.len() as u64,
+                archive_sha256: digest.clone(),
+                firmware_member: member.into(),
+                member_size,
+                member_sha256: "11".repeat(32),
+                payload_size,
+                payload_sha256: if component == Component::Main {
+                    "11".repeat(32)
+                } else {
+                    "22".repeat(32)
+                },
+                source_url: "https://www.gulikit.com/newsinfo/887152.html".into(),
+                parser,
+            };
+            assert!(
+                ArchiveSelection::try_from(data.clone()).is_ok(),
+                "rejected {component:?} {version} {filename} {member}: {:?}",
+                ArchiveSelection::try_from(data).err()
+            );
+        }
+    }
+
+    #[test]
+    fn selected_main_bin_is_verified_as_bounded_raw_payload_with_selected_target() {
+        let member = b"raw main bytes without an embedded version header";
+        let archive = zip_member("GuliKit_NS39_V3.1.bin", member);
+        let selection = main_selection(&archive, member);
+        let package = VerifiedPackage::inspect_selected(&archive, &selection).unwrap();
+
+        assert_eq!(package.payload(), member);
+        assert_eq!(package.info().version, "3.1");
+        assert!(package.info().matches_archive_selection(&selection));
+        assert_eq!(
+            package
+                .info()
+                .decision_for_installed("5.8", crate::version::VersionPolicy::AllowDowngrade)
+                .unwrap(),
+            crate::version::VersionDecision::Eligible
+        );
+        assert!(VerifiedPackage::inspect_selected(b"changed archive", &selection).is_err());
+        let mut serialized = serde_json::to_value(&selection).unwrap();
+        serialized["path"] = "/kk3-max/base/v9.9/forged.zip".into();
+        assert!(serde_json::from_value::<ArchiveSelection>(serialized).is_err());
+    }
+
+    #[test]
+    fn selected_bluetooth_pe_checks_actual_version_length_and_payload() {
+        let firmware = synthetic_bt_pe(324, 512);
+        let payload = &firmware[0x4f0..0x4f0 + 512];
+        let archive = zip_member("GuliKit_NS38_NS39_BT_V3.24.exe", &firmware);
+        let selection = bluetooth_selection(&archive, &firmware, payload);
+        let package = VerifiedPackage::inspect_selected(&archive, &selection).unwrap();
+
+        assert_eq!(package.payload(), payload);
+        assert!(package.info().matches_archive_selection(&selection));
+
+        let wrong_version = synthetic_bt_pe(323, 512);
+        let wrong_archive = zip_member("GuliKit_NS38_NS39_BT_V3.24.exe", &wrong_version);
+        assert!(VerifiedPackage::inspect_selected(&wrong_archive, &selection).is_err());
+    }
+
+    #[test]
+    fn legacy_package_info_omits_optional_archive_selection() {
+        let info = PackageInfo {
+            model: Model::Kk3Max,
+            component: Component::Main,
+            version: "5.9".into(),
+            payload_size: 1,
+            payload_sha256: "00".repeat(32),
+            archive_sha256: "00".repeat(32),
+            source_url: "https://www.gulikit.com/".into(),
+            member: "NS39_KK3_MAX_V5.9.bin".into(),
+            archive_selection: None,
+        };
+        let value = serde_json::to_value(info).unwrap();
+        assert!(value.get("archive_selection").is_none());
+    }
 
     #[test]
     fn catalog_bounds_and_target_versions_match_the_reviewed_release_metadata() {

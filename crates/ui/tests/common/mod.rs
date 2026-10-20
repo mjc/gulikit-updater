@@ -23,6 +23,10 @@ pub fn inspection() -> Inspection {
             bluetooth_transport_candidate: true,
             observed_profile: true,
             conflicting_model: false,
+            usb: Some(gulikit_platform::discovery::UsbIdentity {
+                vendor: 0x34d3,
+                product: 0x1100,
+            }),
             disks: vec![],
             mount: None,
         },
@@ -40,8 +44,9 @@ pub fn package() -> PackageInfo {
         payload_size: 51500,
         payload_sha256: "d1c7d485e1a29fd518d2a77c824c46a883bdd6c73c8126cca15bf5a1ec6d6ae4".into(),
         archive_sha256: release.archive_sha256.into(),
-        source_url: release.source_url,
-        member: release.member,
+        source_url: release.source_url.into(),
+        member: release.member.into(),
+        archive_selection: None,
     }
 }
 pub fn attempt(outcome: Outcome) -> Attempt {

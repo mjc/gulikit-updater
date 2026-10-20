@@ -27,6 +27,7 @@ pub enum Message {
     Ready,
     Go,
     Cancel,
+    Progress(gulikit_core::update::Progress),
     Result(serde_json::Value),
     Failed {
         kind: String,
@@ -42,6 +43,8 @@ pub enum Message {
 pub struct Channel {
     stream: UnixStream,
     pending: Vec<u8>,
+    outgoing: Vec<u8>,
+    written: usize,
 }
 impl Channel {
     ///
@@ -55,6 +58,8 @@ impl Channel {
         Ok(Self {
             stream,
             pending: Vec::new(),
+            outgoing: Vec::new(),
+            written: 0,
         })
     }
     ///
@@ -73,32 +78,69 @@ impl Channel {
     ///
     /// Returns an error for an oversized or unencodable message, socket write failure, closed peer, or exceeded write deadline.
     pub fn send(&mut self, message: &Message) -> Result<(), String> {
-        let mut frame = Vec::with_capacity(128);
-        frame.extend_from_slice(&[0; 4]);
-        serde_json::to_writer(&mut frame, message).map_err(|error| error.to_string())?;
-        let length = frame.len() - 4;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        self.flush_until(deadline)?;
+        self.encode(message)?;
+        self.flush_until(deadline)
+    }
+
+    /// Report progress without waiting for the reader. Retain a partial frame so
+    /// later control messages cannot corrupt it; discard newer progress while busy.
+    ///
+    /// # Errors
+    /// Returns socket or encoding errors. Progress failures do not cancel I/O.
+    pub fn try_send_progress(
+        &mut self,
+        value: gulikit_core::update::Progress,
+    ) -> Result<bool, String> {
+        if !self.flush_pending()? {
+            return Ok(false);
+        }
+        self.encode(&Message::Progress(value))?;
+        self.flush_pending()
+    }
+
+    fn encode(&mut self, message: &Message) -> Result<(), String> {
+        self.outgoing.extend_from_slice(&[0; 4]);
+        if let Err(error) = serde_json::to_writer(&mut self.outgoing, message) {
+            self.outgoing.clear();
+            return Err(error.to_string());
+        }
+        let length = self.outgoing.len() - 4;
         if length > LIMIT {
+            self.outgoing.clear();
             return Err("Main worker message exceeds bound".into());
         }
         let length = u32::try_from(length).map_err(|_| "Main worker message exceeds bound")?;
-        frame[..4].copy_from_slice(&length.to_le_bytes());
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut remaining = frame.as_slice();
-        while !remaining.is_empty() {
+        self.outgoing[..4].copy_from_slice(&length.to_le_bytes());
+        Ok(())
+    }
+
+    fn flush_until(&mut self, deadline: Instant) -> Result<(), String> {
+        while !self.flush_pending()? {
             if Instant::now() >= deadline {
                 return Err("Main worker channel write deadline".into());
             }
-            match self.stream.write(remaining) {
+            std::thread::sleep(TICK);
+        }
+        Ok(())
+    }
+
+    fn flush_pending(&mut self) -> Result<bool, String> {
+        while self.written < self.outgoing.len() {
+            match self.stream.write(&self.outgoing[self.written..]) {
                 Ok(0) => return Err("Main worker channel closed".into()),
-                Ok(count) => remaining = &remaining[count..],
+                Ok(count) => self.written += count,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(TICK);
+                    return Ok(false);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error.to_string()),
             }
         }
-        Ok(())
+        self.outgoing.clear();
+        self.written = 0;
+        Ok(true)
     }
     ///
     /// # Errors
@@ -263,7 +305,7 @@ fn guardian_with_clock(
             Some(_) => return Err("Unexpected Main guardian parent message".into()),
         }
         if result.is_none() {
-            match worker.poll() {
+            match poll_worker(&mut worker, &mut parent, started) {
                 Ok(Some(Message::PackageReady)) if !lease_sent && !ready && !started => {
                     owned.grant_lease(&lease_sender)?;
                     lease_sent = true;
@@ -294,14 +336,8 @@ fn guardian_with_clock(
             .map_err(|error| error.to_string())?
             .is_some()
         {
-            if result.is_none()
-                && let Ok(Some(message)) = worker.poll()
-            {
-                match message {
-                    Message::Result(_) if started => result = Some(message),
-                    Message::Failed { .. } => result = Some(message),
-                    _ => return Err("Main worker exited in an unexpected protocol phase".into()),
-                }
+            if result.is_none() {
+                result = drain_final_response(&mut worker, &mut parent, started)?;
             }
             parent.send(&result.unwrap_or_else(|| Message::Unknown {
                 reason: "Main worker exited without a final result".into(),
@@ -317,15 +353,58 @@ fn guardian_with_clock(
     }
 }
 
+fn drain_final_response(
+    worker: &mut Channel,
+    parent: &mut Channel,
+    started: bool,
+) -> Result<Option<Message>, String> {
+    match poll_worker(worker, parent, started) {
+        Ok(Some(message @ Message::Result(_))) if started => Ok(Some(message)),
+        Ok(Some(message @ Message::Failed { .. })) => Ok(Some(message)),
+        Ok(None) | Err(_) => Ok(None),
+        Ok(Some(_)) => Err("Main worker exited in an unexpected protocol phase".into()),
+    }
+}
+
+fn poll_worker(
+    worker: &mut Channel,
+    parent: &mut Channel,
+    started: bool,
+) -> Result<Option<Message>, String> {
+    loop {
+        match worker.poll()? {
+            Some(Message::Progress(value)) if started => {
+                let _ = parent.try_send_progress(value);
+            }
+            message => return Ok(message),
+        }
+    }
+}
+
 ///
 /// # Errors
 ///
 /// Returns an error if the guardian cannot be started or its reporting channel fails before a final response. Unknown results retain their explicit worker-stopped evidence.
 pub fn run(
+    guardian_command: Command,
+    request: serde_json::Value,
+    budget: Duration,
+    cancelled: impl FnMut() -> bool,
+) -> Result<Message, String> {
+    run_with_progress(guardian_command, request, budget, cancelled, |_| {})
+}
+
+/// Run a supervised filesystem operation and forward observed progress.
+///
+/// # Errors
+/// Reports guardian startup or channel failures. Reporting failures after GO
+/// retain an unknown outcome and the guardian's ownership of its worker.
+pub fn run_with_progress(
     mut guardian_command: Command,
     request: serde_json::Value,
     budget: Duration,
     mut cancelled: impl FnMut() -> bool,
+    mut progress: impl FnMut(gulikit_core::update::Progress),
 ) -> Result<Message, String> {
     // Terminal signals reach the reporting process. It forwards cancellation to
     // the owned I/O child; the guardian must survive to retain its lease.
@@ -364,6 +443,7 @@ pub fn run(
                 }
                 started = true;
             }
+            Ok(Some(Message::Progress(value))) if started => progress(value),
             Ok(Some(Message::Unknown { reason, .. })) if !started => {
                 return Ok(reporting_failure(false, reason));
             }
@@ -436,6 +516,47 @@ fn reporting_failure(started: bool, reason: String) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_progress_does_not_wait_or_corrupt_the_final_result() {
+        let (mut local, mut remote) = UnixStream::pair().unwrap();
+        local.set_nonblocking(true).unwrap();
+        let padding = [0_u8; 8192];
+        let mut buffered_bytes = 0;
+        loop {
+            match local.write(&padding) {
+                Ok(count) => buffered_bytes += count,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                result => panic!("{result:?}"),
+            }
+        }
+        let mut writer = Channel::new(local).unwrap();
+        let started = Instant::now();
+        for confirmed in 0..1000 {
+            assert!(
+                !writer
+                    .try_send_progress(gulikit_core::update::Progress {
+                        submitted: confirmed,
+                        confirmed,
+                        total: 1000
+                    })
+                    .unwrap()
+            );
+        }
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let mut drained = vec![0; buffered_bytes];
+        remote.read_exact(&mut drained).unwrap();
+        writer
+            .send(&Message::Result(serde_json::json!({"complete":true})))
+            .unwrap();
+        let mut reader = Channel::new(remote).unwrap();
+        assert!(
+            matches!(reader.poll().unwrap(), Some(Message::Progress(value)) if value.confirmed == 0)
+        );
+        assert!(
+            matches!(reader.poll().unwrap(), Some(Message::Result(value)) if value["complete"] == true)
+        );
+    }
     #[test]
     #[ignore = "subprocess fixture; invoked by the guardian tests"]
     fn worker_fixture() {
@@ -460,6 +581,17 @@ mod tests {
             Message::Go
         ));
         drop(lock); // Worker closes its duplicate; the guardian still owns the lease.
+        if request["progress"] == true {
+            for confirmed in [0, 512, 1024] {
+                channel
+                    .send(&Message::Progress(gulikit_core::update::Progress {
+                        submitted: confirmed,
+                        confirmed,
+                        total: 1024,
+                    }))
+                    .unwrap();
+            }
+        }
         channel
             .send(&Message::Result(serde_json::json!({"completed":true,"process_group":nix::unistd::getpgrp().as_raw()})))
             .unwrap();
@@ -512,6 +644,43 @@ mod tests {
             "A closed guardian must be observed immediately: {message}"
         );
     }
+    #[test]
+    fn progress_is_forwarded_before_the_reaped_workers_final_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lease");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "main_worker::tests::guardian_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GULIKIT_TEST_LEASE", &path);
+        let mut observed = Vec::new();
+        let response = run_with_progress(
+            command,
+            serde_json::json!({"lock":path,"progress":true}),
+            Duration::from_secs(3),
+            || false,
+            |value| observed.push(value),
+        )
+        .unwrap();
+        assert!(matches!(response, Message::Result(_)), "{response:?}");
+        assert_eq!(
+            observed
+                .iter()
+                .map(|value| value.confirmed)
+                .collect::<Vec<_>>(),
+            [0, 512, 1024]
+        );
+        assert!(
+            observed
+                .iter()
+                .all(|value| value.total == 1024 && value.confirmed == value.submitted)
+        );
+    }
+
     #[test]
     fn terminal_interruption_is_forwarded_by_the_reporter_instead_of_killing_the_guardian() {
         let directory = tempfile::tempdir().unwrap();

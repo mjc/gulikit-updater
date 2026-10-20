@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use gulikit_core::package::{Component, Model, catalog};
-use gulikit_platform::{InspectError, inspect_package};
+use gulikit_platform::inspect_package;
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -19,12 +19,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    #[cfg(target_os = "macos")]
-    #[command(hide = true, name = "__main-guardian")]
-    MainGuardian,
-    #[cfg(target_os = "macos")]
-    #[command(hide = true, name = "__main-worker")]
-    MainWorker,
     /// Enumerate all recognized update candidates. Put only one device in update mode.
     Devices {
         #[arg(long)]
@@ -142,8 +136,6 @@ fn write_native_result(
 
 fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitCode> {
     match cli.command {
-        #[cfg(target_os = "macos")]
-        Command::MainGuardian | Command::MainWorker => unreachable!("internal process entrypoint"),
         command @ (Command::Devices { .. }
         | Command::Probe { .. }
         | Command::Update { .. }
@@ -205,19 +197,16 @@ fn run(cli: Cli, out: &mut impl Write, err: &mut impl Write) -> io::Result<ExitC
                 Ok(ExitCode::SUCCESS)
             }
             Err(error) => {
-                let (kind, code) = match &error {
-                    InspectError::Rejected(_) => ("package_rejected", 3),
-                    InspectError::Io(_) | InspectError::NotFile => ("package_io", 4),
-                };
+                let error = AppError::from(error);
                 if json {
                     write_json(
                         err,
-                        serde_json::json!({"error": {"kind": kind, "message": error.to_string()}}),
+                        serde_json::json!({"error": {"kind": error.kind, "message": error.message}}),
                     )?;
                 } else {
-                    writeln!(err, "{error}")?;
+                    writeln!(err, "{}", error.message)?;
                 }
-                Ok(ExitCode::from(code))
+                Ok(ExitCode::from(error.code))
             }
         },
     }
@@ -242,13 +231,7 @@ fn native_command(command: Command) -> Result<serde_json::Value, AppError> {
         ..
     } = &command
     {
-        Some(inspect_package(path, *model, *component).map_err(|e| {
-            let (kind, code) = match &e {
-                InspectError::Rejected(_) => ("package_rejected", 3),
-                InspectError::Io(_) | InspectError::NotFile => ("package_io", 4),
-            };
-            AppError::new(kind, code, e.to_string())
-        })?)
+        Some(inspect_package(path, *model, *component)?)
     } else {
         None
     };
@@ -296,11 +279,15 @@ mod main_supervision;
 mod native;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
     #[cfg(target_os = "macos")]
-    if let Command::MainGuardian | Command::MainWorker = &cli.command {
-        return main_supervision::internal(&cli.command);
+    if let Some(code) = std::env::args_os()
+        .nth(1)
+        .as_deref()
+        .and_then(gulikit_updater::supervision::dispatch_internal)
+    {
+        return ExitCode::from(code);
     }
+    let cli = Cli::parse();
     match run(cli, &mut io::stdout().lock(), &mut io::stderr().lock()) {
         Ok(code) => code,
         Err(error) => {

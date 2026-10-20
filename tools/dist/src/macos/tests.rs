@@ -118,6 +118,7 @@ fn signed_archive_extracts_and_executes_with_valid_metadata() {
     let info: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(info["CFBundleShortVersionString"], "0.1.0");
     assert_eq!(info["LSMinimumSystemVersion"], "12.0");
+    assert_eq!(info["LSUIElement"], true);
     assert!(
         consumer
             .join("Contents/MacOS")

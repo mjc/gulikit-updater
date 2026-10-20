@@ -6,7 +6,7 @@ use crate::{
 use gulikit_core::{
     package::{Component, Model, PackageInfo, catalog},
     update::{Outcome, Progress, TransferRecord, Verification, verify_restart},
-    version::{BT_SIGNATURE, MainVersion, VersionDecision, bluetooth_info},
+    version::{BT_SIGNATURE, MainVersion, VersionDecision, VersionPolicy, bluetooth_info},
 };
 use gulikit_platform::discovery::NativeCandidate;
 use gulikit_updater::updater::{
@@ -14,7 +14,7 @@ use gulikit_updater::updater::{
     VerificationTransfer,
 };
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -77,7 +77,7 @@ fn release(component: Component) -> &'static gulikit_core::package::Release {
         .expect("supported demo component")
 }
 impl DemoDevice {
-    fn target(&self) -> NativeCandidate {
+    fn target(&self, component: Component) -> NativeCandidate {
         NativeCandidate {
             ancestor: 42,
             generation: self.generation,
@@ -85,13 +85,16 @@ impl DemoDevice {
             bluetooth_transport_candidate: true,
             observed_profile: true,
             conflicting_model: false,
+            usb: Some(gulikit_platform::discovery::UsbIdentity::for_update_mode(
+                component,
+            )),
             storage_identities: vec![],
             disks: vec![],
             mount: None,
         }
     }
     fn observe(&self, component: Component, confirmed: bool) -> Result<Inspection, String> {
-        if !confirmed {
+        if !confirmed && !self.target(component).has_known_usb_ids(component) {
             return Err("NS39 identity not confirmed. Writing refused.".into());
         }
         match self.profile {
@@ -131,7 +134,7 @@ impl DemoDevice {
             raw_version_bytes: raw,
             qualified_bot_lun: (component == Component::Bluetooth).then_some(0),
             cleanup_errors: vec![],
-            target: self.target(),
+            target: self.target(component),
             identity_provenance: "simulated NS39",
         })
     }
@@ -160,30 +163,38 @@ impl DemoDevice {
             },
             payload_sha256: "simulated payload; no firmware bytes".into(),
             archive_sha256: release.archive_sha256.into(),
-            source_url: release.source_url,
-            member: release.member,
+            source_url: release.source_url.into(),
+            member: release.member.into(),
+            archive_selection: None,
         };
         self.selected = Some((path.clone(), info.clone()));
         Ok(Event::Package { path, info })
     }
     fn transfer(
         &mut self,
-        path: &Path,
         component: Component,
         attachment: Attachment,
         confirmed: bool,
+        policy: VersionPolicy,
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
-        updater::check_attachment(Some(attachment), &self.target())?;
-        if self.observe(component, confirmed)?.decision != VersionDecision::Eligible {
-            return Err("Installed version does not permit an update.".into());
+        updater::check_attachment(Some(attachment), &self.target(component))?;
+        if !confirmed {
+            return Err("Simulated controller identity is not confirmed.".into());
         }
         let (_, package) = self
             .selected
             .as_ref()
-            .filter(|(selected, info)| selected.as_path() == path && info.component == component)
             .ok_or("Select a simulated package first")?;
+        let installed = self.versions[index(component)];
+        if package
+            .decision_for_installed(installed, policy)
+            .map_err(|error| error.to_string())?
+            != VersionDecision::Eligible
+        {
+            return Err("Installed version does not permit an update.".into());
+        }
         let transfer = simulate_transfer(
             package.payload_size,
             self.profile,
@@ -201,7 +212,7 @@ impl DemoDevice {
             event: "attempt_result",
             schema_version: 1,
             record_finalized: true,
-            target: self.target(),
+            target: self.target(component),
             package: package.clone(),
             operator_action: updater::operator_action(component, transfer.outcome),
             transfer,
@@ -244,7 +255,7 @@ impl DemoDevice {
             previous_generation: attempt.generation,
             generation: self.generation,
             same_unit_confirmed: same_controller,
-            model_confirmed: confirmed,
+            model_confirmed: confirmed || read.target.has_known_usb_ids(attempt.component),
             version: read.installed_version,
             expected_version: attempt.expected_version.clone(),
         };
@@ -337,7 +348,16 @@ impl Device for DemoDevice {
                 component,
                 attachment,
                 confirmed,
-            } => self.transfer(&path, component, attachment, confirmed, cancelled, emit),
+                expected_package,
+                policy,
+            } => {
+                if self.selected.as_ref().is_none_or(|(selected, info)| {
+                    selected != &path || info.component != component || *info != expected_package
+                }) {
+                    return Err("Simulated package changed since selection.".into());
+                }
+                self.transfer(component, attachment, confirmed, policy, cancelled, emit)
+            }
             Work::Verify {
                 attempt,
                 confirmed,

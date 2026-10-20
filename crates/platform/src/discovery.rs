@@ -19,6 +19,25 @@ pub struct StorageIdentity {
     pub product: Option<String>,
     pub revision: Option<String>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct UsbIdentity {
+    pub vendor: u16,
+    pub product: u16,
+}
+impl UsbIdentity {
+    #[must_use]
+    pub const fn for_update_mode(component: Component) -> Self {
+        let (vendor, product) = match component {
+            Component::Main => (0x34d3, 0x1100),
+            Component::Bluetooth => (0x8087, 0x1024),
+        };
+        Self { vendor, product }
+    }
+    #[must_use]
+    pub fn matches_update_mode(self, component: Component) -> bool {
+        self == Self::for_update_mode(component)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -33,11 +52,20 @@ pub struct NativeCandidate {
     pub bluetooth_transport_candidate: bool,
     pub observed_profile: bool,
     pub conflicting_model: bool,
+    #[serde(default)]
+    pub usb: Option<UsbIdentity>,
     pub storage_identities: Vec<StorageIdentity>,
     pub disks: Vec<Disk>,
     pub mount: Option<PathBuf>,
 }
 impl NativeCandidate {
+    #[must_use]
+    pub fn has_known_usb_ids(&self, component: Component) -> bool {
+        !self.conflicting_model
+            && self
+                .usb
+                .is_some_and(|usb| usb.matches_update_mode(component))
+    }
     pub(crate) fn core(&self) -> Candidate {
         Candidate {
             ancestor: self.ancestor,
@@ -58,12 +86,18 @@ impl Snapshot {
     ///
     /// # Errors
     ///
-    /// Returns an error for incomplete or ambiguous discovery, missing model confirmation, conflicting identity, or absent component access.
+    /// Returns an error for incomplete or ambiguous discovery, unknown USB IDs
+    /// without an explicit model choice, conflicting identity, or absent component access.
     pub fn select(&self, confirmed: bool, component: Component) -> Result<NativeCandidate, String> {
+        let recognized = !self.candidates.is_empty()
+            && self
+                .candidates
+                .iter()
+                .all(|candidate| candidate.has_known_usb_ids(component));
         let selected = Discovery::select_from(
             self.candidates.iter().map(NativeCandidate::core),
             !self.incomplete.is_empty(),
-            confirmed,
+            confirmed || recognized,
             component,
         )
         .map_err(|e| e.to_string())?;
@@ -103,6 +137,83 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognized_usb_ids_select_without_a_manual_confirmation() {
+        for (component, vendor, product) in [
+            (Component::Main, 0x34d3, 0x1100),
+            (Component::Bluetooth, 0x8087, 0x1024),
+        ] {
+            let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+                "candidates":[{
+                    "ancestor":1,"generation":1,"main_volume_candidate":true,
+                    "bluetooth_transport_candidate":true,"observed_profile":true,
+                    "conflicting_model":false,"storage_identities":[],"disks":[],"mount":null,
+                    "usb":{"vendor":vendor,"product":product}
+                }], "incomplete":[]
+            }))
+            .unwrap();
+            assert_eq!(snapshot.select(false, component).unwrap().ancestor, 1);
+        }
+    }
+
+    #[test]
+    fn automatic_identification_refuses_missing_unknown_and_wrong_mode_ids() {
+        let mut snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "candidates":[{
+                "ancestor":1,"generation":1,"main_volume_candidate":true,
+                "bluetooth_transport_candidate":true,"observed_profile":true,
+                "conflicting_model":false,"storage_identities":[
+                    {"entry":2,"vendor":"Gamepad","product":"Updater","revision":"1.00"}
+                ],"disks":[],"mount":null
+            }], "incomplete":[]
+        }))
+        .unwrap();
+        for (component, wrong_mode) in [
+            (
+                Component::Main,
+                UsbIdentity {
+                    vendor: 0x8087,
+                    product: 0x1024,
+                },
+            ),
+            (
+                Component::Bluetooth,
+                UsbIdentity {
+                    vendor: 0x34d3,
+                    product: 0x1100,
+                },
+            ),
+        ] {
+            for usb in [
+                None,
+                Some(wrong_mode),
+                Some(UsbIdentity {
+                    vendor: 0x1234,
+                    product: 0x5678,
+                }),
+            ] {
+                snapshot.candidates[0].usb = usb;
+                assert!(snapshot.select(false, component).is_err());
+            }
+        }
+        snapshot.candidates[0].usb = Some(UsbIdentity {
+            vendor: 0x34d3,
+            product: 0x1100,
+        });
+        snapshot.candidates[0].conflicting_model = true;
+        assert!(snapshot.select(false, Component::Main).is_err());
+        snapshot.candidates[0].conflicting_model = false;
+        snapshot
+            .incomplete
+            .push("USB properties unavailable".into());
+        assert!(snapshot.select(false, Component::Main).is_err());
+        snapshot.incomplete.clear();
+        let mut other = snapshot.candidates[0].clone();
+        other.ancestor = 2;
+        snapshot.candidates.push(other);
+        assert!(snapshot.select(false, Component::Main).is_err());
+    }
 
     #[test]
     fn selection_ignores_enumeration_order_but_retains_changed_device_evidence() {

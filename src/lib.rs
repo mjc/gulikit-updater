@@ -2,3 +2,6 @@
 #![forbid(unsafe_code)]
 
 pub mod updater;
+
+#[cfg(target_os = "macos")]
+pub mod supervision;

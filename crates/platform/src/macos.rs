@@ -41,6 +41,7 @@ unsafe extern "C" {
         bound: u64,
     ) -> i32;
     fn gu_free(value: *mut c_void);
+    fn gu_running_executable_cdhash() -> *mut c_char;
     fn gu_watch_open() -> *mut c_void;
     fn gu_watch_epoch(value: *mut c_void) -> u64;
     fn gu_watch_state(value: *mut c_void, epoch: *mut u64, arrivals: *mut u64);
@@ -58,7 +59,7 @@ unsafe extern "C" {
         capacity: usize,
     ) -> i32;
     fn gu_usb_clear_stall(value: *mut c_void, error: *mut c_char, capacity: usize) -> i32;
-    fn gu_usb_close(value: *mut c_void, surrender: i32);
+    fn gu_usb_surrender(value: *mut c_void);
     #[cfg(test)]
     fn gu_max_lun_result(succeeded: i32, actual: usize, code: i32) -> i32;
     fn gu_usb_max_lun(value: *mut c_void, lun: *mut u8, error: *mut c_char, capacity: usize)
@@ -74,6 +75,30 @@ unsafe extern "C" {
         capacity: usize,
     ) -> i32;
     fn gu_usb_description(value: *mut c_void) -> *mut c_char;
+}
+
+/// Return the code-directory hash of this running macOS executable.
+///
+/// The native bridge validates the dynamic `SecCode` before and after reading
+/// its static signing information, then checks the extracted hash against that
+/// same running code object.
+///
+/// # Errors
+///
+/// Returns an error if macOS cannot establish a valid running code identity.
+pub fn running_executable_cdhash() -> Result<String, String> {
+    // SAFETY: the bridge returns a malloc-owned NUL-terminated string or null;
+    // gu_free is the matching deallocator.
+    unsafe {
+        let ptr = NonNull::new(gu_running_executable_cdhash())
+            .ok_or("Could not identify the running executable's code signature")?;
+        let bytes = CStr::from_ptr(ptr.as_ptr()).to_bytes();
+        let result = std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|error| format!("Invalid code hash from macOS: {error}"));
+        gu_free(ptr.as_ptr().cast());
+        result
+    }
 }
 
 ///
@@ -159,7 +184,7 @@ impl Session {
     ///
     /// Returns an error if attachment or lock identity changes, disk correlation is invalid, or the host record cannot be created durably outside device storage.
     pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
-        self.check()?;
+        self.check_record_session()?;
         let devices = record_exclusions(&self.target.disks, |bsd| {
             use std::os::unix::fs::{FileTypeExt, MetadataExt};
             if !bsd.starts_with("disk") || !bsd.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
@@ -172,8 +197,15 @@ impl Session {
             }
             Ok(metadata.rdev())
         })?;
-        self.check()?;
+        self.check_record_session()?;
         crate::journal::create_host_record(path, &devices)
+    }
+
+    fn check_record_session(&self) -> Result<(), String> {
+        match self.component {
+            Component::Main => self.check(),
+            Component::Bluetooth => self.check_transport(),
+        }
     }
 
     ///
@@ -432,10 +464,13 @@ impl MainPort for MainSession {
         self.session.check()?;
         self.volume.check_root()
     }
-    fn create_destination(&mut self) -> Result<(), gulikit_core::update::DestinationCreationError> {
+    fn create_destination(
+        &mut self,
+        member: &str,
+    ) -> Result<(), gulikit_core::update::DestinationCreationError> {
         self.prepare_write()?;
         self.check_session()?;
-        self.volume.create().map_err(Into::into)
+        self.volume.create(member).map_err(Into::into)
     }
     fn write(&mut self, bytes: &[u8]) -> Result<usize, gulikit_core::update::SubmissionError> {
         self.check_session()
@@ -487,25 +522,19 @@ impl NativeUsb {
     fn pointer(&self) -> Result<NonNull<c_void>, String> {
         self.ptr.ok_or_else(|| "USB claim is closed".into())
     }
-    fn close(mut self, surrender: bool) {
+    fn surrender(&mut self) {
         if let Some(ptr) = self.ptr.take() {
             // SAFETY: unique bridge ownership, consumed exactly once. Explicit
             // destruction precedes ARC release; later destruction is idempotent.
             unsafe {
-                gu_usb_close(ptr.as_ptr(), i32::from(surrender));
+                gu_usb_surrender(ptr.as_ptr());
             }
         }
     }
 }
 impl Drop for NativeUsb {
     fn drop(&mut self) {
-        // Panic/early-drop must never choose reset after an unknown F0. Normal
-        // read-only reset/restoration is an explicit successful finish phase.
-        if let Some(ptr) = self.ptr.take() {
-            unsafe {
-                gu_usb_close(ptr.as_ptr(), 1);
-            }
-        }
+        self.surrender();
     }
 }
 fn transfer_result(
@@ -672,6 +701,24 @@ pub struct BluetoothSession {
     write_gate: BluetoothWriteGate,
 }
 impl BluetoothSession {
+    /// Release ownership without resetting the device or restoring its drivers.
+    /// An imported recovery hold must survive closing an idle desktop window.
+    pub fn surrender(mut self) {
+        self.finished = true;
+        if let Some(usb) = self.usb.take() {
+            usb.into_inner().surrender();
+        }
+    }
+
+    /// Create an audit record while retaining the inspected transport claim.
+    ///
+    /// # Errors
+    /// Rejects invalidated ownership or a path on controller storage.
+    pub fn create_record(&mut self, path: &std::path::Path) -> Result<File, String> {
+        self.check_session()?;
+        self.session.create_record(path)
+    }
+
     fn native(&mut self) -> Result<&mut NativeUsb, String> {
         self.usb
             .as_mut()
@@ -973,7 +1020,21 @@ impl BluetoothPort for BluetoothSession {
         })
     }
     fn completion_detached(&mut self) -> Result<bool, String> {
-        Ok(self.session.completion_observation()?.decision() == CompletionDecision::ExpectedDetach)
+        // The KK3 normally reboots after accepting the last DATA block, before
+        // its CSW. OS removal notifications can lag that reboot. Wait only on
+        // host observations; never send F2, F1, a retry, or a reset here.
+        let started = Instant::now();
+        crate::completion::wait_for_expected_reboot(
+            || self.session.completion_observation(),
+            || {
+                let remaining = Duration::from_secs(5).saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return false;
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(50)));
+                true
+            },
+        )
     }
     fn finish(&mut self) -> Result<(), String> {
         if self.finished {
@@ -981,25 +1042,39 @@ impl BluetoothPort for BluetoothSession {
         }
         self.finished = true;
         if let Some(mut usb) = self.usb.take() {
-            let preserve = usb.firmware_may_have_been_submitted();
-            let detached = preserve && self.completion_detached().unwrap_or(false);
+            let firmware_submitted = usb.firmware_may_have_been_submitted();
+            let detached = firmware_submitted
+                && self
+                    .session
+                    .completion_observation()
+                    .is_ok_and(|observation| {
+                        observation.decision() == CompletionDecision::ExpectedDetach
+                    });
             if usb.io_mut().diagnostic {
                 eprintln!(
-                    "Cleanup disposition: {}",
-                    if preserve {
-                        "no-reset DeviceSurrender; driver restoration pending"
-                    } else {
-                        "read-only ordinary destroy; documented USB reset and driver rematch"
-                    }
+                    "Cleanup disposition: no-reset DeviceSurrender; driver restoration pending"
                 );
             }
-            usb.into_inner().close(preserve);
-            if preserve && !detached {
-                return Err(crate::acquisition::SURRENDER_PENDING_NOTICE.into());
-            }
+            finish_bluetooth_transport(firmware_submitted, detached, || {
+                usb.into_inner().surrender();
+            })?;
         }
         Ok(())
     }
+}
+
+fn finish_bluetooth_transport(
+    firmware_submitted: bool,
+    detached: bool,
+    surrender: impl FnOnce(),
+) -> Result<(), String> {
+    // Resetting after an F1 read exits Bluetooth update mode. Use the same
+    // no-reset surrender for inspection, verification, cancellation and errors.
+    surrender();
+    if firmware_submitted && !detached {
+        return Err(crate::acquisition::SURRENDER_PENDING_NOTICE.into());
+    }
+    Ok(())
 }
 impl Drop for BluetoothSession {
     fn drop(&mut self) {
@@ -1023,6 +1098,31 @@ mod tests {
     use super::{
         NativeCandidate, Snapshot, gu_cached_storage_profile, gu_profile_candidate, transfer_result,
     };
+    #[test]
+    fn bluetooth_readback_cleanup_surrenders_without_resetting() {
+        let mut releases = Vec::new();
+        super::finish_bluetooth_transport(false, false, || releases.push("surrender")).unwrap();
+        assert_eq!(releases, ["surrender"], "reading F1 must release ownership");
+    }
+
+    #[test]
+    fn bluetooth_write_cleanup_keeps_the_pending_restoration_notice() {
+        for detached in [false, true] {
+            let mut releases = Vec::new();
+            let result = super::finish_bluetooth_transport(true, detached, || {
+                releases.push("surrender");
+            });
+            assert_eq!(releases, ["surrender"]);
+            if detached {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    crate::acquisition::SURRENDER_PENDING_NOTICE
+                );
+            }
+        }
+    }
     #[test]
     fn bluetooth_capture_refuses_media_including_unmounted_disks() {
         super::bluetooth_media_capability(&[]).unwrap();

@@ -17,11 +17,12 @@ fn published_firmware_branch_downloads_match_the_existing_updater_packages() {
             .iter()
             .find(|record| record.sha256() == release.archive_sha256)
             .expect("reviewed original ZIP is published");
-        let path = client
+        let archive = client
             .download(&snapshot, record.path(), &cancelled)
             .unwrap();
-        assert_eq!(path.file_name().unwrap(), record.filename());
-        let bytes = gulikit_archive::read_verified_archive(&path, record).unwrap();
+        assert_eq!(archive.path().file_name().unwrap(), record.filename());
+        let bytes =
+            gulikit_archive::read_verified_archive(archive.path(), archive.record()).unwrap();
         let package = VerifiedPackage::inspect(&bytes, Model::Kk3Max, release.component).unwrap();
         assert_eq!(package.info().version, release.version);
         assert_eq!(package.info().member, release.member);

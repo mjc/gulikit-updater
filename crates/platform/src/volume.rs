@@ -96,16 +96,21 @@ impl Volume {
     ///
     /// # Errors
     ///
-    /// Returns an error if the root changed, a destination is already open, or exclusive destination creation fails.
-    pub fn create(&mut self) -> Result<(), String> {
+    /// Returns an error if the root changed, the selected member is not a safe
+    /// KK3 Main BIN basename, a destination is already open, or exclusive
+    /// destination creation fails.
+    pub fn create(&mut self, member: &str) -> Result<(), String> {
         self.check_root()?;
         if self.destination.is_some() {
             return Err("A destination is already open".into());
         }
+        if !safe_main_member(member) {
+            return Err("Selected firmware member is not a safe KK3 Main BIN basename".into());
+        }
         self.destination = Some(File::from(
             openat(
                 &self.root,
-                "NS39_KK3_MAX_V5.9.bin",
+                member,
                 OFlag::O_WRONLY
                     | OFlag::O_CREAT
                     | OFlag::O_EXCL
@@ -153,6 +158,21 @@ impl Volume {
     }
 }
 
+fn safe_main_member(member: &str) -> bool {
+    let version = member
+        .strip_prefix("NS39_KK3_MAX_V")
+        .or_else(|| member.strip_prefix("GuliKit_NS39_V"))
+        .and_then(|name| name.strip_suffix(".bin"));
+    let Some((major, minor)) = version.and_then(|version| version.split_once('.')) else {
+        return false;
+    };
+    !major.is_empty()
+        && !minor.is_empty()
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && minor.bytes().all(|byte| byte.is_ascii_digit())
+        && member.len() <= 128
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +198,7 @@ mod tests {
             b"previous attempt",
         )
         .unwrap();
-        assert!(volume.create().is_err());
+        assert!(volume.create("NS39_KK3_MAX_V5.9.bin").is_err());
         assert_eq!(
             std::fs::read(dir.path().join("NS39_KK3_MAX_V5.9.bin")).unwrap(),
             b"previous attempt"
@@ -200,13 +220,33 @@ mod tests {
     fn exact_bytes_are_durable_before_checked_close() {
         let root = tempfile::tempdir().unwrap();
         let mut volume = Volume::open(root.path()).unwrap();
-        volume.create().unwrap();
+        volume.create("NS39_KK3_MAX_V3.1.bin").unwrap();
         volume.write(b"unchanged bytes").unwrap();
         volume.flush().unwrap();
         volume.close().unwrap();
         assert_eq!(
-            std::fs::read(root.path().join("NS39_KK3_MAX_V5.9.bin")).unwrap(),
+            std::fs::read(root.path().join("NS39_KK3_MAX_V3.1.bin")).unwrap(),
             b"unchanged bytes"
         );
+    }
+
+    #[test]
+    fn create_rejects_non_basename_and_reserved_names_without_creating_files() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "../NS39_KK3_MAX_V3.1.bin",
+            "/tmp/NS39_KK3_MAX_V3.1.bin",
+            "folder/NS39_KK3_MAX_V3.1.bin",
+            "folder\\NS39_KK3_MAX_V3.1.bin",
+            "GULI.TXT",
+            "not-firmware.txt",
+        ] {
+            let mut volume = Volume::open(root.path()).unwrap();
+            assert!(
+                volume.create(name).is_err(),
+                "accepted unsafe name {name:?}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }
