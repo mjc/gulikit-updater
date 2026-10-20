@@ -46,7 +46,8 @@ impl NativeDevice {
         }
     }
 }
-pub const NATIVE_UPDATE_SUPPORTED: bool = cfg!(target_os = "macos");
+pub const NATIVE_UPDATE_SUPPORTED: bool =
+    gulikit_platform::host::Host::current().supports_native_updates();
 pub const NATIVE_UPDATE_UNAVAILABLE: &str = "Native device updates currently support macOS only.";
 impl Device for NativeDevice {
     fn run(
