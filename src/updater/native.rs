@@ -10,7 +10,9 @@ use gulikit_core::{
     version::{MainVersion, bluetooth_info},
 };
 #[cfg(target_os = "macos")]
-use gulikit_platform::journal::{Recorded, finalize_record, write_event};
+use gulikit_platform::journal::{
+    ReceiptOwner, Recorded, finalize_record, finalize_record_for_owner, write_event,
+};
 #[cfg(target_os = "macos")]
 use gulikit_platform::macos::{Session, discover};
 use serde_json::Value;
@@ -21,6 +23,17 @@ use serde_json::json;
 #[derive(Default)]
 pub(super) struct Interactive {
     inspected: Option<gulikit_platform::macos::BluetoothSession>,
+    receipt_owner: Option<ReceiptOwner>,
+}
+
+#[cfg(target_os = "macos")]
+impl Interactive {
+    pub(super) fn with_receipt_owner(receipt_owner: Option<ReceiptOwner>) -> Self {
+        Self {
+            inspected: None,
+            receipt_owner,
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -89,6 +102,7 @@ impl Interactive {
                     &target,
                     package.info(),
                     &result,
+                    self.receipt_owner,
                 ))
             }
             Request::Verify {
@@ -98,17 +112,20 @@ impl Interactive {
                 confirm_same_controller,
                 expected_receipt,
             } => verify_attempt(
-                &attempt,
-                &record,
-                confirm_ns39,
-                confirm_same_controller,
-                expected_receipt.as_ref(),
+                VerifyAttempt {
+                    attempt: &attempt,
+                    record: &record,
+                    confirm_ns39,
+                    confirm_same_controller,
+                    expected_receipt: expected_receipt.as_ref(),
+                },
                 cancelled,
                 &mut self.inspected,
+                self.receipt_owner,
             ),
             request => {
                 self.inspected = None;
-                super::execute_frontend(request, cancelled, progress)
+                super::execute_frontend(request, self.receipt_owner, cancelled, progress)
             }
         }
     }
@@ -130,18 +147,21 @@ fn finish_attempt(
     target: &gulikit_platform::discovery::NativeCandidate,
     package: &gulikit_core::package::PackageInfo,
     result: &TransferRecord,
+    receipt_owner: Option<ReceiptOwner>,
 ) -> Value {
     let action = super::operator_action(package.component, result.outcome);
-    finalize_record(
-        journal,
-        json!({"event":"attempt_result","schema_version":1,"target":target,"package":package,"transfer":result,"operator_action":action}),
-    )
+    let record = json!({"event":"attempt_result","schema_version":1,"target":target,"package":package,"transfer":result,"operator_action":action});
+    match receipt_owner {
+        Some(owner) => finalize_record_for_owner(journal, record, owner),
+        None => finalize_record(journal, record),
+    }
 }
 
 #[cfg(target_os = "macos")]
 pub(super) fn execute(
     request: Request,
     mut main_lease: Option<gulikit_platform::lock::ProcessLock>,
+    receipt_owner: Option<ReceiptOwner>,
     cancelled: &mut dyn FnMut() -> bool,
     progress: &mut dyn FnMut(gulikit_core::update::Progress),
 ) -> Result<Value, AppError> {
@@ -181,6 +201,7 @@ pub(super) fn execute(
                 &target,
                 package.info(),
                 &result,
+                receipt_owner,
             ))
         }
         Request::Verify {
@@ -190,13 +211,16 @@ pub(super) fn execute(
             confirm_same_controller,
             expected_receipt,
         } => verify_attempt(
-            &attempt,
-            &record,
-            confirm_ns39,
-            confirm_same_controller,
-            expected_receipt.as_ref(),
+            VerifyAttempt {
+                attempt: &attempt,
+                record: &record,
+                confirm_ns39,
+                confirm_same_controller,
+                expected_receipt: expected_receipt.as_ref(),
+            },
             cancelled,
             &mut None,
+            receipt_owner,
         ),
     }
 }
@@ -301,16 +325,23 @@ fn probe(
 }
 
 #[cfg(target_os = "macos")]
-fn verify_attempt(
-    attempt: &std::path::Path,
-    record: &std::path::Path,
+#[derive(Clone, Copy)]
+struct VerifyAttempt<'a> {
+    attempt: &'a std::path::Path,
+    record: &'a std::path::Path,
     confirm_ns39: bool,
     confirm_same_controller: bool,
-    expected_receipt: Option<&super::ReceiptIdentity>,
+    expected_receipt: Option<&'a super::ReceiptIdentity>,
+}
+
+#[cfg(target_os = "macos")]
+fn verify_attempt(
+    request: VerifyAttempt<'_>,
     cancelled: &mut dyn FnMut() -> bool,
     retained: &mut Option<gulikit_platform::macos::BluetoothSession>,
+    receipt_owner: Option<ReceiptOwner>,
 ) -> Result<Value, AppError> {
-    let prior = read_verification_receipt(attempt, expected_receipt)?;
+    let prior = read_verification_receipt(request.attempt, request.expected_receipt)?;
     let component = prior.component;
     let expected_version = prior.expected_version;
     let previous = prior.outcome;
@@ -322,13 +353,15 @@ fn verify_attempt(
         BluetoothPort::check_session,
         |port| {
             let target = port.target().clone();
-            let mut journal = port.create_record(record).map_err(AppError::host_io)?;
+            let mut journal = port
+                .create_record(request.record)
+                .map_err(AppError::host_io)?;
             start_verification(
                 &mut journal,
-                attempt,
+                request.attempt,
                 &prior,
                 &target,
-                confirm_same_controller,
+                request.confirm_same_controller,
             )?;
             Ok((target, journal))
         },
@@ -337,15 +370,17 @@ fn verify_attempt(
     let (target, mut journal, readback) = if let Some((port, (target, journal))) = retained {
         (target, journal, read_bluetooth_version(port, cancelled))
     } else {
-        let mut session = Session::open(confirm_ns39, component)?;
+        let mut session = Session::open(request.confirm_ns39, component)?;
         let target = session.target.clone();
-        let mut journal = session.create_record(record).map_err(AppError::host_io)?;
+        let mut journal = session
+            .create_record(request.record)
+            .map_err(AppError::host_io)?;
         start_verification(
             &mut journal,
-            attempt,
+            request.attempt,
             &prior,
             &target,
-            confirm_same_controller,
+            request.confirm_same_controller,
         )?;
         (
             target,
@@ -378,8 +413,8 @@ fn verify_attempt(
                 component,
                 previous_generation: generation,
                 generation: target.generation,
-                same_unit_confirmed: confirm_same_controller,
-                model_confirmed: confirm_ns39 || target.has_known_usb_ids(component),
+                same_unit_confirmed: request.confirm_same_controller,
+                model_confirmed: request.confirm_ns39 || target.has_known_usb_ids(component),
                 version,
                 expected_version,
             }),
@@ -391,16 +426,17 @@ fn verify_attempt(
         verify_restart(previous, observation)
     });
     let cleanup_errors: Vec<_> = cleanup.err().into_iter().collect();
-    Ok(finalize_record(
-        &mut journal,
-        json!({
-            "event":"verification_result", "schema_version":1,
-            "source_attempt":record_path(attempt), "verification":observation,
-            "raw_version_bytes":raw_version_bytes, "qualified_bot_lun":qualified_lun, "target":target,
-            "same_unit_association":super::same_unit_association(confirm_same_controller),
-            "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
-        }),
-    ))
+    let record = json!({
+        "event":"verification_result", "schema_version":1,
+        "source_attempt":record_path(request.attempt), "verification":observation,
+        "raw_version_bytes":raw_version_bytes, "qualified_bot_lun":qualified_lun, "target":target,
+        "same_unit_association":super::same_unit_association(request.confirm_same_controller),
+        "transfer":{"outcome":outcome,"error":error,"cleanup_errors":cleanup_errors}
+    });
+    Ok(match receipt_owner {
+        Some(owner) => finalize_record_for_owner(&mut journal, record, owner),
+        None => finalize_record(&mut journal, record),
+    })
 }
 
 #[cfg(any(target_os = "macos", test))]

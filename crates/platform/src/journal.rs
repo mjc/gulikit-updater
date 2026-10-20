@@ -617,13 +617,60 @@ pub fn write_event(journal: &mut File, value: &serde_json::Value) -> Result<(), 
     writeln!(journal).map_err(|e| e.to_string())?;
     journal.sync_all().map_err(|e| e.to_string())
 }
+
+/// The authenticated desktop user's UID that may read a finalized host record.
+///
+/// Instances are created from the UID argument appended by the administrator-
+/// authenticated desktop launcher. A zero UID is never a receipt owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceiptOwner(u32);
+
+impl ReceiptOwner {
+    /// Validate a UID supplied by the administrator-authenticated launcher.
+    ///
+    /// # Errors
+    /// Rejects reserved UID values that cannot identify a receipt owner.
+    pub fn from_authenticated_launcher_uid(uid: u32) -> Result<Self, String> {
+        if uid == 0 || uid == u32::MAX {
+            return Err("Receipt owner UID must be a valid non-root user".into());
+        }
+        Ok(Self(uid))
+    }
+
+    /// Return the validated Unix user ID.
+    #[must_use]
+    pub const fn uid(self) -> u32 {
+        self.0
+    }
+
+    /// Resolve the invoking user's home directory for desktop file pickers.
+    ///
+    /// # Errors
+    /// Returns an error if the account is unavailable or its home is not absolute.
+    #[cfg(unix)]
+    pub fn home_directory(self) -> Result<std::path::PathBuf, String> {
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(self.uid()))
+            .map_err(|error| {
+                format!("Could not resolve the desktop user's home directory: {error}")
+            })?
+            .ok_or("Could not resolve the desktop user's home directory")?;
+        if !user.dir.is_absolute() {
+            return Err("The desktop user's home directory is not absolute".into());
+        }
+        if !user.dir.is_dir() {
+            return Err("The desktop user's home directory is unavailable".into());
+        }
+        Ok(user.dir)
+    }
+}
+
 pub fn finalize_record(journal: &mut File, value: serde_json::Value) -> serde_json::Value {
     finalize_record_with_sync(journal, value, File::sync_all)
 }
 fn finalize_record_with_sync(
     journal: &mut File,
     mut value: serde_json::Value,
-    sync: impl FnOnce(&File) -> std::io::Result<()>,
+    mut sync: impl FnMut(&File) -> std::io::Result<()>,
 ) -> serde_json::Value {
     value["record_finalized"] = false.into();
     let persisted = (|| -> Result<(), String> {
@@ -639,7 +686,8 @@ fn finalize_record_with_sync(
         });
         serde_json::to_writer(&mut *journal, &acknowledgement)
             .map_err(|error| error.to_string())?;
-        writeln!(journal).map_err(|error| error.to_string())
+        writeln!(journal).map_err(|error| error.to_string())?;
+        sync(journal).map_err(|error| error.to_string())
     })();
     if let Err(error) = persisted {
         // Outcome remains a statement about the device observation. Persistence
@@ -659,6 +707,106 @@ fn finalize_record_with_sync(
         value["record_finalized"] = true.into();
     }
     value
+}
+
+/// Finalize a host record, then make the completed receipt readable by its
+/// authenticated desktop user without granting write access.
+///
+/// The result and finalization acknowledgement are synced while the record is
+/// still root-owned. Ownership changes are applied to the already-open record
+/// descriptor, never to a pathname.
+///
+/// # Panics
+/// Panics if `value` is not a shared updater transfer result with a
+/// `transfer.cleanup_errors` array.
+#[cfg(unix)]
+pub fn finalize_record_for_owner(
+    journal: &mut File,
+    value: serde_json::Value,
+    owner: ReceiptOwner,
+) -> serde_json::Value {
+    let mut result = finalize_record(journal, value);
+    if !result["record_finalized"].as_bool().unwrap_or(false) {
+        return result;
+    }
+
+    if let Err(error) = handoff_finalized_record(journal, owner) {
+        result["transfer"]["cleanup_errors"]
+            .as_array_mut()
+            .expect("typed cleanup array")
+            .push(json!(format!(
+                "Finalized host record could not be handed to the desktop user: {error}"
+            )));
+    }
+    result
+}
+
+#[cfg(unix)]
+fn handoff_finalized_record(journal: &File, owner: ReceiptOwner) -> Result<(), String> {
+    use nix::{
+        sys::stat::{Mode, fchmod},
+        unistd::{Uid, fchown},
+    };
+
+    if nix::unistd::geteuid().as_raw() != 0 {
+        return Err("record ownership transfer requires an elevated process".into());
+    }
+
+    handoff_finalized_record_with(journal, owner, |journal, action| match action {
+        HandoffAction::SetMode(mode) => {
+            fchmod(journal, Mode::from_bits_truncate(mode)).map_err(|error| error.to_string())
+        }
+        HandoffAction::SetOwner(uid) => {
+            fchown(journal, Some(Uid::from_raw(uid)), None).map_err(|error| error.to_string())
+        }
+        HandoffAction::Sync => journal.sync_all().map_err(|error| error.to_string()),
+    })
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HandoffAction {
+    SetMode(nix::libc::mode_t),
+    SetOwner(u32),
+    Sync,
+}
+
+#[cfg(unix)]
+fn handoff_finalized_record_with(
+    journal: &File,
+    owner: ReceiptOwner,
+    mut apply: impl FnMut(&File, HandoffAction) -> Result<(), String>,
+) -> Result<(), String> {
+    // Keep the file inaccessible while its owner changes, then expose a
+    // read-only completed receipt. The open root descriptor remains usable.
+    apply(journal, HandoffAction::SetMode(0))?;
+    if let Err(error) = apply(journal, HandoffAction::SetOwner(owner.uid())) {
+        return match apply(journal, HandoffAction::SetMode(0o600)) {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(format!(
+                "ownership change failed ({error}); restoring root-private permissions failed ({restore_error})"
+            )),
+        };
+    }
+    if let Err(error) = apply(journal, HandoffAction::SetMode(0o400)) {
+        // The recipient has no permission bits yet. Restore root ownership and
+        // private access if possible, but retain the original failure even
+        // when rollback succeeds.
+        if let Err(owner_error) = apply(journal, HandoffAction::SetOwner(0)) {
+            return Err(format!(
+                "read-only permission change failed ({error}); restoring root ownership failed ({owner_error}); the record remains inaccessible"
+            ));
+        }
+        return match apply(journal, HandoffAction::SetMode(0o600)) {
+            Ok(()) => Err(format!(
+                "read-only permission change failed ({error}); root-private permissions were restored"
+            )),
+            Err(restore_error) => Err(format!(
+                "read-only permission change failed ({error}); restoring root-private permissions failed ({restore_error})"
+            )),
+        };
+    }
+    apply(journal, HandoffAction::Sync)
 }
 
 #[cfg(test)]
@@ -704,12 +852,25 @@ mod verification_tests {
             "event":"attempt_result", "schema_version":1,
             "transfer":{"outcome":"outcome_unknown", "cleanup_errors":[]}
         });
+        let mut sync_count = 0;
         let result = finalize_record_with_sync(&mut journal, input, |journal| {
-            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(file.path())?)?;
-            assert_eq!(saved["record_finalized"], false);
-            assert_eq!(saved["event"], "attempt_result");
+            sync_count += 1;
+            let saved: Vec<serde_json::Value> = std::fs::read_to_string(file.path())?
+                .lines()
+                .map(serde_json::from_str)
+                .collect::<Result<_, _>>()?;
+            match sync_count {
+                1 => {
+                    assert_eq!(saved.len(), 1);
+                    assert_eq!(saved[0]["record_finalized"], false);
+                    assert_eq!(saved[0]["event"], "attempt_result");
+                }
+                2 => assert_eq!(saved.len(), 2),
+                _ => panic!("unexpected extra sync"),
+            }
             journal.sync_all()
         });
+        assert_eq!(sync_count, 2);
         assert_eq!(result["record_finalized"], true);
         assert_eq!(result["transfer"]["outcome"], "outcome_unknown");
         let saved = std::fs::read_to_string(file.path()).unwrap();
@@ -726,6 +887,18 @@ mod verification_tests {
                 "event":"record_finalized", "schema_version":1,
                 "result_event":"attempt_result",
             })
+        );
+    }
+
+    #[test]
+    fn receipt_owner_rejects_root_and_retains_validated_uid() {
+        assert!(ReceiptOwner::from_authenticated_launcher_uid(0).is_err());
+        assert!(ReceiptOwner::from_authenticated_launcher_uid(u32::MAX).is_err());
+        assert_eq!(
+            ReceiptOwner::from_authenticated_launcher_uid(501)
+                .unwrap()
+                .uid(),
+            501
         );
     }
 
@@ -864,5 +1037,140 @@ mod creation_tests {
         assert!(failed.unwrap_err().contains("directory sync failed"));
         assert!(temporary.path().join("failed.jsonl").is_file());
         assert!(create_host_record(&temporary.path().join(name), &[]).is_err());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ownership_tests {
+    use super::*;
+
+    fn result() -> serde_json::Value {
+        json!({
+            "event":"attempt_result", "schema_version":1,
+            "transfer":{"outcome":"outcome_unknown", "cleanup_errors":[]}
+        })
+    }
+
+    #[test]
+    #[ignore = "requires an elevated host-file-only test process"]
+    fn owner_handoff_changes_only_the_open_record_after_its_ack_is_synced() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        assert_eq!(nix::unistd::geteuid().as_raw(), 0);
+        let owner_uid = nix::unistd::getuid().as_raw();
+        assert_ne!(owner_uid, 0);
+
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("attempt.jsonl");
+        let mut record = create_host_record(&path, &[]).unwrap();
+        let record_inode = record.metadata().unwrap().ino();
+        let replacement = temporary.path().join("replacement.jsonl");
+        std::fs::write(&replacement, b"replacement\n").unwrap();
+        std::fs::rename(&path, temporary.path().join("moved.jsonl")).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let finalized = finalize_record_for_owner(
+            &mut record,
+            result(),
+            ReceiptOwner::from_authenticated_launcher_uid(owner_uid).unwrap(),
+        );
+
+        assert_eq!(finalized["record_finalized"], true);
+        assert_eq!(
+            finalized["transfer"]["cleanup_errors"],
+            serde_json::json!([])
+        );
+        let moved = std::fs::metadata(temporary.path().join("moved.jsonl")).unwrap();
+        assert_eq!(moved.ino(), record_inode);
+        assert_eq!(moved.uid(), owner_uid);
+        assert_eq!(moved.permissions().mode() & 0o777, 0o400);
+        let replacement = std::fs::metadata(&path).unwrap();
+        assert_ne!(replacement.ino(), record_inode);
+        assert_eq!(replacement.uid(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement\n");
+        let events = std::fs::read_to_string(temporary.path().join("moved.jsonl")).unwrap();
+        assert_eq!(events.lines().count(), 2);
+        assert!(events.contains("\"event\":\"record_finalized\""));
+    }
+
+    #[test]
+    fn owner_handoff_failure_preserves_the_durable_root_owned_record() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        assert_ne!(nix::unistd::geteuid().as_raw(), 0);
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("attempt.jsonl");
+        let mut record = create_host_record(&path, &[]).unwrap();
+        let uid = nix::unistd::getuid().as_raw().saturating_add(1);
+        let finalized = finalize_record_for_owner(
+            &mut record,
+            result(),
+            ReceiptOwner::from_authenticated_launcher_uid(uid).unwrap(),
+        );
+
+        assert_eq!(finalized["record_finalized"], true);
+        assert_eq!(
+            finalized["transfer"]["cleanup_errors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let metadata = std::fs::metadata(path).unwrap();
+        assert_eq!(metadata.uid(), nix::unistd::getuid().as_raw());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read_to_string(temporary.path().join("attempt.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn ordinary_finalization_keeps_the_existing_owner_and_private_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("attempt.jsonl");
+        let mut record = create_host_record(&path, &[]).unwrap();
+        let original_owner = record.metadata().unwrap().uid();
+
+        let finalized = finalize_record(&mut record, result());
+
+        assert_eq!(finalized["record_finalized"], true);
+        let metadata = std::fs::metadata(path).unwrap();
+        assert_eq!(metadata.uid(), original_owner);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn successful_permission_rollback_still_reports_handoff_failure() {
+        let file = tempfile::tempfile().unwrap();
+        let owner = ReceiptOwner::from_authenticated_launcher_uid(501).unwrap();
+        let mut actions = Vec::new();
+
+        let error = handoff_finalized_record_with(&file, owner, |_, action| {
+            actions.push(action);
+            match action {
+                HandoffAction::SetMode(0o400) => Err("injected read-only mode failure".into()),
+                _ => Ok(()),
+            }
+        })
+        .unwrap_err();
+
+        assert!(error.contains("injected read-only mode failure"));
+        assert!(error.contains("root-private permissions were restored"));
+        assert_eq!(
+            actions,
+            [
+                HandoffAction::SetMode(0),
+                HandoffAction::SetOwner(501),
+                HandoffAction::SetMode(0o400),
+                HandoffAction::SetOwner(0),
+                HandoffAction::SetMode(0o600),
+            ]
+        );
     }
 }

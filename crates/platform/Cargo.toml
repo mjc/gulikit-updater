@@ -14,7 +14,7 @@ serde_json = "1"
 thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["fs", "signal", "process"] }
+nix = { version = "0.31.3", features = ["fs", "signal", "process", "user"] }
 rustix = { version = "1.1.5", features = ["net", "time"] }
 
 [build-dependencies]

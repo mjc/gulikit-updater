@@ -31,6 +31,20 @@ pub trait Device {
 #[derive(Default)]
 pub struct NativeDevice {
     application: updater::InteractiveUpdater,
+    record_directory: Option<PathBuf>,
+}
+impl NativeDevice {
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn with_receipt_owner(
+        owner: Option<gulikit_platform::journal::ReceiptOwner>,
+        record_directory: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            application: updater::InteractiveUpdater::with_receipt_owner(owner),
+            record_directory,
+        }
+    }
 }
 pub const NATIVE_UPDATE_SUPPORTED: bool = cfg!(target_os = "macos");
 pub const NATIVE_UPDATE_UNAVAILABLE: &str = "Native device updates currently support macOS only.";
@@ -41,13 +55,19 @@ impl Device for NativeDevice {
         cancelled: &AtomicBool,
         emit: &mut dyn FnMut(Event),
     ) -> Result<Event, String> {
-        run_native(work, cancelled, emit, &mut |request, cancelled, emit| {
-            self.application.execute(
-                request,
-                &mut || cancelled.load(Ordering::Acquire),
-                &mut |progress| emit(Event::Progress(progress)),
-            )
-        })
+        run_native(
+            work,
+            cancelled,
+            emit,
+            self.record_directory.as_deref(),
+            &mut |request, cancelled, emit| {
+                self.application.execute(
+                    request,
+                    &mut || cancelled.load(Ordering::Acquire),
+                    &mut |progress| emit(Event::Progress(progress)),
+                )
+            },
+        )
     }
 }
 
@@ -142,18 +162,22 @@ pub fn inspect_selected_package(path: &Path, component: Component) -> Result<Eve
     })
 }
 
-fn record_path() -> Option<PathBuf> {
-    rfd::FileDialog::new()
+fn record_path(initial_directory: Option<&Path>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new()
         .set_title("Save a new host operation record")
         .add_filter("Operation record", &["jsonl"])
-        .set_file_name("gulikit-attempt.jsonl")
-        .save_file()
+        .set_file_name("gulikit-attempt.jsonl");
+    if let Some(directory) = initial_directory {
+        dialog = dialog.set_directory(directory);
+    }
+    dialog.save_file()
 }
 
 fn run_native(
     work: Work,
     cancelled: &AtomicBool,
     emit: &mut dyn FnMut(Event),
+    record_directory: Option<&Path>,
     perform: &mut impl FnMut(Request, &AtomicBool, &mut dyn FnMut(Event)) -> Result<Reply, String>,
 ) -> Result<Event, String> {
     if cancelled.load(Ordering::Acquire) {
@@ -200,7 +224,7 @@ fn run_native(
                 },
                 cancelled,
                 emit,
-                record_path,
+                || record_path(record_directory),
                 perform,
             )
         }
@@ -215,6 +239,7 @@ fn run_native(
             expected_receipt,
             cancelled,
             emit,
+            record_directory,
             perform,
         ),
         Work::ConfigureDemo(_) | Work::ChooseSample { .. } => {
@@ -338,9 +363,10 @@ fn verify(
     expected_receipt: ReceiptIdentity,
     cancelled: &AtomicBool,
     emit: &mut dyn FnMut(Event),
+    record_directory: Option<&Path>,
     perform: &mut impl FnMut(Request, &AtomicBool, &mut dyn FnMut(Event)) -> Result<Reply, String>,
 ) -> Result<Event, String> {
-    let Some(record) = record_path() else {
+    let Some(record) = record_path(record_directory) else {
         return Ok(Event::Cancelled);
     };
     if cancelled.load(Ordering::Acquire) {

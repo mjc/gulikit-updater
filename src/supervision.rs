@@ -32,6 +32,7 @@ pub struct MainUpdate {
     pub confirm_ns39: bool,
     pub expected_attachment: Option<Attachment>,
     pub expected_package: Option<PackageInfo>,
+    pub receipt_owner: Option<gulikit_platform::journal::ReceiptOwner>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,6 +44,7 @@ struct WorkerRequest {
     confirm_ns39: bool,
     expected_attachment: Option<Attachment>,
     expected_package: Option<PackageInfo>,
+    receipt_owner_uid: Option<u32>,
 }
 
 fn subprocess(argument: &str) -> Result<Command, ApplicationError> {
@@ -69,6 +71,9 @@ pub fn update(
         confirm_ns39: request.confirm_ns39,
         expected_attachment: request.expected_attachment,
         expected_package: request.expected_package,
+        receipt_owner_uid: request
+            .receipt_owner
+            .map(gulikit_platform::journal::ReceiptOwner::uid),
     };
     let response = gulikit_platform::main_worker::run_with_progress(
         subprocess("__main-guardian")?,
@@ -113,6 +118,10 @@ fn worker(channel: &mut Channel) -> Result<(), ApplicationError> {
     };
     let request: WorkerRequest =
         serde_json::from_value(request).map_err(|error| error.to_string())?;
+    let receipt_owner = request
+        .receipt_owner_uid
+        .map(gulikit_platform::journal::ReceiptOwner::from_authenticated_launcher_uid)
+        .transpose()?;
     let archive = PathBuf::from(std::ffi::OsString::from_vec(request.archive));
     let record = PathBuf::from(std::ffi::OsString::from_vec(request.record));
     let model = request
@@ -162,6 +171,7 @@ fn worker(channel: &mut Channel) -> Result<(), ApplicationError> {
     let value = updater::execute_main_worker(
         command,
         lease,
+        receipt_owner,
         &mut || cancelled.load(Ordering::Acquire),
         &mut |value| {
             let _ = channel.try_send_progress(value);

@@ -12,15 +12,26 @@ use slint::ComponentHandle;
 slint::include_modules!();
 
 fn main() -> Result<(), slint::PlatformError> {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     #[cfg(target_os = "macos")]
-    if let Some(code) = std::env::args_os()
-        .nth(1)
-        .as_deref()
+    if let Some(code) = arguments
+        .first()
+        .map(std::ffi::OsString::as_os_str)
         .and_then(gulikit_updater::supervision::dispatch_internal)
     {
         std::process::exit(i32::from(code));
     }
-    let mut args = std::env::args_os().skip(1);
+
+    #[cfg(target_os = "macos")]
+    let (arguments, launcher_receipt_owner) = {
+        let mut arguments = arguments;
+        let owner =
+            elevation::take_launcher_receipt_owner(&mut arguments, nix::unistd::geteuid().as_raw())
+                .map_err(slint::PlatformError::Other)?;
+        (arguments, owner)
+    };
+
+    let mut args = arguments.into_iter();
     let argument = args.next();
     let extra = args.next().is_some();
     if !extra
@@ -40,9 +51,11 @@ fn main() -> Result<(), slint::PlatformError> {
         ));
     }
     #[cfg(target_os = "macos")]
-    if !demo {
-        match elevation::ensure_administrator() {
-            Ok(elevation::StartupDisposition::Continue) => {}
+    let receipt_owner = if demo {
+        None
+    } else {
+        match elevation::ensure_administrator(launcher_receipt_owner) {
+            Ok(elevation::StartupDisposition::Continue { receipt_owner }) => receipt_owner,
             Ok(elevation::StartupDisposition::Exit) => return Ok(()),
             Err(error) => {
                 rfd::MessageDialog::new()
@@ -53,13 +66,35 @@ fn main() -> Result<(), slint::PlatformError> {
                 return Err(slint::PlatformError::Other(error));
             }
         }
-    }
+    };
+    #[cfg(target_os = "macos")]
+    let record_directory = receipt_owner
+        .map(gulikit_platform::journal::ReceiptOwner::home_directory)
+        .transpose()
+        .map_err(|error| {
+            rfd::MessageDialog::new()
+                .set_title("GuliKit Updater could not start")
+                .set_description(&error)
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            slint::PlatformError::Other(error)
+        })?;
+
     #[cfg(target_os = "macos")]
     initialize_desktop_backend()?;
     let (worker, events) = if demo {
         Worker::spawn(DemoDevice::default())
     } else {
-        Worker::spawn_with(NativeDevice::default)
+        #[cfg(target_os = "macos")]
+        {
+            Worker::spawn_with(move || {
+                NativeDevice::with_receipt_owner(receipt_owner, record_directory)
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Worker::spawn_with(NativeDevice::default)
+        }
     };
     let (ui, timer) = live_ui::create_mode(
         worker.requests.clone(),

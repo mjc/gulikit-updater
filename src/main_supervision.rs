@@ -37,6 +37,7 @@ pub fn update(command: Command) -> Result<Value, AppError> {
             },
             expected_attachment: None,
             expected_package: None,
+            receipt_owner: None,
         },
         &mut || cancelled.load(Ordering::Acquire),
         &mut |_| {},

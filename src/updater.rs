@@ -332,6 +332,18 @@ pub struct InteractiveUpdater {
 }
 
 impl InteractiveUpdater {
+    /// Construct an interactive updater whose finalized host records are
+    /// readable by the authenticated desktop user.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn with_receipt_owner(
+        receipt_owner: Option<gulikit_platform::journal::ReceiptOwner>,
+    ) -> Self {
+        Self {
+            native: native::Interactive::with_receipt_owner(receipt_owner),
+        }
+    }
+
     /// Execute a request, retaining a successful Bluetooth inspection for update.
     ///
     /// # Errors
@@ -371,16 +383,19 @@ pub fn execute(
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Reply, String> {
     let reply = ReplyContext::for_request(&request);
-    let value = execute_frontend(request, cancelled, progress)
+    let value = execute_frontend(request, None, cancelled, progress)
         .map_err(|error| format!("{}; cleanup={:?}", error.message, error.cleanup_errors))?;
     reply.decode(value)
 }
 
 fn execute_frontend(
     request: Request,
+    receipt_owner: Option<gulikit_platform::journal::ReceiptOwner>,
     cancelled: &mut dyn FnMut() -> bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<serde_json::Value, ApplicationError> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = receipt_owner;
     match request {
         #[cfg(target_os = "macos")]
         Request::Update {
@@ -399,6 +414,7 @@ fn execute_frontend(
                 confirm_ns39,
                 expected_attachment,
                 expected_package: Some(package.info().clone()),
+                receipt_owner,
             },
             cancelled,
             progress,
@@ -559,7 +575,7 @@ pub fn execute_raw(
 ) -> Result<serde_json::Value, ApplicationError> {
     #[cfg(target_os = "macos")]
     {
-        native::execute(request, None, cancelled, progress)
+        native::execute(request, None, None, cancelled, progress)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -577,11 +593,12 @@ pub fn execute_raw(
 pub fn execute_main_worker(
     request: Request,
     lease: gulikit_platform::lock::ProcessLock,
+    receipt_owner: Option<gulikit_platform::journal::ReceiptOwner>,
     cancelled: &mut dyn FnMut() -> bool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<serde_json::Value, ApplicationError> {
     match &request {
-        Request::Update { package, .. } if package.info().component == Component::Main => native::execute(request, Some(lease), cancelled, progress),
+        Request::Update { package, .. } if package.info().component == Component::Main => native::execute(request, Some(lease), receipt_owner, cancelled, progress),
         _ => Err("Filesystem supervision is restricted to Main updates; never terminate a Bluetooth capture worker".into()),
     }
 }
