@@ -21,6 +21,8 @@ jobs:
         run: nix run github:cachix/devenv/b904dcb51fe48c30db250038241507f60752f222 -- shell -- treefmt --fail-on-change --no-cache
   rust:
     name: Rust (${{ matrix.os }})
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.os == 'macos-latest' && '13.0' || '' }}
     strategy:
       fail-fast: false
       matrix:

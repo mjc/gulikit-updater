@@ -1,8 +1,10 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/macos.m");
+    println!("cargo:rerun-if-changed=src/macos_helper.m");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         cc::Build::new()
             .file("src/macos.m")
+            .file("src/macos_helper.m")
             .flag("-fobjc-arc")
             .flag("-fblocks")
             .flag("-Wall")
@@ -15,6 +17,7 @@ fn main() {
             "IOUSBHost",
             "DiskArbitration",
             "Security",
+            "ServiceManagement",
         ] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
